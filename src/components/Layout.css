@@ -1,0 +1,49 @@
+.layout {
+  min-height: 100vh;
+  background-color: #0f0f12;
+  color: #e5e7eb;
+}
+
+.layout-body {
+  display: flex;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  gap: 1.5rem;
+}
+
+.sidebar {
+  width: 280px;
+  flex-shrink: 0;
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem;
+}
+
+@media (max-width: 1024px) {
+  .layout-body {
+    padding: 1rem;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .sidebar.sidebar-open {
+    display: flex;
+  }
+
+  .main-content {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .layout-body {
+    padding: 0.75rem;
+    gap: 1rem;
+  }
+}

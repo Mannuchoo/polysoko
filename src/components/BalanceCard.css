@@ -1,0 +1,102 @@
+.balance-card {
+  background-color: #1a1a20;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  border: 1px solid #2a2a32;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+}
+
+.balance-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.balance-title {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #9ca3af;
+  margin: 0;
+}
+
+.balance-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #10b981;
+  background-color: rgba(16, 185, 129, 0.1);
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.balance-main {
+  margin-bottom: 1.5rem;
+}
+
+.balance-amount {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+
+.balance-details {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2a2a32;
+}
+
+.balance-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1;
+}
+
+.balance-label {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.balance-value {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.balance-value.available {
+  color: #10b981;
+}
+
+.balance-value.pending {
+  color: #f59e0b;
+}
+
+.balance-divider {
+  width: 1px;
+  height: 2.5rem;
+  background-color: #2a2a32;
+}
+
+@media (max-width: 640px) {
+  .balance-amount {
+    font-size: 2rem;
+  }
+
+  .balance-details {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .balance-divider {
+    width: 100%;
+    height: 1px;
+  }
+}
