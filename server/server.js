@@ -146,13 +146,25 @@ app.use((req, res, next) => {
 });
 // Health probe used by Railway's deployment healthcheck. Registered ahead of the
 // global rate limiter so that platform probes never consume the public API quota.
-app.get('/api/health', (req, res) => {
+// Reports database reachability, but always returns 200 while the HTTP server is
+// listening so a transient DB blip cannot cause a restart loop.
+app.get('/api/health', async (req, res) => {
+    let database = 'unknown';
+    let databaseReachable = false;
+    try {
+        await dbGet('SELECT 1 AS ok');
+        databaseReachable = true;
+        database = isPostgresDatabaseUrl ? 'postgresql' : 'sqlite';
+    } catch (err) {
+        database = `unreachable: ${err.message}`;
+    }
     res.status(200).json({
         success: true,
         service: 'polysoko-api',
-        status: 'healthy',
+        status: databaseReachable ? 'healthy' : 'degraded',
         port: Number(PORT) || null,
-        database: isPostgresDatabaseUrl ? 'postgresql' : 'sqlite',
+        database,
+        databaseReachable,
         uptimeSeconds: Math.round(process.uptime()),
         timestamp: new Date().toISOString()
     });
@@ -5599,29 +5611,59 @@ const tryAutoKillPort = async () => {
     } catch (e) { console.error('AUTO_KILL_PORT failed:', e.message); }
 };
 
+// Startup housekeeping must never take the HTTP server down with it. Each step is
+// isolated so a single failing query cannot crash the process (which previously
+// produced an unhandled rejection and took the whole container offline).
+const runSafely = (label, task) => {
+    Promise.resolve()
+        .then(task)
+        .catch(err => console.error(`Startup task "${label}" failed (continuing):`, err.message));
+};
+
 const startServer = async () => {
     await tryAutoKillPort();
-    await repairSportsMarketMetadata();
-    await repairGeneratedMarketTitles();
+
+    // Bind the port FIRST, before any database work.
+    // Railway (and most PaaS routers) fail the deployment with a 502 if the
+    // process is not accepting connections within the startup window. The schema
+    // repair below talks to Postgres, so any connection failure or slow query
+    // used to reject here and kill the process *before* it ever listened.
+    server.listen(PORT, '0.0.0.0');
+
+    // Schema repairs run after the socket is open and must never be able to
+    // prevent the API from coming up. Failures are logged and retried on the
+    // next deploy rather than crashing the service.
+    const runStartupRepairs = async () => {
+        try {
+            await repairSportsMarketMetadata();
+            await repairGeneratedMarketTitles();
+        } catch (err) {
+            console.error('Startup schema repair failed (serving anyway):', err.message);
+        }
+    };
 
     server.listen(PORT, '0.0.0.0', async () => {
         console.log(`🚀 Terminal Online on Port ${PORT}`);
+        // Socket is already accepting connections; safe to touch the DB now.
+        runStartupRepairs();
         const skipStartupSync = process.env.SKIP_STARTUP_SYNC === '1' || process.env.SKIP_STARTUP_SYNC === 'true';
+        // Every background/startup job is wrapped so a transient failure cannot
+        // reject unhandled and terminate the Node process on Railway.
         if (!skipStartupSync) {
-            await fixMissingMarketTimes();
-            await cleanupOutdatedMarkets();
-            await syncAllMarkets();
-            await syncFootballMarkets();
-            await syncSportsMarkets();
-            await syncFootballNews();
-            await refreshBoostedMarkets();
-            await runSettlementEngine();
+            runSafely('fixMissingMarketTimes', fixMissingMarketTimes);
+            runSafely('cleanupOutdatedMarkets', cleanupOutdatedMarkets);
+            runSafely('syncAllMarkets', syncAllMarkets);
+            runSafely('syncFootballMarkets', syncFootballMarkets);
+            runSafely('syncSportsMarkets', syncSportsMarkets);
+            runSafely('syncFootballNews', syncFootballNews);
+            runSafely('refreshBoostedMarkets', refreshBoostedMarkets);
+            runSafely('runSettlementEngine', runSettlementEngine);
+            runSafely('syncWeatherMarkets', syncWeatherMarkets);
             setInterval(syncAllMarkets, 3600000);
             setInterval(syncFootballMarkets, 3600000);
             setInterval(syncSportsMarkets, 3600000);
             setInterval(syncFootballNews, 7200000); // every 2 hours
             setInterval(refreshBoostedMarkets, 86400000);
-            await syncWeatherMarkets();
             setInterval(syncWeatherMarkets, 86400000);
             setInterval(cleanupOutdatedMarkets, 3600000);
             setInterval(sendDailyMarkets, 86400000);
@@ -5631,7 +5673,7 @@ const startServer = async () => {
         } else {
             console.log('SKIP_STARTUP_SYNC enabled; background market sync is disabled for this run.');
         }
-        await forceVerifyLegacyUsers();
+        runSafely('forceVerifyLegacyUsers', forceVerifyLegacyUsers);
         if (process.env.EXIT_AFTER_STARTUP === '1' || process.env.EXIT_AFTER_STARTUP === 'true') {
             console.log('EXIT_AFTER_STARTUP set — exiting process so you can run in VS Code.');
             setTimeout(() => process.exit(0), 250);
