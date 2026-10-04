@@ -53,6 +53,8 @@ const allowedOrigins = [
     'https://mannuchoo.github.io',
     'https://polysoko.online',
     'https://www.polysoko.online',
+    'http://localhost:3000',
+    'http://localhost:5173',
     configuredPublicSiteUrl,
     configuredPublicApiBase,
     ...configuredCorsOrigins,
@@ -87,7 +89,7 @@ const staticOptions = {
     }
 };
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET must be set");
 }
@@ -186,6 +188,30 @@ function normalizeDbArgs(params, callback) {
     return { params: params || [], callback };
 }
 
+function replacePlaceholders(sql) {
+    // Rewrite SQLite `?` placeholders as PostgreSQL `$1, $2, ...` while leaving
+    // any question mark inside a quoted string literal untouched (for example
+    // `title NOT LIKE '%?'` must not become `'%$1'`).
+    let index = 0;
+    let out = '';
+    let inString = false;
+    for (let i = 0; i < sql.length; i++) {
+        const ch = sql[i];
+        if (inString) {
+            out += ch;
+            if (ch === "'") {
+                if (sql[i + 1] === "'") { out += "'"; i++; }
+                else inString = false;
+            }
+            continue;
+        }
+        if (ch === "'") { inString = true; out += ch; continue; }
+        if (ch === '?') { out += '$' + (++index); continue; }
+        out += ch;
+    }
+    return out;
+}
+
 function translatePostgresSql(sql) {
     let translated = String(sql || '').trim();
 
@@ -201,8 +227,7 @@ function translatePostgresSql(sql) {
         .replace(/datetime\('now',\s*'-7 days'\)/gi, "NOW() - INTERVAL '7 days'")
         .replace(/datetime\('now',\s*'-1 day'\)/gi, "NOW() - INTERVAL '1 day'");
 
-    let index = 0;
-    translated = translated.replace(/\?/g, () => `${++index}`);
+    translated = replacePlaceholders(translated);
 
     if (/^INSERT\s+INTO\s+/i.test(translated) && !/\bRETURNING\b/i.test(translated)) {
         translated += ' RETURNING id';
@@ -211,10 +236,27 @@ function translatePostgresSql(sql) {
     return { sql: translated };
 }
 
+function shouldUsePostgresSsl(connectionString) {
+    // SSL is mandatory on Railway / managed Postgres: force it for production
+    // and for any non-local host, while keeping localhost connections plain.
+    if (process.env.NODE_ENV === 'production') return true;
+    if (String(process.env.PGSSLMODE || '').toLowerCase() === 'require') return true;
+    try {
+        const host = new URL(connectionString).hostname.toLowerCase();
+        return !['localhost', '127.0.0.1', '::1'].includes(host) && !host.endsWith('.local');
+    } catch {
+        return false;
+    }
+}
+
 function createPostgresCompatDb(connectionString) {
-    const pool = new Pool({
+    const pool = new pg.Pool({
         connectionString,
-        ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : undefined
+        ssl: shouldUsePostgresSsl(connectionString) ? { rejectUnauthorized: false } : undefined
+    });
+
+    pool.on('error', (err) => {
+        console.error('Unexpected PostgreSQL pool error:', err.message);
     });
 
     const tableInfo = async (tableName) => {
@@ -228,11 +270,51 @@ function createPostgresCompatDb(connectionString) {
         return result.rows;
     };
 
+    // A single pooled client is pinned while a transaction is open so that
+    // BEGIN / COMMIT / ROLLBACK and the statements in between run on the same
+    // connection (a bare pg.Pool would spread them across different clients).
+    let transactionClient = null;
+
     const query = async (sql, params = []) => {
         const pragmaMatch = String(sql || '').match(/^\s*PRAGMA\s+table_info\(([^)]+)\)\s*;?\s*$/i);
         if (pragmaMatch) return { rows: await tableInfo(pragmaMatch[1]), rowCount: 0 };
         const translated = translatePostgresSql(sql);
-        return pool.query(translated.sql, params);
+        const text = translated.sql;
+        const bare = text.toUpperCase();
+
+        if (bare === 'BEGIN') {
+            if (!transactionClient) {
+                const client = await pool.connect();
+                try {
+                    await client.query('BEGIN');
+                    transactionClient = client;
+                } catch (err) {
+                    client.release();
+                    throw err;
+                }
+            }
+            return { rows: [], rowCount: 0 };
+        }
+
+        if (bare === 'COMMIT' || bare === 'ROLLBACK') {
+            if (!transactionClient) return { rows: [], rowCount: 0 };
+            const client = transactionClient;
+            transactionClient = null;
+            try {
+                await client.query(bare);
+            } finally {
+                client.release();
+            }
+            return { rows: [], rowCount: 0 };
+        }
+
+        try {
+            if (transactionClient) return await transactionClient.query(text, params);
+            return await pool.query(text, params);
+        } catch (err) {
+            console.error('PostgreSQL query failed:', err.message, '\nSQL:', text);
+            throw err;
+        }
     };
 
     return {
@@ -294,7 +376,8 @@ async function ensureDbColumn(tableName, columnName, definition) {
     try {
         await dbRun(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition.replace(/,$/, '')}`);
     } catch (e) {
-        if (!/duplicate column name/i.test(e.message || '')) throw e;
+        // Postgres raises 42701 ("column ... already exists"); SQLite says "duplicate column name".
+        if (e.code !== '42701' && !/duplicate column|already exists/i.test(e.message || '')) throw e;
     }
 }
 
@@ -1507,7 +1590,7 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     db.all(`PRAGMA table_info(${tableName})`, (err, columns) => {
         if (err || !columns) return;
 
-        const exists = columns.some(col => col.name === columnName);
+        const exists = columns.some(col => String(col.name).toLowerCase() === String(columnName).toLowerCase());
         
         if (!exists) {
             const cleanDef = definition.replace(/,$/, '');
@@ -1902,6 +1985,18 @@ async function repairSportsMarketMetadata() {
         const status = validStatuses.has(String(row.status || '').toLowerCase())
             ? row.status
             : computeMarketStatus(row.startTime);
+
+        // Skip writes when the row already matches (avoids piling up no-op
+        // UPDATEs on every boot, which is costly on remote PostgreSQL).
+        if (
+            row.category === 'sports' &&
+            row.sport === sport &&
+            row.country === country &&
+            row.status === status
+        ) {
+            continue;
+        }
+
 
         await dbRun(
             `UPDATE markets

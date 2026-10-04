@@ -16,7 +16,9 @@ if (!databaseUrl || !/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
 const sqlite = new sqlite3.Database(sqlitePath, sqlite3.OPEN_READONLY);
 const pg = new Pool({
   connectionString: databaseUrl,
-  ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : undefined,
+  ssl: (process.env.NODE_ENV === 'production' || process.env.PGSSLMODE === 'require')
+    ? { rejectUnauthorized: false }
+    : undefined,
 });
 
 function sqliteAll(sql, params = []) {
