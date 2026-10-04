@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy:sftp": "npm run build && node ./scripts/deploy-sftp.js"
+    "deploy:sftp": "npm run build && node ./scripts/deploy-sftp.js",
+    "start": "node server/server.js",
+    "start:server": "node server/server.js"
   },
   "dependencies": {
     "react": "^18.2.0",

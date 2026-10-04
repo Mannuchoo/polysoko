@@ -58,7 +58,28 @@ const SOKO_ABI = [
 ];
 
 // 6. Create Contract Instance
-const sokoContract = new ethers.Contract(CONTRACT_ADDRESS, SOKO_ABI, adminWallet);
+// `new ethers.Contract(...)` throws synchronously when the address is missing or
+// malformed. Because blockchain.js is imported at the top of server.js, that throw
+// used to abort the process during module evaluation — before the HTTP server ever
+// bound a port — which surfaced on Railway as "Application failed to respond".
+// A placeholder zero address keeps the module importable; blockchain calls then
+// fail loudly at call time instead of taking the whole API offline at boot.
+const EFFECTIVE_CONTRACT_ADDRESS = (CONTRACT_ADDRESS && isAddress(CONTRACT_ADDRESS))
+    ? CONTRACT_ADDRESS
+    : '0x0000000000000000000000000000000000000000';
+
+if (CONTRACT_ADDRESS && !isAddress(CONTRACT_ADDRESS)) {
+    console.error('⚠️  SOKO_CONTRACT_ADDRESS is not a valid address; on-chain transfers are disabled until it is fixed.');
+} else if (!CONTRACT_ADDRESS) {
+    console.error('⚠️  SOKO_CONTRACT_ADDRESS is not set; on-chain transfers are disabled until it is configured.');
+}
+
+let sokoContract = null;
+try {
+    sokoContract = new ethers.Contract(EFFECTIVE_CONTRACT_ADDRESS, SOKO_ABI, adminWallet);
+} catch (error) {
+    console.error('⚠️  Failed to initialise SOKO contract:', error.message);
+}
 
 /**
  * EXPORTED FUNCTIONS
@@ -66,6 +87,7 @@ const sokoContract = new ethers.Contract(CONTRACT_ADDRESS, SOKO_ABI, adminWallet
 
 export const getSokoBalance = async (address) => {
     try {
+        if (!sokoContract) return "0";
         if (!isAddress(address)) return "0";
         const balance = await sokoContract.balanceOf(address);
         const decimals = await sokoContract.decimals();
@@ -78,6 +100,7 @@ export const getSokoBalance = async (address) => {
 
 export const sendSoko = async (toAddress, amount) => {
     try {
+        if (!sokoContract) return { success: false, error: "SOKO contract is not configured" };
         if (!isAddress(toAddress)) throw new Error("Invalid recipient address");
         
         const decimals = await sokoContract.decimals();

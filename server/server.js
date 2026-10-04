@@ -92,10 +92,14 @@ const staticOptions = {
 };
 
 const PORT = process.env.PORT || 3000;
+// A missing JWT_SECRET must not prevent the HTTP server from booting. Previously
+// this threw at module scope, which killed the process before it could bind a port
+// and left Railway returning 502. Startup now continues so the service stays
+// reachable and /api/health can surface the misconfiguration.
 if (!process.env.JWT_SECRET) {
-  throw new Error("JWT_SECRET must be set");
+  console.error('[FATAL CONFIG] JWT_SECRET is not set. Authentication will be rejected until it is configured.');
 }
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || '';
 const ADMIN_TILL = process.env.MPESA_TILL || process.env.BUYGOODS_TILL || '4447028';
 const MPESA_ENV = String(process.env.MPESA_ENV || 'sandbox').toLowerCase();
 const MPESA_BASE_URL = MPESA_ENV === 'production'
@@ -109,11 +113,34 @@ const SPORTS_SYNC_DAYS = Number.isFinite(sportsSyncDaysConfig)
     ? Math.max(2, Math.min(sportsSyncDaysConfig, 30))
     : 14;
 const DEFAULT_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
-const at = AfricasTalking({
-    apiKey: process.env.AT_API_KEY,
-    username: process.env.AT_USERNAME
-});
-const sms = at.SMS;
+// AfricasTalking validates its credentials at construction time and throws
+// ("Username can't be blank") when AT_USERNAME / AT_API_KEY are absent. That throw
+// happened at module scope, so the process died before binding a port and Railway
+// reported "Application failed to respond". Build the client defensively: SMS is
+// simply unavailable until the credentials are configured.
+let at = null;
+let sms = null;
+try {
+    if (process.env.AT_USERNAME && process.env.AT_API_KEY) {
+        at = AfricasTalking({
+            apiKey: process.env.AT_API_KEY,
+            username: process.env.AT_USERNAME
+        });
+        sms = at.SMS;
+    } else {
+        console.error('[WARN] AT_USERNAME / AT_API_KEY not set; SMS notifications are disabled.');
+    }
+} catch (err) {
+    console.error('[WARN] Failed to initialise AfricasTalking client; SMS disabled:', err.message);
+}
+
+// Safe wrapper so the many `sms.send(...)` call sites keep working (and simply
+// become no-ops) when Africa's Talking credentials are not configured. Without this,
+// any code path that tried to notify a user would throw a TypeError on `null`.
+const sendSms = async (options) => {
+    if (!sms) return { skipped: true, reason: 'AfricasTalking not configured' };
+    return sms.send(options);
+};
 
 app.use(
   helmet({
@@ -161,10 +188,11 @@ app.get('/api/health', async (req, res) => {
     res.status(200).json({
         success: true,
         service: 'polysoko-api',
-        status: databaseReachable ? 'healthy' : 'degraded',
+        status: databaseReachable && !!JWT_SECRET ? 'healthy' : 'degraded',
         port: Number(PORT) || null,
         database,
         databaseReachable,
+        jwtConfigured: !!JWT_SECRET,
         uptimeSeconds: Math.round(process.uptime()),
         timestamp: new Date().toISOString()
     });
@@ -452,7 +480,7 @@ function buildNewsQuestion(headline) {
     const clean = String(headline || '')
         .replace(/\s+-\s+[^-]+$/, '')
         .replace(/\[[^\]]+\]/g, '')
-        .replace(/^['"“”]+|['"“”]+$/g, '')
+        .replace(/^['"â€œâ€]+|['"â€œâ€]+$/g, '')
         .replace(/\s+/g, ' ')
         .replace(/\?+$/g, '')
         .trim();
@@ -579,7 +607,7 @@ function buildContextMarketQuestion(headline) {
 
 function buildClauseQuestion(headline) {
     const clean = String(headline || '').trim();
-    const quotedClaim = clean.match(/^(.+?)\s+(?:says?|claims?|reports?|announces?)\s+['"“](.+?)['"”]?$/i);
+    const quotedClaim = clean.match(/^(.+?)\s+(?:says?|claims?|reports?|announces?)\s+['"â€œ](.+?)['"â€]?$/i);
     if (quotedClaim?.[1] && quotedClaim?.[2]) {
         return `Is ${cleanMarketSubject(quotedClaim[1])}'s claim accurate?`;
     }
@@ -648,7 +676,7 @@ function cleanMarketSubject(value) {
         .replace(/^(breaking|update|exclusive|analysis|live):\s*/i, '')
         .replace(/\b(favorites?|favourites?|favored|favoured|backed|tipped|likely|odds-on|front[- ]?runners?)\b/ig, '')
         .replace(/\b(to|for)\s*$/i, '')
-        .replace(/["“”]/g, '')
+        .replace(/["â€œâ€]/g, '')
         .replace(/\s+/g, ' ')
         .replace(/^(that|whether)\s+/i, '')
         .replace(/[,;:.!?]+$/g, '')
@@ -659,7 +687,7 @@ function cleanMarketPredicate(value) {
     return String(value || '')
         .replace(/^that\s+/i, '')
         .replace(/\s+-\s+[^-]+$/, '')
-        .replace(/["“”]/g, '')
+        .replace(/["â€œâ€]/g, '')
         .replace(/\s+/g, ' ')
         .replace(/[,;:.!?]+$/g, '')
         .trim();
@@ -1295,7 +1323,7 @@ async function callAI({ engine = 'gpt', messages = null, promptText = '', suppre
             if (resp) return { engine: 'openai', text: resp };
         } catch (err) {
             if (suppressErrors) return { engine: 'none', text: null };
-            console.error("❌ OpenAI Error:", err.response?.status || err.message);
+            console.error("âŒ OpenAI Error:", err.response?.status || err.message);
             if (suppressErrors) return { engine: 'none', text: null };
             if (!useGemini) throw err; // Only throw if we can't fall back to Gemini
         }
@@ -1307,7 +1335,7 @@ async function callAI({ engine = 'gpt', messages = null, promptText = '', suppre
             if (resp) return { engine: 'gemini', text: resp };
         } catch (err) {
             if (suppressErrors) return { engine: 'none', text: null };
-            console.error("❌ Gemini Error:", err.response?.status || err.message);
+            console.error("âŒ Gemini Error:", err.response?.status || err.message);
             if (suppressErrors) return { engine: 'none', text: null };
             throw err;
         }
@@ -1380,14 +1408,14 @@ function cleanMarketDescription(value) {
     return text.length > 260 ? `${text.slice(0, 257).trim()}...` : text;
 }
 const sendPolyMail = async (to, subject, html) => {
-    console.log(`✉️ Attempting to send email to: "${to}"`); 
+    console.log(`âœ‰ï¸ Attempting to send email to: "${to}"`); 
     if (!to || to === "null") return;
     try {
         await transporter.sendMail({
             from: `"PolySoko Support" <${process.env.EMAIL_USER}>`,
             to, subject, html
         });
-    } catch (e) { console.error("📧 Mail Error:", e.message); }
+    } catch (e) { console.error("ðŸ“§ Mail Error:", e.message); }
 };
 // Define the paths you need
 const foldersToCreate = [
@@ -1399,7 +1427,7 @@ foldersToCreate.forEach(dir => {
     if (!fs.existsSync(dir)) {
         // recursive: true allows it to create /public AND /uploads at once
         fs.mkdirSync(dir, { recursive: true });
-        console.log(`📁 Created directory: ${dir}`);
+        console.log(`ðŸ“ Created directory: ${dir}`);
     }
 });
 const emitAdminEvent = (event, data = {}) => {
@@ -1408,7 +1436,7 @@ const emitAdminEvent = (event, data = {}) => {
 const mapStatus = (short) => {
     if (["1H","2H","HT"].includes(short)) return "live";
     if (short === "FT") return "ended";
-    return "open"; // 👈 CRITICAL
+    return "open"; // ðŸ‘ˆ CRITICAL
 };
 const MARKET_STATUS = {
   UPCOMING: "upcoming",
@@ -1626,10 +1654,10 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
             const cleanDef = definition.replace(/,$/, '');
             const sql = `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${cleanDef}`;
 
-            console.log("🧪 Running:", sql);
+            console.log("ðŸ§ª Running:", sql);
 
             db.run(sql, (err) => {
-                if (err) console.error("❌ ALTER ERROR:", err.message);
+                if (err) console.error("âŒ ALTER ERROR:", err.message);
                 if (callback) callback();
             });
         } else {
@@ -1697,8 +1725,8 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
         if (process.env.ADMIN_PHONE) {
             const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
             db.run(`UPDATE users SET role='admin' WHERE phone=?`, [adminPhone], (err) => {
-                if (err) console.error("❌ Admin Assignment Failed:", err.message);
-                else console.log(`👑 SuperAdmin verified: ${adminPhone}`);
+                if (err) console.error("âŒ Admin Assignment Failed:", err.message);
+                else console.log(`ðŸ‘‘ SuperAdmin verified: ${adminPhone}`);
             });
         }
     }, 2000); 
@@ -1747,7 +1775,7 @@ const authenticateAdmin = (req, res, next) => {
         const userPhone = normalizePhone(decoded.phone);
 
         if (!adminPhone || userPhone !== adminPhone) {
-            console.warn(`🚫 Unauthorized admin access attempt from: ${userPhone}`);
+            console.warn(`ðŸš« Unauthorized admin access attempt from: ${userPhone}`);
             return res.status(403).json({ success: false, message: "Access denied: Not an administrator" });
         }
 
@@ -1771,7 +1799,7 @@ const createNotification = async (phone, title, message, type = 'info') => {
 const emitBalance = (phone) => {
     const normalized = normalizePhone(phone);
     db.get(`SELECT balance FROM users WHERE phone=?`, [normalized], (err, user) => {
-        if (err) return console.error("❌ Database error in emitBalance:", err);
+        if (err) return console.error("âŒ Database error in emitBalance:", err);
         if (user) {
             io.to(normalized).emit("balanceUpdate", { balance: user.balance });
         }
@@ -1781,7 +1809,7 @@ const emitBalance = (phone) => {
 const emitMarkets = () => {
     const sql = `SELECT * FROM markets WHERE status IN ('open','live','upcoming','pending') ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
-        if (err) return console.error("❌ DB Error:", err.message);
+        if (err) return console.error("âŒ DB Error:", err.message);
         io.emit('marketsUpdated', {
             status: 'success',
             count: rows?.length || 0,
@@ -1838,7 +1866,7 @@ const syncFootballMarkets = async () => {
             return;
         }
 
-        console.log("⚽ Syncing football fixtures via API-Football...");
+        console.log("âš½ Syncing football fixtures via API-Football...");
 
         // Dates for Today and Tomorrow in YYYY-MM-DD
         const dates = [0, 1].map((daysAhead) => formatNairobiDate(daysAhead));
@@ -1860,19 +1888,19 @@ const syncFootballMarkets = async () => {
         const apiErrors = responses.map((res) => res.data?.errors).filter(e => e && Object.keys(e).length > 0);
 
         if (apiErrors.length > 0) {
-            console.error("⚠️ API-Football Errors:", JSON.stringify(apiErrors));
+            console.error("âš ï¸ API-Football Errors:", JSON.stringify(apiErrors));
         }
 
         if (matches.length === 0) {
-            console.log("⚠️ No fixtures returned from API-Football.");
+            console.log("âš ï¸ No fixtures returned from API-Football.");
             return;
         }
 
-        console.log(`⚽ Syncing ${matches.length} matches...`);
+        console.log(`âš½ Syncing ${matches.length} matches...`);
         await processMatches(matches);
 
     } catch (e) {
-        console.error("⚽ API-Football Sync Error:", e.response?.data || e.message);
+        console.error("âš½ API-Football Sync Error:", e.response?.data || e.message);
     }
 };
 const processMatches = async (matches) => {
@@ -2316,8 +2344,8 @@ const syncSportsMarkets = async () => {
                     },
                     {
                         id: `${baseId}_temp`,
-                        title: `Is ${town.name} likely to exceed 35°C tomorrow?`,
-                        desc: `Expected Max Temp: ${forecast.maxTemp}°C. This market resolves YES if the daily high reaches 35.0°C or more.`,
+                        title: `Is ${town.name} likely to exceed 35Â°C tomorrow?`,
+                        desc: `Expected Max Temp: ${forecast.maxTemp}Â°C. This market resolves YES if the daily high reaches 35.0Â°C or more.`,
                     },
                     {
                         id: `${baseId}_wind`,
@@ -2418,7 +2446,7 @@ const cleanupOutdatedMarkets = async () => {
     // 4. Remove redundant markets with no startTime that are old (orphaned)
     await dbRun(`DELETE FROM markets WHERE startTime IS NULL AND timestamp < datetime('now', '-1 day')`);
     
-    console.log("🧹 Database cleanup complete: Redundant markets cleared.");
+    console.log("ðŸ§¹ Database cleanup complete: Redundant markets cleared.");
 };
 
 // Helper to ensure all active markets have a closure time
@@ -2462,7 +2490,7 @@ let oddsB = (total + minLiquidity) / ((market.away_volume || 1) + minLiquidity);
 };
 // --- SETTLEMENT ENGINE ---
 const cancelMarket = async (marketId, reason = 'CANCELLED') => {
-    console.log(`🛑 Cancelling market ${marketId} → ${reason}`);
+    console.log(`ðŸ›‘ Cancelling market ${marketId} â†’ ${reason}`);
     try {
         const market = await dbGet(`SELECT settled FROM markets WHERE id=?`, [marketId]);
         if (!market) return { success: false, message: "Market not found" };
@@ -2507,10 +2535,10 @@ const cancelMarket = async (marketId, reason = 'CANCELLED') => {
 
         await dbRun("COMMIT");
         emitMarkets();
-        console.log(`✅ Market ${marketId} cancelled/refunded`);
+        console.log(`âœ… Market ${marketId} cancelled/refunded`);
         return { success: true, cancelledBets: bets.length };
     } catch (e) {
-        console.error("❌ Market cancel failed:", e.message);
+        console.error("âŒ Market cancel failed:", e.message);
         try { await dbRun("ROLLBACK"); } catch { /* ignore */ }
     }
 };
@@ -2538,10 +2566,10 @@ function isWinningBetSide(betSide, winningSide, market = {}) {
 }
 
 const settleMarket = async (marketId, winningSide) => {
-    console.log(`⚖️ Settling market ${marketId} → ${winningSide}`);
+    console.log(`âš–ï¸ Settling market ${marketId} â†’ ${winningSide}`);
 
     try {
-        // ✅ CHECK FIRST
+        // âœ… CHECK FIRST
         const market = await dbGet(
             `SELECT settled, sideA, sideB FROM markets WHERE id=?`,
             [marketId]
@@ -2553,7 +2581,7 @@ const settleMarket = async (marketId, winningSide) => {
         }
 
         if (market?.settled) {
-            console.log("⚠️ Market already settled.");
+            console.log("âš ï¸ Market already settled.");
             return { success: true, alreadySettled: true };
         }
 
@@ -2570,7 +2598,7 @@ const settleMarket = async (marketId, winningSide) => {
         `, [marketId]);
 
         if (!bets.length) {
-            console.log("⚠️ No active bets found.");
+            console.log("âš ï¸ No active bets found.");
             await dbRun(
                 `UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`,
                 [normalizeSettlementSide(winningSide), marketId]
@@ -2653,7 +2681,7 @@ const settleMarket = async (marketId, winningSide) => {
             }
         }
 
-        console.log(`📊 Market P&L → Stake: ${totalStake}, Paid: ${totalPayout}, Profit: ${totalStake - totalPayout}`);
+        console.log(`ðŸ“Š Market P&L â†’ Stake: ${totalStake}, Paid: ${totalPayout}, Profit: ${totalStake - totalPayout}`);
 
         await dbRun(`
             UPDATE markets 
@@ -2663,7 +2691,7 @@ const settleMarket = async (marketId, winningSide) => {
 
         await dbRun("COMMIT");
 
-        console.log(`✅ Market ${marketId} fully settled`);
+        console.log(`âœ… Market ${marketId} fully settled`);
 
         emitMarkets();
 
@@ -2674,7 +2702,7 @@ const settleMarket = async (marketId, winningSide) => {
                     // 1. App Notification
                     await createNotification(
                         w.user_phone,
-                        "Prediction Won! 🎉",
+                        "Prediction Won! ðŸŽ‰",
                         `Congratulations! Your prediction on "${w.event}" won sKES ${w.payout}.`,
                         'win'
                     );
@@ -2696,14 +2724,14 @@ const settleMarket = async (marketId, winningSide) => {
                     const formattedPhone = formatPhone(w.user_phone);
                     if (formattedPhone) {
                         const smsMessage = `PolySoko: Prediction Won! You won sKES ${w.payout} on "${w.event}". Winnings have been credited to your Soko Wallet. Soko ni Soko.`;
-                        await sms.send({
+                        await sendSms({
                             to: [formattedPhone],
                             message: smsMessage
                         });
-                        console.log(`✅ Win SMS Sent to ${w.user_phone}`);
+                        console.log(`âœ… Win SMS Sent to ${w.user_phone}`);
                     }
                 } catch (err) {
-                    console.error(`❌ Notification failed for ${w.user_phone}:`, err.message || err);
+                    console.error(`âŒ Notification failed for ${w.user_phone}:`, err.message || err);
                 }
             })();
         }
@@ -2711,7 +2739,7 @@ const settleMarket = async (marketId, winningSide) => {
         return { success: true, settledBets: bets.length, totalStake, totalPayout };
 
     } catch (e) {
-        console.error("❌ Settlement failed:", e.message);
+        console.error("âŒ Settlement failed:", e.message);
         try { await dbRun("ROLLBACK"); } catch { /* ignore */ }
         throw e;
     }
@@ -2804,7 +2832,7 @@ const settleBetById = async (betId, winningSide) => {
                     // 1. App Notification
                     await createNotification(
                         bet.user_phone,
-                        "Prediction Won! 🎉",
+                        "Prediction Won! ðŸŽ‰",
                         `Congratulations! Your prediction on "${bet.event}" won sKES ${payout}.`,
                         'win'
                     );
@@ -2826,14 +2854,14 @@ const settleBetById = async (betId, winningSide) => {
                     const formattedPhone = formatPhone(bet.user_phone);
                     if (formattedPhone) {
                         const smsMessage = `PolySoko: Prediction Won! You won sKES ${payout} on "${bet.event}". Winnings have been credited to your Soko Wallet. Soko ni Soko.`;
-                        await sms.send({
+                        await sendSms({
                             to: [formattedPhone],
                             message: smsMessage
                         });
-                        console.log(`✅ Win SMS Sent to ${bet.user_phone}`);
+                        console.log(`âœ… Win SMS Sent to ${bet.user_phone}`);
                     }
                 } catch (err) {
-                    console.error(`❌ Notification failed for ${bet.user_phone}:`, err.message || err);
+                    console.error(`âŒ Notification failed for ${bet.user_phone}:`, err.message || err);
                 }
             })();
         }
@@ -2883,7 +2911,7 @@ const settleWeatherMarkets = async () => {
             await settleMarket(m.id, result);
 
         } catch (e) {
-            console.error("🌧️ Weather settlement error:", e.message);
+            console.error("ðŸŒ§ï¸ Weather settlement error:", e.message);
         }
     }
 };
@@ -2907,7 +2935,7 @@ const closeExpiredMarkets = async () => {
                     [m.id]
                 );
 
-                console.log(`⛔ Market closed: ${m.id}`);
+                console.log(`â›” Market closed: ${m.id}`);
             }
         }
 
@@ -2946,11 +2974,11 @@ const refreshBoostedMarkets = async () => {
         await dbRun("COMMIT");
 
         if (selectedIds.length) {
-            console.log(`🟩 Refreshed boosted markets: ${selectedIds.join(', ')}`);
+            console.log(`ðŸŸ© Refreshed boosted markets: ${selectedIds.join(', ')}`);
             emitMarkets();
         }
     } catch (e) {
-        console.error("❌ Boosted markets refresh failed:", e.message);
+        console.error("âŒ Boosted markets refresh failed:", e.message);
         await dbRun("ROLLBACK");
     }
 };
@@ -2967,7 +2995,7 @@ const settleResolvedMarkets = async () => {
             await settleMarket(market.id, market.result);
         }
     } catch (e) {
-        console.error("❌ Resolved market settlement failed:", e.message);
+        console.error("âŒ Resolved market settlement failed:", e.message);
     }
 };
 
@@ -2977,7 +3005,7 @@ const sendDailyMarkets = () => {
             if (!markets || markets.length === 0) return;
             const marketList = markets.map(m => `${m.title} (Yes: ${m.oddsA} | No: ${m.oddsB})`).join('\n');
             users.forEach(u => {
-                sendPolyMail(u.email, "Today's Hot Markets 🔥", `Check out these live odds:\n\n${marketList}`);
+                sendPolyMail(u.email, "Today's Hot Markets ðŸ”¥", `Check out these live odds:\n\n${marketList}`);
             });
         });
     });
@@ -3025,7 +3053,7 @@ const syncFootballNews = async () => {
         }
 
         if (saved > 0) {
-            console.log(`⚽ Football news sync: saved ${saved} new markets`);
+            console.log(`âš½ Football news sync: saved ${saved} new markets`);
             emitMarkets();
         }
     } catch (e) {
@@ -3034,7 +3062,7 @@ const syncFootballNews = async () => {
 };
 
 const syncAllMarkets = async () => {
-    console.log(`[${new Date().toLocaleTimeString()}] 🔄 STARTING GLOBAL SYNC...`);
+    console.log(`[${new Date().toLocaleTimeString()}] ðŸ”„ STARTING GLOBAL SYNC...`);
     // --- 2. CRYPTO MARKETS (Using CoinGecko + AI Enhancements) ---
     try {
         const cryptoRes = await axios.get('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false&price_change_percentage=24h');
@@ -3797,7 +3825,7 @@ app.post('/api/forgot-password', (req, res) => {
                  <p><a href="${resetLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Reset Password</a></p>
                  <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${resetLink}</span></p>`);
             
-            sms.send({
+            sendSms({
                 to: [formatPhone(norm)],
                 message: `PolySoko: Your password reset code is ${otp}. Soko ni Soko.`,
                 from: "POLYSOKO"
@@ -3900,7 +3928,7 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("❌ Place Bet Error:", e.message);
+        console.error("âŒ Place Bet Error:", e.message);
         try { await dbRun("ROLLBACK"); } catch (rollbackErr) { /* ignore */ }
         return res.status(500).json({ success: false, message: "Internal server error" });
     }
@@ -3975,7 +4003,7 @@ app.post('/api/withdraw', authenticate, async (req, res) => {
 
         emitBalance(userPhone);
         try {
-            await sendPolyMail(process.env.ADMIN_EMAIL, "💰 Withdrawal Request", `User ${userPhone} requested withdrawal of sKES ${withdrawAmt}`);
+            await sendPolyMail(process.env.ADMIN_EMAIL, "ðŸ’° Withdrawal Request", `User ${userPhone} requested withdrawal of sKES ${withdrawAmt}`);
         } catch (e) { /* ignore mail errors */ }
 
         return res.json({ success: true, message: "Withdrawal request received and is pending approval." });
@@ -3997,7 +4025,7 @@ app.post('/api/mpesa/result', async (req, res) => {
         if (ResultCode === 0) {
             // SUCCESS
             await dbRun(`UPDATE transactions SET status = 'completed', reference = ? WHERE id = ?`, [TransactionID, tx.id]);
-            console.log(`✅ Transaction ${TransactionID} marked as completed.`);
+            console.log(`âœ… Transaction ${TransactionID} marked as completed.`);
         } else {
             // FAILED
             if (tx.status !== 'failed' && tx.status !== 'completed') {
@@ -4005,7 +4033,7 @@ app.post('/api/mpesa/result', async (req, res) => {
                 const refund = Math.abs(tx.amount || 0);
                 await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
                 emitBalance(tx.user_phone);
-                console.log(`❌ Transaction ${ConversationID} failed: ${ResultDesc}. Refunded sKES ${refund} to ${tx.user_phone}`);
+                console.log(`âŒ Transaction ${ConversationID} failed: ${ResultDesc}. Refunded sKES ${refund} to ${tx.user_phone}`);
             }
         }
     } catch (e) {
@@ -4068,7 +4096,7 @@ app.post('/api/stkcallback', (req, res) => {
     if (stk.ResultCode !== 0) {
         db.run(`UPDATE transactions SET status = 'failed' WHERE reference = ? AND status = 'pending'`, 
             [stk.CheckoutRequestID]);
-        console.log(`❌ STK Push failed for ${stk.CheckoutRequestID}: ${stk.ResultDesc}`);
+        console.log(`âŒ STK Push failed for ${stk.CheckoutRequestID}: ${stk.ResultDesc}`);
         emitAdminEvent('mpesaLogUpdate', { reference: stk.CheckoutRequestID, status: 'failed' });
         return;
     }
@@ -4099,7 +4127,7 @@ app.post('/api/stkcallback', (req, res) => {
                     [mpesaId, internalTxnId, checkoutID], 
                     (err) => {
                         if (!err) {
-                            console.log(`✅ Deposit Success: KES ${amount} for ${tx.user_phone}`);
+                            console.log(`âœ… Deposit Success: KES ${amount} for ${tx.user_phone}`);
                             
                             // 3. Send Notification
                             sendPolysokoPush(tx.user_phone, amount, mpesaId, internalTxnId);
@@ -4420,7 +4448,7 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
     }
     
     if (!pinValid) {
-        console.warn(`🚫 Failed admin PIN attempt from IP: ${req.ip}`);
+        console.warn(`ðŸš« Failed admin PIN attempt from IP: ${req.ip}`);
         return res.json({ success: false, message: "Invalid PIN. Access denied." });
     }
     
@@ -4451,7 +4479,7 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
     }
     
     if (!password || String(password) !== String(adminPassword)) {
-        console.warn(`🚫 Failed admin master login from IP: ${req.ip}`);
+        console.warn(`ðŸš« Failed admin master login from IP: ${req.ip}`);
         return res.json({ success: false, message: "Invalid server password." });
     }
     
@@ -4562,8 +4590,8 @@ app.post('/api/admin/wire-funds', authenticateAdmin, async (req, res) => {
                 `INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, ?, ?, 'completed', ?)`,
                 [adminPhone, 'admin_wire', -wireAmount, reference]
             );
-             console.log(`💰 [WIRE TO TILL] sKES ${wireAmount} by admin ${adminPhone}. Ref: ${reference}`);
-            console.log(`⚠️ [MANUAL SETTLEMENT REQUIRED] Logged sKES ${wireAmount} wire to Till 4447028 by admin ${adminPhone}. Ref: ${reference}`);
+             console.log(`ðŸ’° [WIRE TO TILL] sKES ${wireAmount} by admin ${adminPhone}. Ref: ${reference}`);
+            console.log(`âš ï¸ [MANUAL SETTLEMENT REQUIRED] Logged sKES ${wireAmount} wire to Till 4447028 by admin ${adminPhone}. Ref: ${reference}`);
             return res.json({ success: true, message: 'Wire to Till recorded. Please perform the manual transfer via your Merchant Portal.', reference });
         }
 
@@ -4617,7 +4645,7 @@ app.post('/api/admin/approve-withdraw-fast', authenticateAdmin, async (req, res)
                     [mpesaResponse.ConversationID, txId]
                 );
 
-                sms.send({
+                sendSms({
                     to: [formatPhone(userPhone)],
                     message: `Your withdrawal of sKES ${amount} was approved and sent to M-Pesa.`,
                     from: "POLYSOKO"
@@ -4665,8 +4693,8 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
         );
 
         // --- STEP 3: SMS NOTIFICATION ---
-        const victoryMsg = `Victory! 🏆 Your withdrawal of sKES ${amount} was approved and sent to M-Pesa.`;
-        await sms.send({
+        const victoryMsg = `Victory! ðŸ† Your withdrawal of sKES ${amount} was approved and sent to M-Pesa.`;
+        await sendSms({
             to: [formatPhone(userPhone)],
             message: victoryMsg,
             from: "POLYSOKO"
@@ -4677,7 +4705,7 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
   } catch (err) {
     // FORCE the terminal to show the error
     console.log("------------------------------------");
-    console.error("❌ APPROVAL CRASHED AT:");
+    console.error("âŒ APPROVAL CRASHED AT:");
     console.error(err); 
     console.log("------------------------------------");
 
@@ -4687,7 +4715,7 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
          const refund = Math.abs(tx.amount);
          await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
          emitBalance(tx.user_phone);
-         console.log(`💰 Automatic refund issued for failed withdrawal: sKES ${refund} to ${tx.user_phone}`);
+         console.log(`ðŸ’° Automatic refund issued for failed withdrawal: sKES ${refund} to ${tx.user_phone}`);
     }
     
     return res.status(500).json({ 
@@ -4720,7 +4748,7 @@ app.post('/api/admin/reject-withdraw', authenticateAdmin, async (req, res) => {
 
         // 3. SEND REJECTION SMS
         const rejectMsg = `Polysoko Update: Your withdrawal request of sKES ${refund} was declined. Reason: ${rejectReason}. Your funds have been reversed to your Polysoko wallet.`;
-        sms.send({
+        sendSms({
             to: [formatPhone(userPhone)],
             message: rejectMsg,
             from: "POLYSOKO"
@@ -4745,11 +4773,11 @@ app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
 
         // Send Email to Creator
         if (market.creator) {
-            createNotification(market.creator, "🚀 Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
+            createNotification(market.creator, "ðŸš€ Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
             
             const creator = await dbGet(`SELECT email, name FROM users WHERE phone=?`, [market.creator]);
             if (creator && creator.email) {
-                const subject = `🚀 Your Market is LIVE: ${market.title}`;
+                const subject = `ðŸš€ Your Market is LIVE: ${market.title}`;
                 const html = `
                     <div style="font-family: sans-serif; padding: 20px; color: #333;">
                         <h2>Congratulations ${creator.name}!</h2>
@@ -4795,9 +4823,9 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
             approvedCount++;
 
             // Notify creator
-            createNotification(market.creator, "🚀 Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
+            createNotification(market.creator, "ðŸš€ Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
             if (market.creator_email) {
-                const subject = `🚀 Your Market is LIVE: ${market.title}`;
+                const subject = `ðŸš€ Your Market is LIVE: ${market.title}`;
                 const html = `
                     <div style="font-family: sans-serif; padding: 20px; color: #333;">
                         <h2>Congratulations ${market.creator_name || ''}!</h2>
@@ -5010,7 +5038,7 @@ app.post('/api/admin/settle-backlog', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Clean avatar upload — uses disk storage for reliability
+// Clean avatar upload â€” uses disk storage for reliability
 const avatarStorage = multer.diskStorage({
     destination: (req, file, cb) => {
         fs.mkdirSync(uploadPath, { recursive: true });
@@ -5148,7 +5176,7 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
         `);
         res.json({ success: true, markets });
     } catch (e) {
-        console.error("❌ Error fetching pending markets:", e);
+        console.error("âŒ Error fetching pending markets:", e);
         res.status(500).json({ success: false, message: "Database error fetching markets" });
     }
 });
@@ -5212,7 +5240,7 @@ app.post('/api/admin/users/manage', authenticateAdmin, async (req, res) => {
         } else if (action === 'upgrade') {
             const expiry = new Date(Date.now() + (60 * 24 * 60 * 60 * 1000));
             await dbRun("UPDATE users SET is_upgraded = 1, upgrade_expiry = ? WHERE phone = ?", [expiry.toISOString(), norm]);
-            subject = "🚀 Congratulations: You are now ELITE!";
+            subject = "ðŸš€ Congratulations: You are now ELITE!";
             emailBody = `Your account has been upgraded to the Elite Package for 60 days! Enjoy 10% boosted odds, priority withdrawals, and exclusive admin access. <br><br><b>Your Invite Code:</b> ${user.referral_code}`;
         } else if (action === 'revoke') {
             await dbRun("UPDATE users SET is_upgraded = 0, upgrade_expiry = NULL WHERE phone = ?", [norm]);
@@ -5276,7 +5304,7 @@ io.use((socket, next) => {
         socket.user = { phone: normalizePhone(decoded.phone) };
         next();
     } catch (err) {
-        console.error("❌ Socket Auth Failed:", err.message);
+        console.error("âŒ Socket Auth Failed:", err.message);
         next(new Error("Auth Error"));
     }
 });
@@ -5341,7 +5369,7 @@ app.get('/api/football/details/:id', async (req, res) => {
                     image: article.urlToImage
                 }));
             } catch (newsError) {
-                console.warn('⚠️ Match news fetch failed:', newsError.response?.data || newsError.message);
+                console.warn('âš ï¸ Match news fetch failed:', newsError.response?.data || newsError.message);
             }
         }
 
@@ -5383,7 +5411,7 @@ app.get('/api/football/details/:id', async (req, res) => {
             relatedNews
         });
     } catch (error) {
-        console.error("❌ API-Football Error:", error.response?.data || error.message);
+        console.error("âŒ API-Football Error:", error.response?.data || error.message);
         res.status(error.response?.status || 500).json({ error: "Failed to fetch match details" });
     }
 });
@@ -5394,7 +5422,7 @@ app.get('/api/news/everything', async (req, res) => {
         emitMarkets();
         res.json({ articles: processedMarkets });
     } catch (error) {
-        console.error("❌ Aggregator Error:", error.response?.data || error.message);
+        console.error("âŒ Aggregator Error:", error.response?.data || error.message);
         res.status(500).json({ error: "Failed to scrape the global grid." });
     }
 });
@@ -5549,16 +5577,16 @@ async function sendPolysokoPush(phoneNumber, amount, mpesaId, txnId) {
         // Formats phone to +254...
         const formattedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
 
-        const result = await at.SMS.send({
+        const result = await sendSms({
             to: [formattedPhone],
             message: message,
             // If you don't have a registered Sender ID yet, comment out the line below
             // from: "POLYSOKO" 
         });
 
-        console.log(`✅ Real SMS Sent to ${phoneNumber}:`, result.SMSMessageData.Recipients[0].status);
+        console.log(`âœ… Real SMS Sent to ${phoneNumber}:`, result.SMSMessageData.Recipients[0].status);
     } catch (error) {
-        console.error("❌ Africa's Talking Error:", error);
+        console.error("âŒ Africa's Talking Error:", error);
     }
 }
 // --- STARTUP ---
@@ -5575,7 +5603,7 @@ const forceVerifyLegacyUsers = async () => {
     const legacyUsers = await dbAll("SELECT id, name, email FROM users WHERE status = 'unverified' AND verification_token IS NULL");
     if (legacyUsers.length === 0) return;
     
-    console.log(`📧 Sending legacy verification to ${legacyUsers.length} users...`);
+    console.log(`ðŸ“§ Sending legacy verification to ${legacyUsers.length} users...`);
     for (const user of legacyUsers) {
         const token = crypto.randomBytes(32).toString('hex');
         await dbRun("UPDATE users SET verification_token = ? WHERE id = ?", [token, user.id]);
@@ -5643,7 +5671,7 @@ const startServer = async () => {
     };
 
     server.listen(PORT, '0.0.0.0', async () => {
-        console.log(`🚀 Terminal Online on Port ${PORT}`);
+        console.log(`ðŸš€ Terminal Online on Port ${PORT}`);
         // Socket is already accepting connections; safe to touch the DB now.
         runStartupRepairs();
         const skipStartupSync = process.env.SKIP_STARTUP_SYNC === '1' || process.env.SKIP_STARTUP_SYNC === 'true';
@@ -5675,7 +5703,7 @@ const startServer = async () => {
         }
         runSafely('forceVerifyLegacyUsers', forceVerifyLegacyUsers);
         if (process.env.EXIT_AFTER_STARTUP === '1' || process.env.EXIT_AFTER_STARTUP === 'true') {
-            console.log('EXIT_AFTER_STARTUP set — exiting process so you can run in VS Code.');
+            console.log('EXIT_AFTER_STARTUP set â€” exiting process so you can run in VS Code.');
             setTimeout(() => process.exit(0), 250);
         }
     });
