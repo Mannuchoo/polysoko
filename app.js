@@ -1199,7 +1199,7 @@ function initAvatarUpload() {
         saveBtn.innerText = "Uploading...";
 
         try {
-            const uploadAvatar = (path = '/api/profile/avatar') => fetch(window.apiUrl ? window.apiUrl(path) : path, {
+            const uploadAvatar = (path = '/api/profile/avatar') => fetch(window.apiUrl(path), {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`

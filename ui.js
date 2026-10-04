@@ -1148,7 +1148,7 @@ function renderRelatedMatchNews(news = []) {
 async function fetchMatchDetails(fixtureId) {
     try {
         const cleanId = fixtureId.replace('fb_', '');
-        const response = await fetch(window.apiUrl ? window.apiUrl(`/api/football/details/${cleanId}`) : `/api/football/details/${cleanId}`);
+        const response = await fetch(window.apiUrl(`/api/football/details/${cleanId}`));
         
         if (!response.ok) throw new Error('API request failed');
         
@@ -1562,7 +1562,7 @@ async function processConfirmedBet() {
     btn.innerText = "Placing Bet...";
 
     try {
-        const response = await fetch(window.apiUrl ? window.apiUrl('/api/place-bet') : '/api/place-bet', {
+        const response = await fetch(window.apiUrl('/api/place-bet'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1667,7 +1667,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 async function loadMarketsFallback() {
     try {
-        const res = await fetch(window.apiUrl ? window.apiUrl('/api/markets') : '/api/markets');
+        const res = await fetch(window.apiUrl('/api/markets'));
         const data = await res.json();
 
         const markets =
@@ -1722,7 +1722,7 @@ async function loadGreeting() {
         });
 
         const { latitude, longitude } = position.coords;
-        const contextRes = await fetch(window.apiUrl ? window.apiUrl(`/api/user/context?lat=${latitude}&lon=${longitude}`) : `/api/user/context?lat=${latitude}&lon=${longitude}`);
+        const contextRes = await fetch(window.apiUrl(`/api/user/context?lat=${latitude}&lon=${longitude}`));
         const context = await contextRes.json();
         let gpsPlace = "";
 
@@ -1749,7 +1749,7 @@ async function loadGreeting() {
 
     } catch (e) {
         try {
-            const contextRes = await fetch(window.apiUrl ? window.apiUrl("/api/user/context") : "/api/user/context");
+            const contextRes = await fetch(window.apiUrl("/api/user/context"));
             const context = await contextRes.json();
             if (context?.city) {
                 const weather = context.temp && context.temp !== "--"

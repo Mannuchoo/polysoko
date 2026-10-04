@@ -1,9 +1,9 @@
 const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
 const isLocalFrontend = LOCAL_HOSTS.includes(window.location.hostname);
 const isGitHubPages = window.location.hostname.endsWith('.github.io') || window.location.hostname === 'mannuchoo.github.io';
-const DEFAULT_GITHUB_PAGES_API_BASE = "https://polysoko.online";
+const DEFAULT_GITHUB_PAGES_API_BASE = "https://api.polysoko.online";
 const BACKEND_OVERRIDE_KEY = "backend_url_override";
-const FRONTEND_ONLY_HOSTS = ["www.polysoko.online", "mannuchoo.github.io"];
+const FRONTEND_ONLY_HOSTS = ["polysoko.online", "www.polysoko.online", "mannuchoo.github.io"];
 
 function normalizeBackendUrl(rawUrl) {
     if (!rawUrl) return "";
@@ -55,7 +55,7 @@ function getApiBase() {
     const override = getBackendFromQuery() || safeBackendUrl(localStorage.getItem(BACKEND_OVERRIDE_KEY));
     if (override) return override;
 
-    if (isGitHubPages) {
+    if (isGitHubPages || FRONTEND_ONLY_HOSTS.includes(window.location.hostname)) {
         return DEFAULT_GITHUB_PAGES_API_BASE;
     }
     return window.location.origin;

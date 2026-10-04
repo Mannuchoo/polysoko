@@ -17,6 +17,7 @@ import cors from 'cors';
 import http from 'http';
 import { Server } from "socket.io";
 import sqlite3 from 'sqlite3';
+import pg from 'pg';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -32,7 +33,7 @@ import { getSokoBalance, sendSoko, getAdminWalletAddress, isValidAddress } from 
 const app = express();
 const server = http.createServer(app);
 const DEFAULT_PUBLIC_SITE_URL = 'https://polysoko.online';
-const DEFAULT_PUBLIC_API_BASE = 'https://polysoko.online';
+const DEFAULT_PUBLIC_API_BASE = 'https://api.polysoko.online';
 
 function cleanPublicUrl(value) {
     return String(value || '').trim().replace(/\/+$/, '');
@@ -45,16 +46,17 @@ const configuredCorsOrigins = String(process.env.CORS_ORIGINS || '')
     .map(cleanPublicUrl)
     .filter(Boolean);
 
+const developmentCorsOrigins = process.env.NODE_ENV === 'production'
+    ? []
+    : ['http://localhost:3000', 'http://localhost:5500', 'http://127.0.0.1:3000'];
 const allowedOrigins = [
     'https://mannuchoo.github.io',
     'https://polysoko.online',
     'https://www.polysoko.online',
-    'http://localhost:3000',
-    'http://localhost:5500',
-    'http://127.0.0.1:3000',
     configuredPublicSiteUrl,
     configuredPublicApiBase,
-    ...configuredCorsOrigins
+    ...configuredCorsOrigins,
+    ...developmentCorsOrigins
 ].filter(Boolean);
 const corsOptions = {
     origin(origin, cb) {
@@ -85,7 +87,7 @@ const staticOptions = {
     }
 };
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET must be set");
 }
@@ -168,7 +170,109 @@ const uploadLimiter = rateLimit({
     message: { success: false, message: "Too many uploads. Please wait and try again." }
 });
 
-const db = new sqlite3.Database(path.join(__dirname, 'terminal.db'));
+function sqlitePathFromDatabaseUrl(value) {
+    if (!value) return path.join(__dirname, 'terminal.db');
+    const raw = String(value).trim();
+    if (!raw) return path.join(__dirname, 'terminal.db');
+    if (raw.startsWith('sqlite://')) return raw.replace(/^sqlite:\/\//, '');
+    if (raw.startsWith('file:')) return new URL(raw).pathname;
+    return raw;
+}
+
+const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(process.env.DATABASE_URL || '');
+
+function normalizeDbArgs(params, callback) {
+    if (typeof params === 'function') return { params: [], callback: params };
+    return { params: params || [], callback };
+}
+
+function translatePostgresSql(sql) {
+    let translated = String(sql || '').trim();
+
+    if (/^BEGIN TRANSACTION$/i.test(translated)) return { sql: 'BEGIN' };
+    if (/^COMMIT$/i.test(translated) || /^ROLLBACK$/i.test(translated)) return { sql: translated.toUpperCase() };
+
+    translated = translated
+        .replace(/INSERT\s+OR\s+REPLACE\s+INTO\s+admin_settings\s*\(id,\s*pin_hash,\s*updated_at\)\s*VALUES\s*\(1,\s*\?,\s*CURRENT_TIMESTAMP\)/i,
+            'INSERT INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = EXCLUDED.updated_at')
+        .replace(/INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY')
+        .replace(/\bDATETIME\b/gi, 'TIMESTAMPTZ')
+        .replace(/\bREAL\b/gi, 'DOUBLE PRECISION')
+        .replace(/datetime\('now',\s*'-7 days'\)/gi, "NOW() - INTERVAL '7 days'")
+        .replace(/datetime\('now',\s*'-1 day'\)/gi, "NOW() - INTERVAL '1 day'");
+
+    let index = 0;
+    translated = translated.replace(/\?/g, () => `${++index}`);
+
+    if (/^INSERT\s+INTO\s+/i.test(translated) && !/\bRETURNING\b/i.test(translated)) {
+        translated += ' RETURNING id';
+    }
+
+    return { sql: translated };
+}
+
+function createPostgresCompatDb(connectionString) {
+    const pool = new Pool({
+        connectionString,
+        ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : undefined
+    });
+
+    const tableInfo = async (tableName) => {
+        const result = await pool.query(
+            `SELECT column_name AS name
+             FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = $1
+             ORDER BY ordinal_position`,
+            [String(tableName).toLowerCase()]
+        );
+        return result.rows;
+    };
+
+    const query = async (sql, params = []) => {
+        const pragmaMatch = String(sql || '').match(/^\s*PRAGMA\s+table_info\(([^)]+)\)\s*;?\s*$/i);
+        if (pragmaMatch) return { rows: await tableInfo(pragmaMatch[1]), rowCount: 0 };
+        const translated = translatePostgresSql(sql);
+        return pool.query(translated.sql, params);
+    };
+
+    return {
+        get(sql, params, callback) {
+            const args = normalizeDbArgs(params, callback);
+            query(sql, args.params)
+                .then(result => args.callback?.(null, result.rows[0]))
+                .catch(err => args.callback?.(err));
+        },
+        all(sql, params, callback) {
+            const args = normalizeDbArgs(params, callback);
+            query(sql, args.params)
+                .then(result => args.callback?.(null, result.rows))
+                .catch(err => args.callback?.(err));
+        },
+        run(sql, params, callback) {
+            const args = normalizeDbArgs(params, callback);
+            query(sql, args.params)
+                .then(result => {
+                    const context = {
+                        lastID: result.rows?.[0]?.id ?? null,
+                        changes: result.rowCount || 0
+                    };
+                    args.callback?.call(context, null);
+                })
+                .catch(err => args.callback?.(err));
+        },
+        serialize(callback) {
+            callback?.();
+        },
+        close(callback) {
+            pool.end().then(() => callback?.()).catch(err => callback?.(err));
+        }
+    };
+}
+
+const databasePath = sqlitePathFromDatabaseUrl(process.env.DATABASE_URL);
+const db = isPostgresDatabaseUrl
+    ? createPostgresCompatDb(process.env.DATABASE_URL)
+    : new sqlite3.Database(databasePath);
 const uploadPath = path.join(publicPath, 'uploads', 'avatars');
 if (!fs.existsSync(uploadPath)) {
     fs.mkdirSync(uploadPath, { recursive: true });
