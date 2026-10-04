@@ -65,7 +65,9 @@ const corsOptions = {
         if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
         return cb(new Error('Not allowed by CORS'));
     },
-    credentials: true
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 };
 const io = new Server(server, { cors: corsOptions });
 
@@ -130,9 +132,12 @@ app.use(
   })
 );
 app.disable('x-powered-by');
+// CORS must be registered before any API route, body parser or request handler so
+// that preflight (OPTIONS) requests from the static GitHub Pages frontend are
+// answered with the correct Access-Control-* headers before anything else runs.
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '120kb' }));
 app.use(express.urlencoded({ extended: false, limit: '120kb' }));
-app.use(cors(corsOptions));
 app.use((req, res, next) => {
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self), payment=(self)');
