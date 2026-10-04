@@ -581,75 +581,10 @@ function renderOrderBookSide(label, side, accent) {
     `;
 }
 
-<<<<<<< HEAD
-function renderNewsSparkline(id) {
-    // deterministic pseudo-random generator from id
-    let h = 0;
-    for (let i = 0; i < id.length; i++) h = ((h << 5) - h) + id.charCodeAt(i);
-    h = Math.abs(h);
-    const points = 12;
-    const vals = new Array(points).fill(0).map((_, i) => {
-        // mix hash with index for variety
-        const v = ((h >> (i % 16)) & 0xff) / 255;
-        // scale to [0.1,0.9]
-        return 0.1 + (v * 0.8);
-    });
 
-    const width = 80, height = 24;
-    const step = width / (points - 1);
-    const coords = vals.map((v, i) => `${(i * step).toFixed(1)},${(height - v * height).toFixed(1)}`).join(' ');
-
-    return `
-        <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;">
-            <polyline fill="none" stroke="#00ff88" stroke-width="1.6" points="${coords}" stroke-linecap="round" stroke-linejoin="round" />
-            <polyline fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="6" points="${coords}" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-    `;
-}
-
-function renderNewsFeed(news = []) {
-    if (!news.length) return '';
-    return `
-        <div style="margin-top:16px; padding:16px; border:1px solid #222; border-radius:14px; background:#080b10;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                <span style="color:#00ff88; font-size:0.8rem; font-weight:700; letter-spacing:0.5px;">LATEST API NEWS</span>
-                <span style="color:#777; font-size:0.72rem;">Powered by NewsAPI</span>
-            </div>
-            ${news.slice(0, 5).map(item => `
-                <a href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer" style="display:block; color:#fff; text-decoration:none; margin-bottom:12px;">
-                    <strong style="font-size:0.92rem;">${escapeHtml(item.displayHeadline || item.title || item.betQuestion || item.description || 'News item')}</strong>
-                    <div style="font-size:0.72rem; color:#999; margin-top:4px;">${escapeHtml(item.source || item.country || 'Source')}${item.url ? ` · ${new Date(item.timestamp || item.publishedAt || Date.now()).toLocaleDateString()}` : ''}</div>
-                </a>
-            `).join('')}
-        </div>
-    `;
-}
-
-window.escapeHtml = function(text) {
-    if (text === null || text === undefined) return ""; // Fix: Return empty string if null
-    return text.toString()
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-}
-
-function linkify(text) {
-    if (!text) return "";
-    const urlPattern = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
-    return text.replace(urlPattern, (url) => {
-        return `<a href="${url}" target="_blank" style="color: #00ff88; text-decoration: underline;">${url}</a>`;
-    });
-}
-
-function getYouTubeEmbedUrl(url) {
-    if (!url) return null;
-=======
 async function loadOrderBook(marketId) {
     const container = document.getElementById(`order-book-${marketId}`);
     if (!container || typeof apiFetch !== 'function') return;
->>>>>>> 5e5382967f077108e3aa521430be7a956b3ce85e
 
     try {
         const data = await apiFetch(`markets/${marketId}/order-book`);
