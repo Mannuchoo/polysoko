@@ -144,6 +144,19 @@ app.use((req, res, next) => {
     if (req.method === 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) setNoStoreHeaders(res);
     next();
 });
+// Health probe used by Railway's deployment healthcheck. Registered ahead of the
+// global rate limiter so that platform probes never consume the public API quota.
+app.get('/api/health', (req, res) => {
+    res.status(200).json({
+        success: true,
+        service: 'polysoko-api',
+        status: 'healthy',
+        port: Number(PORT) || null,
+        database: isPostgresDatabaseUrl ? 'postgresql' : 'sqlite',
+        uptimeSeconds: Math.round(process.uptime()),
+        timestamp: new Date().toISOString()
+    });
+});
 // Serve a default avatar fallback when the explicit default.png file is missing
 app.get('/uploads/avatars/default.png', (req, res) => {
     const fallback = path.join(publicPath, 'logo-mark.png');
@@ -5625,6 +5638,54 @@ const startServer = async () => {
         }
     });
 };
+
+// --- GRACEFUL SHUTDOWN ---
+// Railway (and most container platforms) send SIGTERM before restarting or
+// redeploying a service. Without a handler Node kills the process immediately,
+// which can sever in-flight requests and leak the PostgreSQL connection pool.
+// Close the HTTP server, Socket.io and the database cleanly, then exit.
+let isShuttingDown = false;
+const gracefulShutdown = (signal) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`${signal} received - shutting down gracefully...`);
+
+    // Force-exit if a hung connection prevents a clean close.
+    const forceExitTimer = setTimeout(() => {
+        console.error('Graceful shutdown timed out; forcing exit.');
+        process.exit(1);
+    }, 10000);
+    forceExitTimer.unref();
+
+    const finish = () => {
+        clearTimeout(forceExitTimer);
+        console.log('Shutdown complete.');
+        process.exit(0);
+    };
+
+    // Socket.io wraps the HTTP server; closing it first releases live connections.
+    try {
+        io.close(() => {
+            try { server.close(finish); } catch (err) { console.error('server.close failed:', err.message); finish(); }
+        });
+    } catch (err) {
+        console.error('io.close failed:', err.message);
+        try { server.close(finish); } catch (e) { finish(); }
+    }
+
+    // Close the DB handle. `db.close` exists for both the sqlite3 driver and the
+    // PostgreSQL compatibility wrapper (which resolves its pool via pool.end()).
+    try {
+        if (db && typeof db.close === 'function') {
+            db.close(() => console.log('Database connection closed.'));
+        }
+    } catch (err) {
+        console.error('db.close failed:', err.message);
+    }
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 startServer().catch(e => {
     console.error('Server startup failed:', e);
