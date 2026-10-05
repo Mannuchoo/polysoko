@@ -110,7 +110,23 @@ function getToken() {
     return localStorage.getItem("token");
 }
 
-async function apiFetch(endpoint, options = {}) {
+const TRANSIENT_STATUSES = new Set([502, 503, 504]);
+const TRANSIENT_RETRIES = 2;
+const RETRY_DELAY_MS = 1200;
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Only clear the stored token when the server explicitly says the token is no
+// longer usable. Previously ANY 401 wiped it, so a single blip during a redeploy
+// (or a proxy hiccup) logged the user out even though the token was still valid.
+function handleUnauthorized(data) {
+    const code = data && data.code;
+    const tokenIsDead = !code || code === 'TOKEN_INVALID' || code === 'TOKEN_EXPIRED' || code === 'NO_TOKEN';
+    if (!tokenIsDead) return false;
+    localStorage.removeItem("token");
+    return true;
+}
+
+async function apiFetch(endpoint, options = {}, attempt = 0) {
     if (isGitHubPages && !window.API_BASE) {
         throw new Error("Backend not configured for GitHub Pages. Please set DEFAULT_GITHUB_PAGES_API_BASE in api.js.");
     }
@@ -150,29 +166,45 @@ async function apiFetch(endpoint, options = {}) {
         res = await fetch(url, defaultOptions);
     } catch (err) {
         console.error("❌ Network Error:", err);
+        // A redeploy briefly drops the connection. Retry before giving up so the
+        // user is not forced to log in again for a transient outage.
+        if (attempt < TRANSIENT_RETRIES) {
+            await wait(RETRY_DELAY_MS);
+            return apiFetch(endpoint, options, attempt + 1);
+        }
         const msg = "Network error. Unable to connect to the server. Please check your internet connection.";
         throw new Error(msg);
     }
 
-    if (res.status === 401) {
-        const criticalRoutes = ['profile', 'user/history', 'my-bets'];
-        if (criticalRoutes.some(r => (endpoint || '').toLowerCase().includes(r))) {
-            localStorage.removeItem("token");
-            window.location.href = "login.html";
-        }
-        throw new Error("Unauthorized access or session expired.");
+    // The server is restarting or briefly unavailable. Wait it out instead of
+    // destroying a perfectly valid session.
+    if (TRANSIENT_STATUSES.has(res.status) && attempt < TRANSIENT_RETRIES) {
+        await wait(RETRY_DELAY_MS);
+        return apiFetch(endpoint, options, attempt + 1);
     }
 
     const text = await res.text();
     let data;
     try {
-        data = JSON.parse(text);
+        data = text ? JSON.parse(text) : {};
     } catch (e) {
         console.error("❌ Failed to parse JSON. Response body preview:", text.slice(0, 200));
         if (text.toLowerCase().includes("<html")) {
             throw new Error("Server returned HTML instead of JSON. Check your backend URL configuration.");
         }
         throw new Error("Server returned an invalid non-JSON response.");
+    }
+
+    if (res.status === 401) {
+        const criticalRoutes = ['profile', 'user/history', 'my-bets'];
+        const isCritical = criticalRoutes.some(r => (endpoint || '').toLowerCase().includes(r));
+        const cleared = handleUnauthorized(data);
+        // Only bounce to the login page when the session is truly gone. A 503
+        // (or any non-fatal 401) must leave the user signed in.
+        if (cleared && isCritical) {
+            window.location.href = "login.html";
+        }
+        throw new Error(data?.message || "Unauthorized access or session expired.");
     }
 
     if (!res.ok) throw new Error(data.message || data.error || `API Error (${res.status})`);

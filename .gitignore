@@ -3,9 +3,14 @@ node_modules/
 *.log
 .cline/
 
-# ---- Environment / secrets (keep .env.example tracked) ----
+# ---- Environment / secrets ----
+# The real configuration lives in server/.env and is intentionally NOT tracked.
+# Only the local file is used (dotenv loads it); deployments supply their own
+# environment variables through the host (Railway), never via git.
+.env
 .env.*
-!.env.example
+server/.env
+server/.env.*
 
 # ---- Logs ----
 logs/

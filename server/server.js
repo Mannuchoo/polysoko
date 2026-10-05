@@ -139,14 +139,6 @@ const staticOptions = {
 };
 
 const PORT = process.env.PORT || 3000;
-// A missing JWT_SECRET must not prevent the HTTP server from booting. Previously
-// this threw at module scope, which killed the process before it could bind a port
-// and left Railway returning 502. Startup now continues so the service stays
-// reachable and /api/health can surface the misconfiguration.
-if (!process.env.JWT_SECRET) {
-  console.error('[FATAL CONFIG] JWT_SECRET is not set. Authentication will be rejected until it is configured.');
-}
-const JWT_SECRET = process.env.JWT_SECRET || '';
 const ADMIN_TILL = process.env.MPESA_TILL || process.env.BUYGOODS_TILL || '4447028';
 const MPESA_ENV = String(process.env.MPESA_ENV || 'sandbox').toLowerCase();
 const MPESA_BASE_URL = MPESA_ENV === 'production'
@@ -243,11 +235,12 @@ app.get('/api/health', async (req, res) => {
     res.status(200).json({
         success: true,
         service: 'polysoko-api',
-        status: databaseReachable && !!JWT_SECRET ? 'healthy' : 'degraded',
+        status: databaseReachable ? 'healthy' : 'degraded',
         port: Number(PORT) || null,
         database,
         databaseReachable,
-        jwtConfigured: !!JWT_SECRET,
+        jwtConfigured: getJwtSecrets().length > 0,
+        jwtSecretSource,
         mailConfigured,
         publicSiteUrl: PUBLIC_SITE_URL,
         publicApiBase: PUBLIC_API_BASE,
@@ -630,6 +623,136 @@ const dbAll = (query, params = []) => new Promise((resolve, reject) => {
 const dbRun = (query, params = []) => new Promise((resolve, reject) => {
     db.run(query, params, function(err) { err ? reject(err) : resolve(this); });
 });
+
+// --- JWT SECRET RESOLUTION -------------------------------------------------
+// Sessions are stateless JWTs, so the signing secret must stay identical across
+// every process restart. Previously the secret was read straight from
+// `process.env.JWT_SECRET || ''`, which caused two production failures:
+//
+//   1. When the variable was absent the secret silently became an EMPTY STRING.
+//      `jwt.sign` then threw inside the async `db.get` callback of /api/login,
+//      so no response was ever written and the browser just hung on "Login".
+//   2. Because the secret only ever came from the environment, there was no
+//      durable copy anywhere. Any redeploy that regenerated, dropped or rotated
+//      the variable invalidated every issued token, logging every user out.
+//
+// The secret is now resolved once, in priority order:
+//   1. `JWT_SECRET` / `JWT_SECRET_PREVIOUS` from the environment (authoritative).
+//   2. A previously generated secret persisted in the `app_secrets` table, so
+//      redeploys that lose the env var keep every existing session valid.
+//   3. A freshly generated secret, persisted so it is stable from then on.
+//
+// `JWT_SECRET_PREVIOUS` is a comma-separated list of retired secrets that are
+// still accepted during verification. That makes rotation safe: tokens signed
+// before the change keep working until they expire naturally.
+const envJwtSecret = String(process.env.JWT_SECRET || '').trim();
+const legacyJwtSecrets = String(process.env.JWT_SECRET_PREVIOUS || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+
+const JWT_SECRET_ROW_KEY = 'jwt_secret';
+let jwtSecretSource = 'pending';
+let resolvedJwtSecret = envJwtSecret;
+
+// Signs are synchronous but verification must tolerate the brief startup window
+// before the persisted secret has been read back from the database. Until then
+// we fall back to the env value so a warm process never rejects a good token.
+const getJwtSecrets = () => [resolvedJwtSecret, ...legacyJwtSecrets].filter(Boolean);
+
+async function resolveJwtSecret() {
+    let persisted = null;
+    try {
+        // `id` is required: the Postgres SQL translator appends `RETURNING id` to
+        // every INSERT that lacks it, so the table must expose that column or the
+        // insert fails outright on Postgres.
+        await dbRun(`CREATE TABLE IF NOT EXISTS app_secrets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            value TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+        const row = await dbGet(`SELECT value FROM app_secrets WHERE name = ?`, [JWT_SECRET_ROW_KEY]);
+        persisted = row?.value ? String(row.value) : null;
+    } catch (err) {
+        console.error('[JWT] Could not open the app_secrets table:', err.message);
+    }
+
+    if (envJwtSecret) {
+        // An explicit env var always wins, but persist it so a later deploy that
+        // drops the variable keeps signing with the identical secret.
+        if (persisted && persisted !== envJwtSecret) {
+            legacyJwtSecrets.push(persisted);
+        }
+        if (!persisted) {
+            try {
+                await dbRun(
+                    `INSERT INTO app_secrets (name, value) VALUES (?, ?)`,
+                    [JWT_SECRET_ROW_KEY, envJwtSecret]
+                );
+            } catch (err) {
+                console.error('[JWT] Could not persist the configured secret:', err.message);
+            }
+        }
+        resolvedJwtSecret = envJwtSecret;
+        jwtSecretSource = 'environment';
+        console.log('[JWT] Signing secret loaded from the environment (persisted for redeploy stability).');
+        return;
+    }
+
+    if (persisted) {
+        resolvedJwtSecret = persisted;
+        jwtSecretSource = 'database';
+        console.log('[JWT] JWT_SECRET is not set; reusing the secret persisted in the database so existing sessions stay valid.');
+        return;
+    }
+
+    const generated = crypto.randomBytes(48).toString('hex');
+    try {
+        await dbRun(
+            `INSERT INTO app_secrets (name, value) VALUES (?, ?)`,
+            [JWT_SECRET_ROW_KEY, generated]
+        );
+        jwtSecretSource = 'generated';
+        console.log('[JWT] JWT_SECRET is not set; generated and persisted a new signing secret.');
+    } catch (err) {
+        jwtSecretSource = 'ephemeral';
+        console.error('[JWT] Could not persist a generated secret; it will change on the next restart:', err.message);
+    }
+    resolvedJwtSecret = generated;
+}
+
+const jwtSecretReady = resolveJwtSecret().catch(err => {
+    console.error('[JWT] Secret resolution failed; using a process-local secret:', err.message);
+    resolvedJwtSecret = envJwtSecret || crypto.randomBytes(48).toString('hex');
+    jwtSecretSource = 'ephemeral';
+});
+
+// Signs a token with the current secret, guaranteeing callers never hit the
+// empty-secret throw that used to hang /api/login.
+const signJwt = (payload, options = {}) => {
+    if (!resolvedJwtSecret) throw new Error('JWT signing secret is not available yet.');
+    return jwt.sign(payload, resolvedJwtSecret, options);
+};
+
+// Verifies against the active secret first, then any retired secrets.
+const verifyJwt = (token) => {
+    const secrets = getJwtSecrets();
+    if (!secrets.length) throw new Error('JWT verification secret is not available yet.');
+    let lastError;
+    for (const secret of secrets) {
+        try {
+            return jwt.verify(token, secret);
+        } catch (err) {
+            // An expired token still matched this secret's signature, so it is
+            // genuinely expired. Stop here instead of letting a later secret
+            // report a misleading "invalid signature" to the client.
+            if (err?.name === 'TokenExpiredError') throw err;
+            lastError = err;
+        }
+    }
+    throw lastError;
+};
 
 // Runs `fn` inside a database transaction on Postgres, or simply invokes it on
 // SQLite (where dbRun already serialises and autocommits). Prefer this over
@@ -2047,17 +2170,34 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
  */
 const authenticate = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
-    if(!token) return res.status(401).json({ success:false });
-    try { 
-        req.user = jwt.verify(token, JWT_SECRET); 
+    if(!token) return res.status(401).json({ success:false, code: 'NO_TOKEN' });
+    // Resolve the signing secret before verifying. Without this await a request
+    // that arrives during startup could be rejected by a process that has not
+    // yet loaded the persisted secret, logging the user out spuriously.
+    jwtSecretReady.then(() => {
+        let decoded;
+        try {
+            decoded = verifyJwt(token);
+        } catch (err) {
+            // Distinguish an expired token from a genuinely invalid one so the
+            // client can re-authenticate gracefully instead of wiping state.
+            const expired = err?.name === 'TokenExpiredError';
+            return res.status(401).json({
+                success: false,
+                code: expired ? 'TOKEN_EXPIRED' : 'TOKEN_INVALID',
+                message: expired ? 'Your session has expired. Please sign in again.' : 'Invalid session. Please sign in again.'
+            });
+        }
+        req.user = decoded;
         req.user.phone = normalizePhone(req.user.phone);
         // Check email verification for non-admin routes
         if (!req.user.role || req.user.role !== 'admin') {
             db.get(`SELECT status FROM users WHERE phone=?`, [req.user.phone], (err, user) => {
-                if (err || !user) return res.status(401).json({ success: false, message: "Account not found" });
+                if (err || !user) return res.status(401).json({ success: false, code: 'ACCOUNT_NOT_FOUND', message: "Account not found" });
                 if (user.status !== 'verified') {
                     return res.status(403).json({ 
                         success: false, 
+                        code: 'NEEDS_VERIFICATION',
                         message: "Please verify your email address before accessing this feature. Check your inbox for the verification link.",
                         needsVerification: true 
                     });
@@ -2068,15 +2208,20 @@ const authenticate = (req, res, next) => {
         } else {
             next();
         }
-    } catch { res.status(401).json({ success:false }); }
+    }).catch(() => res.status(503).json({ success: false, code: 'AUTH_UNAVAILABLE', message: "Authentication is starting up. Please try again." }));
 };
 
 const authenticateAdmin = (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(403).json({ success: false, message: "Authentication token missing" });
 
-    try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+    jwtSecretReady.then(() => {
+        let decoded;
+        try {
+            decoded = verifyJwt(token);
+        } catch {
+            return res.status(403).json({ success: false, code: 'TOKEN_INVALID', message: "Invalid or expired session" });
+        }
         const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
         const userPhone = normalizePhone(decoded.phone);
 
@@ -2089,9 +2234,7 @@ const authenticateAdmin = (req, res, next) => {
         req.user.role = 'admin';
         req.user.phone = normalizePhone(decoded.phone);
         next();
-    } catch {
-        return res.status(403).json({ success: false, message: "Invalid or expired session" });
-    }
+    }).catch(() => res.status(503).json({ success: false, message: "Authentication is starting up. Please try again." }));
 };
 
 const createNotification = async (phone, title, message, type = 'info') => {
@@ -3904,8 +4047,24 @@ app.post('/api/login', authLimiter, (req, res) => {
     const normalized = normalizePhone(phone);
     const ua = req.headers['user-agent'] || 'Unknown Device';
 
+    if (!normalized || !password) {
+        return res.status(400).json({ success: false, message: "Phone and password are required." });
+    }
+
     db.get(`SELECT * FROM users WHERE phone=?`, [normalized], async (err, user) => {
-        if(!user || !(await bcrypt.compare(password, user.password))) return res.json({ success:false });
+        if (err) {
+            console.error("Login lookup failed:", err.message || err);
+            return res.status(500).json({ success: false, message: "Login failed because the database could not be reached." });
+        }
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: `No account found for ${normalized}. Check the phone number or register again.`
+            });
+        }
+        if (!user.password || !(await bcrypt.compare(password, user.password))) {
+            return res.status(401).json({ success: false, message: "Incorrect password for this account." });
+        }
         if (user.is_suspended) return res.json({ success: false, message: "This account has been suspended." });
 
         if (user.status !== 'verified') {
@@ -3941,8 +4100,19 @@ app.post('/api/login', authLimiter, (req, res) => {
             }
         });
 
-        const token = jwt.sign({ phone: normalized }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ success: true, token });
+        // Sign only after the secret is resolved. Previously `jwt.sign` threw
+        // inside this async db.get callback when the secret was empty, so the
+        // response was never written and the browser hung on "Logging in...".
+        jwtSecretReady.then(() => {
+            let token;
+            try {
+                token = signJwt({ phone: normalized }, { expiresIn: '7d' });
+            } catch (err) {
+                console.error('Login token signing failed:', err.message);
+                return res.status(503).json({ success: false, message: "Sign-in is temporarily unavailable. Please try again." });
+            }
+            res.json({ success: true, token });
+        }).catch(() => res.status(503).json({ success: false, message: "Sign-in is temporarily unavailable. Please try again." }));
     });
 });
 
@@ -4870,7 +5040,7 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
     }
     
     // Generate admin token
-    const token = jwt.sign({ phone: adminPhone }, JWT_SECRET, { expiresIn: '24h' });
+    const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
     
     // Ensure admin role in DB
     try {
@@ -4900,7 +5070,7 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
         return res.json({ success: false, message: "Invalid server password." });
     }
     
-    const token = jwt.sign({ phone: adminPhone }, JWT_SECRET, { expiresIn: '24h' });
+    const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
     
     try {
         await dbRun(`UPDATE users SET role='admin' WHERE phone=?`, [adminPhone]);
@@ -5672,17 +5842,22 @@ app.get('/test-balance/:phone', (req, res) => {
 });
 // --- SOCKET AUTH MIDDLEWARE ---
 io.use((socket, next) => {
-    try {
-        const token = socket.handshake.auth?.token;
-        if (!token) return next(new Error("No token provided"));
+    // The handshake can arrive while the signing secret is still being loaded
+    // from the database, so verification waits for it to settle. A brand-new
+    // socket is cheap to retry; a rejected one forces the client to reconnect.
+    jwtSecretReady.then(() => {
+        try {
+            const token = socket.handshake.auth?.token;
+            if (!token) return next(new Error("No token provided"));
 
-        const decoded = jwt.verify(token, JWT_SECRET);
-        socket.user = { phone: normalizePhone(decoded.phone) };
-        next();
-    } catch (err) {
-        console.error("Ã¢ÂÅ’ Socket Auth Failed:", err.message);
-        next(new Error("Auth Error"));
-    }
+            const decoded = verifyJwt(token);
+            socket.user = { phone: normalizePhone(decoded.phone) };
+            next();
+        } catch (err) {
+            console.error("Ã¢ÂÅ’ Socket Auth Failed:", err.message);
+            next(new Error("Auth Error"));
+        }
+    }).catch(() => next(new Error("Auth Error")));
 });
 io.on('connection', (socket) => {
     if (!socket.user?.phone) return socket.disconnect();

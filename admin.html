@@ -1440,10 +1440,19 @@ const API = {
             const data = await res.json();
             if (!res.ok) {
                 const message = data.message || "Request failed";
-                if (res.status === 401 || res.status === 403) {
+                // Only discard the session when the token is genuinely invalid or
+                // expired. A 403 such as "Not an administrator" (or a startup 503)
+                // must NOT log the admin out - the token is still perfectly valid.
+                const code = data.code;
+                const tokenIsDead = res.status === 401
+                    || code === 'TOKEN_INVALID'
+                    || code === 'TOKEN_EXPIRED'
+                    || code === 'NO_TOKEN'
+                    || (res.status === 403 && /invalid or expired session/i.test(message));
+                if (tokenIsDead) {
                     localStorage.removeItem("token");
-                    showAdminLoginGate(message);
                 }
+                showAdminLoginGate(message);
                 throw new Error(message);
             }
             return data;
