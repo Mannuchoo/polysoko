@@ -232,19 +232,31 @@ app.get('/api/health', async (req, res) => {
         database = `unreachable: ${err.message}`;
     }
     const mailConfigured = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+    // A SQLite file is wiped on every deploy, which silently reverts password
+    // changes and deletes accounts. Expose it so monitoring can catch it.
+    const databasePersistent = isPostgresDatabaseUrl;
+    const warnings = [];
+    if (!databasePersistent) {
+        warnings.push('Database is SQLite on an ephemeral container filesystem: all data (including password changes) is lost on every deploy. Set DATABASE_URL to a Postgres URL.');
+    }
+    if (!getJwtSecrets().length) {
+        warnings.push('No JWT signing secret is available; logins will fail.');
+    }
     res.status(200).json({
         success: true,
         service: 'polysoko-api',
-        status: databaseReachable ? 'healthy' : 'degraded',
+        status: databaseReachable && !warnings.length ? 'healthy' : 'degraded',
         port: Number(PORT) || null,
         database,
         databaseReachable,
+        databasePersistent,
         jwtConfigured: getJwtSecrets().length > 0,
         jwtSecretSource,
         mailConfigured,
         publicSiteUrl: PUBLIC_SITE_URL,
         publicApiBase: PUBLIC_API_BASE,
         uptimeSeconds: Math.round(process.uptime()),
+        warnings,
         timestamp: new Date().toISOString()
     });
 });
@@ -285,6 +297,43 @@ app.get('/uploads/avatars/default.png', (req, res) => {
     if (fs.existsSync(fallback)) return res.sendFile(fallback);
     res.status(404).end();
 });
+
+// Serve avatars from the database. Registered BEFORE express.static so a stored
+// picture always wins over the (ephemeral) on-disk copy.
+app.get('/api/avatar/:phone', async (req, res) => {
+    const phone = normalizePhone(req.params.phone);
+    if (!phone) return res.status(400).json({ success: false, message: 'Invalid phone number' });
+
+    try {
+        const row = await dbGet(`SELECT avatar_mime, avatar_data FROM users WHERE phone = ?`, [phone]);
+        const data = row?.avatar_data;
+        if (!data || !Buffer.isBuffer(data) || data.length === 0) {
+            const fallback = path.join(publicPath, 'logo-mark.png');
+            if (fs.existsSync(fallback)) return res.sendFile(fallback);
+            return res.status(404).json({ success: false, message: 'No profile picture' });
+        }
+
+        res.setHeader('Content-Type', row.avatar_mime || 'image/jpeg');
+        // Avatars are immutable per phone (a new upload replaces the bytes), so a
+        // short private cache avoids re-downloading on every page load while still
+        // picking up replacements quickly.
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        return res.send(data);
+    } catch (e) {
+        console.error('Avatar serve failed:', e.message);
+        return res.status(500).json({ success: false, message: 'Could not load profile picture' });
+    }
+});
+
+// A missing avatar used to fall through to the HTML error handler, so the
+// browser received text/html for an <img> and rendered a broken image. Answer
+// with the logo instead so the UI degrades gracefully.
+app.get(/^\/uploads\/avatars\/.+\.(png|jpe?g|webp|gif)$/i, (req, res) => {
+    const fallback = path.join(publicPath, 'logo-mark.png');
+    if (fs.existsSync(fallback)) return res.sendFile(fallback);
+    res.status(404).end();
+});
+
 app.use('/public/server', (req, res) => res.status(404).end());
 app.use('/server', (req, res) => res.status(404).end());
 app.use(express.static(publicPath, staticOptions));
@@ -322,6 +371,27 @@ function sqlitePathFromDatabaseUrl(value) {
 }
 
 const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(process.env.DATABASE_URL || '');
+
+// A SQLite file lives on the container's ephemeral filesystem. Railway wipes it on
+// every deploy/scale event, so users, balances, bets AND password changes are all
+// reverted to whatever snapshot was committed to git. That silently rolled every
+// password back on each deploy, which looked like "my password is now incorrect".
+if (!isPostgresDatabaseUrl) {
+    console.warn('');
+    console.warn('╔══════════════════════════════════════════════════════════════╗');
+    console.warn('║  DATABASE NOT PERSISTENT - DATA WILL BE LOST ON EVERY DEPLOY   ║');
+    console.warn('╚══════════════════════════════════════════════════════════════╝');
+    console.warn('  No postgres DATABASE_URL is configured, so the app is using the');
+    console.warn('  SQLite file at server/terminal.db, which lives on the container');
+    console.warn('  filesystem. Railway discards it on every redeploy, restoring the');
+    console.warn('  copy committed to git.');
+    console.warn('  CONSEQUENCE: accounts, balances, bets, avatars and PASSWORD CHANGES');
+    console.warn('  are all reverted on every deploy.');
+    console.warn('  FIX: set DATABASE_URL to your Postgres URL in the host dashboard,');
+    console.warn('       run `npm run migrate:postgres`, and only then untrack the file');
+    console.warn('       with `git rm --cached server/terminal.db`.');
+    console.warn('');
+}
 
 function normalizeDbArgs(params, callback) {
     if (typeof params === 'function') return { params: [], callback: params };
@@ -365,6 +435,8 @@ function translatePostgresSql(sql) {
             'INSERT INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = EXCLUDED.updated_at')
         .replace(/INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY')
         .replace(/\bDATETIME\b/gi, 'TIMESTAMPTZ')
+        // Avatar bytes are stored in the DB; `BLOB` is not a PostgreSQL type.
+        .replace(/\bBLOB\b/gi, 'BYTEA')
         .replace(/\bREAL\b/gi, 'DOUBLE PRECISION')
         .replace(/datetime\('now',\s*'-7 days'\)/gi, "NOW() - INTERVAL '7 days'")
         .replace(/datetime\('now',\s*'-1 day'\)/gi, "NOW() - INTERVAL '1 day'");
@@ -614,6 +686,46 @@ const db = isPostgresDatabaseUrl
 const uploadPath = path.join(publicPath, 'uploads', 'avatars');
 if (!fs.existsSync(uploadPath)) {
     fs.mkdirSync(uploadPath, { recursive: true });
+}
+
+// --- AVATAR PERSISTENCE ----------------------------------------------------
+// Avatars used to be written to `uploads/avatars` on the container filesystem.
+// That is ephemeral on Railway: the file is gone after any redeploy or scale
+// event, so the stored `avatar_url` resolved to a 404 and the picture silently
+// "disappeared" moments after a successful upload.
+//
+// The bytes are now stored in the database and served by /api/avatar/:phone, so
+// a picture survives restarts, deploys and multiple instances. `avatar_url` is
+// written in the `/api/avatar/<phone>` form; `attachAvatarDisplayUrl` still
+// turns that into an absolute, cache-busted URL for the client.
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_MIME_BY_EXT = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif'
+};
+const avatarPathFor = (phone) => `/api/avatar/${normalizePhone(phone)}`;
+
+// Magic-byte sniffing. Trusting the client-supplied MIME type and extension is
+// what previously allowed a 24-byte HTML error page to be stored as a ".jpg".
+function detectImageType(buffer) {
+    if (!buffer || buffer.length < 12) return null;
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+        return { ext: '.jpg', mime: 'image/jpeg' };
+    }
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+        return { ext: '.png', mime: 'image/png' };
+    }
+    if (buffer.slice(0, 3).toString('ascii') === 'GIF') {
+        return { ext: '.gif', mime: 'image/gif' };
+    }
+    // RIFF....WEBP
+    if (buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') {
+        return { ext: '.webp', mime: 'image/webp' };
+    }
+    return null;
 }
 
 const dbGet = (query, params = []) => new Promise((resolve, reject) => {
@@ -1990,7 +2102,7 @@ function handleAvatarUpload(req, res, next) {
 
 const profileAvatarUpload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: AVATAR_MAX_BYTES },
     fileFilter: (req, file, cb) => {
         const ext = path.extname(file.originalname || '').toLowerCase();
         const mime = String(file.mimetype || '').toLowerCase();
@@ -2005,50 +2117,58 @@ function handleProfileAvatarUpload(req, res, next) {
     profileAvatarUpload.single('avatar')(req, res, (err) => {
         if (!err) return next();
         const message = err.code === 'LIMIT_FILE_SIZE'
-            ? "Profile picture must be 5MB or smaller"
+            ? "Profile picture must be 2MB or smaller"
             : (err.message || "Avatar upload failed");
         return res.status(400).json({ success: false, message });
     });
 }
 
 async function persistProfileAvatar(req, res) {
-    if (!req.file?.buffer) return res.status(400).json({ success: false, message: "No file uploaded" });
+    if (!req.file?.buffer?.length) {
+        return res.status(400).json({ success: false, message: "No file uploaded" });
+    }
 
-    const extensionByMime = {
-        'image/jpeg': '.jpg',
-        'image/png': '.png',
-        'image/webp': '.webp',
-        'image/gif': '.gif'
-    };
-    const ext = extensionByMime[String(req.file.mimetype || '').toLowerCase()] || path.extname(req.file.originalname || '').toLowerCase() || '.png';
-    const filename = `avatar-${normalizePhone(req.user.phone)}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
-    const avatarPath = `/uploads/avatars/${filename}`;
-    const diskPath = path.join(uploadPath, filename);
+    // Verify the real content instead of trusting the declared type. This is what
+    // let an HTML error page be saved as a ".jpg" in the first place.
+    const detected = detectImageType(req.file.buffer);
+    if (!detected) {
+        return res.status(400).json({
+            success: false,
+            message: "That file is not a valid PNG, JPG, WebP, or GIF image."
+        });
+    }
+    if (req.file.buffer.length > AVATAR_MAX_BYTES) {
+        return res.status(400).json({ success: false, message: "Profile picture must be 2MB or smaller" });
+    }
+
+    const phone = normalizePhone(req.user.phone);
+    const avatarPath = avatarPathFor(phone);
+    const buffer = Buffer.from(req.file.buffer);
 
     try {
-        await fs.promises.mkdir(uploadPath, { recursive: true });
-        const current = await dbGet(`SELECT avatar_url FROM users WHERE phone = ?`, [req.user.phone]);
-        await fs.promises.writeFile(diskPath, req.file.buffer, { flag: 'wx' });
-        const result = await dbRun(`UPDATE users SET avatar_url = ? WHERE phone = ?`, [avatarPath, req.user.phone]);
+        const current = await dbGet(`SELECT avatar_url FROM users WHERE phone = ?`, [phone]);
+        const result = await dbRun(
+            `UPDATE users SET avatar_url = ?, avatar_mime = ?, avatar_data = ? WHERE phone = ?`,
+            [avatarPath, detected.mime, buffer, phone]
+        );
 
         if (!result.changes) {
-            await fs.promises.rm(diskPath, { force: true });
             return res.status(404).json({ success: false, message: "User account not found for this session" });
         }
 
-        if (current?.avatar_url && !current.avatar_url.includes('default.png')) {
-            const oldFilePath = path.join(uploadPath, path.basename(current.avatar_url));
-            if (oldFilePath.startsWith(uploadPath) && oldFilePath !== diskPath) {
-                fs.promises.rm(oldFilePath, { force: true }).catch((e) => {
-                    console.warn("Warning: Could not remove old avatar:", e.message);
-                });
+        // Best-effort cleanup of the legacy on-disk file. Failure is harmless
+        // because the picture is now served from the database.
+        const previous = current?.avatar_url || '';
+        if (previous.startsWith('/uploads/avatars/') && !previous.includes('default.png')) {
+            const oldFilePath = path.join(uploadPath, path.basename(previous));
+            if (oldFilePath.startsWith(uploadPath)) {
+                fs.promises.rm(oldFilePath, { force: true }).catch(() => {});
             }
         }
 
         const publicAvatarUrl = publicAssetUrl(req, avatarPath);
         return res.json({ success: true, avatarPath, avatar_url: avatarPath, avatarUrl: publicAvatarUrl, url: publicAvatarUrl });
     } catch (e) {
-        await fs.promises.rm(diskPath, { force: true }).catch(() => {});
         console.error("Profile avatar save failed:", e.message);
         return res.status(500).json({ success: false, message: "Profile picture could not be saved" });
     }
@@ -2096,7 +2216,7 @@ db.serialize(() => {
         name TEXT, email TEXT UNIQUE, phone TEXT UNIQUE, password TEXT, 
         balance REAL DEFAULT 0, crypto_balance REAL DEFAULT 0, otp TEXT, status TEXT DEFAULT 'unverified',
         terms_accepted INTEGER DEFAULT 0, referral_code TEXT, referred_by TEXT, verification_token TEXT,
-        avatar_url TEXT DEFAULT '/uploads/avatars/default.png', wallet_address TEXT,
+        avatar_url TEXT DEFAULT '/uploads/avatars/default.png', avatar_mime TEXT, avatar_data BLOB, wallet_address TEXT,
         role TEXT DEFAULT 'user'
     )`);
 
@@ -2231,6 +2351,10 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     addColumnSafely('bets', 'is_boosted', 'INTEGER DEFAULT 0');
     addColumnSafely('bets', 'transaction_id', 'INTEGER');
     addColumnSafely('bets', 'reference', 'TEXT');
+    // Avatar bytes live in the database so they survive redeploys (the container
+    // filesystem is ephemeral and used to lose every uploaded picture).
+    addColumnSafely('users', 'avatar_mime', 'TEXT');
+    addColumnSafely('users', 'avatar_data', 'BLOB');
 
     // Admin settings table (stores hashed PIN + the resolved admin phone)
     db.run(`CREATE TABLE IF NOT EXISTS admin_settings (
@@ -4233,11 +4357,18 @@ function attachAvatarDisplayUrl(req, user) {
     if (!user) return user;
     const avatarPath = user.avatar_url || '/uploads/avatars/default.png';
     const avatarUrl = publicAssetUrl(req, avatarPath);
-    const version = avatarPath && !/default\.png$/i.test(avatarPath)
+    // Cache-bust only legacy per-file disk paths. The new `/api/avatar/<phone>`
+    // route has a stable URL, so versioning it would pin the browser to a stale
+    // picture after the user replaces their image.
+    const isDbBacked = /^\/api\/avatar\//.test(avatarPath);
+    const version = avatarPath && !isDbBacked && !/default\.png$/i.test(avatarPath)
         ? String(path.basename(avatarPath)).replace(/\W+/g, '')
         : '';
+    // `avatar_data` holds the raw image bytes. Never let it reach a client: it
+    // would bloat every profile payload and is not needed by the frontend.
+    const { avatar_data: _avatarData, ...safeUser } = user;
     return {
-        ...user,
+        ...safeUser,
         avatar_url: avatarPath,
         avatarUrl: version && avatarUrl ? `${avatarUrl}${avatarUrl.includes('?') ? '&' : '?'}v=${version}` : avatarUrl
     };
@@ -4507,14 +4638,40 @@ app.post('/api/forgot-password', async (req, res) => {
 
 app.post('/api/change-password', authenticate, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
-    db.get(`SELECT email, password FROM users WHERE phone=?`, [req.user.phone], async (err, user) => {
-        if (!user || !(await bcrypt.compare(currentPassword, user.password))) return res.json({ success: false });
-        const hashed = await bcrypt.hash(newPassword, 10);
-        db.run(`UPDATE users SET password=? WHERE phone=?`, [hashed, req.user.phone], () => {
-            sendPolyMail(user.email, "Security Alert", "Password changed.");
-            res.json({ success: true });
-        });
-    });
+
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ success: false, message: "Current and new password are required." });
+    }
+    if (String(newPassword).length < 8) {
+        return res.status(400).json({ success: false, message: "New password must be at least 8 characters." });
+    }
+
+    try {
+        const user = await dbGet(`SELECT email, password FROM users WHERE phone = ?`, [req.user.phone]);
+        // Guard the missing-hash case: bcrypt.compare throws on a null hash, which
+        // inside this async callback would otherwise leave the request hanging.
+        if (!user) {
+            return res.status(404).json({ success: false, message: "User account not found for this session" });
+        }
+        if (!user.password) {
+            return res.status(400).json({ success: false, message: "This account has no password set. Use reset password instead." });
+        }
+        if (!(await bcrypt.compare(String(currentPassword), user.password))) {
+            return res.status(401).json({ success: false, message: "Current password is incorrect." });
+        }
+
+        const hashed = await bcrypt.hash(String(newPassword), 10);
+        const result = await dbRun(`UPDATE users SET password = ? WHERE phone = ?`, [hashed, req.user.phone]);
+        if (!result.changes) {
+            return res.status(404).json({ success: false, message: "User account not found for this session" });
+        }
+
+        sendPolyMail(user.email, "Security Alert", "Password changed.");
+        return res.json({ success: true, message: "Password updated." });
+    } catch (e) {
+        console.error("Change password failed:", e.message);
+        return res.status(500).json({ success: false, message: "Password could not be changed. Please try again." });
+    }
 });
 app.post('/api/place-bet', authenticate, async (req, res) => {
     const { marketId, side, amount } = req.body;
@@ -5920,13 +6077,34 @@ app.post('/api/admin/users/manage', authenticateAdmin, async (req, res) => {
         } else if (action === 'delete') {
             if (user.balance > 0 && adminPhone && adminPhone !== norm) {
                 await dbRun("UPDATE users SET balance = balance + ? WHERE phone = ?", [user.balance, adminPhone]);
-                await dbRun(`INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, 'finance_recovery', ?, 'completed', ?)`, 
+                await dbRun(`INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, 'finance_recovery', ?, 'completed', ?)`,
                     [adminPhone, user.balance, `RECOVERY_FROM_${norm}`]);
                 emitBalance(adminPhone);
             }
-            await dbRun("DELETE FROM users WHERE phone = ?", [norm]);
+
+            // The delete below must actually remove a row. Previously this branch
+            // reported success unconditionally, so a delete that silently affected
+            // zero rows left the account in place while the admin saw "deleted",
+            // and registration then rejected the same phone/email as already taken.
+            const removed = await dbRun("DELETE FROM users WHERE phone = ?", [norm]);
+            if (!removed.changes) {
+                return res.status(404).json({ success: false, message: "User not found. The account may already have been deleted." });
+            }
+
             await dbRun("DELETE FROM transactions WHERE user_phone = ?", [norm]);
             await dbRun("DELETE FROM bets WHERE user_phone = ?", [norm]);
+            // Clear every other table keyed by phone so a re-registration is not
+            // blocked by orphan rows. Each is guarded because the table may not
+            // exist yet on an older database snapshot.
+            const cleanup = [
+                ["DELETE FROM notifications WHERE user_phone = ?", [norm]],
+                ["DELETE FROM user_devices WHERE user_phone = ?", [norm]],
+                ["DELETE FROM password_resets WHERE phone = ?", [norm]],
+                ["DELETE FROM activity_logs WHERE user_phone = ?", [norm]]
+            ];
+            for (const [sql, params] of cleanup) {
+                try { await dbRun(sql, params); } catch (e) { /* table may not exist */ }
+            }
             emailBody = `Your account has been permanently deleted from our records.`;
         }
 
@@ -5940,10 +6118,18 @@ app.post('/api/admin/users/manage', authenticateAdmin, async (req, res) => {
                     <p style="font-size: 0.8rem; color: #777; margin-top: 20px;">If you believe this was a mistake, please contact our support desk.</p>
                     <p><b>Soko ni Soko.</b></p>
                 </div>`;
-            await sendPolyMail(user.email, subject, html);
+            // Isolated on purpose: the database change has already been committed at
+            // this point, so a mail transport failure must not turn a successful
+            // delete into a 500. That previously made admins think the delete had
+            // failed and repeat it.
+            try {
+                await sendPolyMail(user.email, subject, html);
+            } catch (mailErr) {
+                console.error('Post-action notification email failed:', mailErr.message);
+            }
         }
 
-        res.json({ success: true });
+        res.json({ success: true, message: action === 'delete' ? 'Account deleted.' : 'Action completed.' });
     } catch (e) { console.error('Admin users manage error:', e); res.status(500).json({ success: false }); }
 });
 
