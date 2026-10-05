@@ -371,10 +371,23 @@ function cleanDatabaseUrl(value) {
 }
 
 function resolveDatabaseUrl() {
-    // Prefer the standard variable; fall back to the public proxy URL so a
-    // Railway Postgres plugin that only exposes DATABASE_PUBLIC_URL still connects.
-    return cleanDatabaseUrl(process.env.DATABASE_URL)
-        || cleanDatabaseUrl(process.env.DATABASE_PUBLIC_URL);
+    // Railway exposes the Postgres connection under different names depending
+    // on how the database was added (service reference vs plugin). Accept all
+    // known variants so the app connects regardless of which one is present.
+    const candidates = [
+        'DATABASE_URL',
+        'DATABASE_PUBLIC_URL',
+        'DATABASE_PRIVATE_URL',
+        'POSTGRES_URL',
+        'POSTGRESQL_URL',
+        'POSTGRES_URL_NON_POOLING',
+        'PGURL',
+    ];
+    for (const name of candidates) {
+        const cleaned = cleanDatabaseUrl(process.env[name]);
+        if (cleaned) return cleaned;
+    }
+    return '';
 }
 
 const resolvedDatabaseUrl = resolveDatabaseUrl();
@@ -385,9 +398,22 @@ const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(resolvedDatabaseUrl)
 // accounts. Fail fast here so a missing DATABASE_URL is a loud boot error,
 // never silent data loss.
 if (!isPostgresDatabaseUrl) {
+    const presentVars = [
+        'DATABASE_URL',
+        'DATABASE_PUBLIC_URL',
+        'DATABASE_PRIVATE_URL',
+        'POSTGRES_URL',
+        'POSTGRESQL_URL',
+        'POSTGRES_URL_NON_POOLING',
+        'PGURL',
+        'PGHOST',
+        'POSTGRES_HOST',
+    ].filter((name) => process.env[name] != null && String(process.env[name]).trim() !== '');
     console.error('');
     console.error('FATAL: DATABASE_URL (or DATABASE_PUBLIC_URL) must be set to a postgres:// URL.');
     console.error('This app is Postgres-only. Set DATABASE_URL in the host dashboard and redeploy.');
+    console.error(`Seen env (names only, values hidden): [${presentVars.join(', ') || 'none of DATABASE_URL/DATABASE_PUBLIC_URL/DATABASE_PRIVATE_URL/POSTGRES_URL/POSTGRESQL_URL/PGURL/PGHOST/POSTGRES_HOST'}]`);
+    console.error('Fix: Railway dashboard -> your API service -> Variables -> Add Reference -> select the Postgres service -> DATABASE_URL, then redeploy.');
     console.error('');
     process.exit(1);
 }
