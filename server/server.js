@@ -3748,8 +3748,9 @@ app.get('/api/user/context', async (req, res) => {
 app.post('/api/register', authLimiter, async (req, res) => {
     const { name, phone, password, email, referralCode } = req.body;
     const normalized = normalizePhone(phone);
+    const normalizedEmail = normalizeEmailAddress(email)?.toLowerCase();
     try {
-        if (!name || !email || !normalized) {
+        if (!name || !normalizedEmail || !normalized) {
             return res.status(400).json({ success: false, message: "Name, email, and phone are required." });
         }
         if (!password || password.length < 8) {
@@ -3759,16 +3760,40 @@ app.post('/api/register', authLimiter, async (req, res) => {
             return res.status(400).json({ success: false, message: "Password must include uppercase, lowercase, and a number." });
         }
 
+        const existing = await dbGet(
+            `SELECT phone, email FROM users WHERE phone = ? OR LOWER(email) = LOWER(?) LIMIT 1`,
+            [normalized, normalizedEmail]
+        );
+        if (existing) {
+            const samePhone = existing.phone === normalized;
+            const sameEmail = String(existing.email || '').toLowerCase() === normalizedEmail;
+            const message = samePhone && sameEmail
+                ? "An account with this phone number and email already exists."
+                : samePhone
+                    ? "An account with this phone number already exists."
+                    : "An account with this email already exists.";
+            return res.status(409).json({ success: false, message });
+        }
+
         const hashedPassword = await bcrypt.hash(password, 10);
         const myReferralCode = crypto.randomBytes(3).toString('hex').toUpperCase();
         const verificationToken = crypto.randomBytes(32).toString('hex');
 
         db.run(`INSERT INTO users (name, phone, password, email, referral_code, referred_by, verification_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified')`,
-            [name, normalized, hashedPassword, email, myReferralCode, referralCode || null, verificationToken], async function(err) {
-                if (err) return res.status(400).json({ success: false, message: "User already exists." });
+            [name, normalized, hashedPassword, normalizedEmail, myReferralCode, referralCode || null, verificationToken], async function(err) {
+                if (err) {
+                    console.error("Registration insert failed:", err.message || err);
+                    const isUniqueFailure = err.code === '23505' || /unique|constraint|duplicate/i.test(err.message || '');
+                    return res.status(isUniqueFailure ? 409 : 500).json({
+                        success: false,
+                        message: isUniqueFailure
+                            ? "An account with this phone number or email already exists."
+                            : "Registration failed. Please try again."
+                    });
+                }
 
                 const verifyLink = `${verificationUrl(verificationToken)}`;
-                const mailResult = await sendPolyMail(email, "PolySoko Account Access",
+                const mailResult = await sendPolyMail(normalizedEmail, "PolySoko Account Access",
                     `<p>Hello ${name},</p>
                      <p>Please verify your PolySoko account to activate your referral benefits.</p>
                      <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
