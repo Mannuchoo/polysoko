@@ -5,8 +5,23 @@ const { Pool } = require('pg');
 
 dotenv.config({ path: path.join(__dirname, '.env') });
 
+function cleanUrl(value) {
+  if (value == null) return '';
+  let raw = String(value).trim();
+  if (raw.length >= 2) {
+    const first = raw[0];
+    const last = raw[raw.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      raw = raw.slice(1, -1).trim();
+    }
+  }
+  return raw;
+}
+
 const sqlitePath = process.env.SQLITE_SOURCE || path.join(__dirname, 'terminal.db');
-const databaseUrl = process.env.DATABASE_URL;
+// Accept DATABASE_PUBLIC_URL as a fallback (Railway Postgres plugin sometimes
+// only exposes the public proxy URL) and tolerate surrounding quotes.
+const databaseUrl = cleanUrl(process.env.DATABASE_URL) || cleanUrl(process.env.DATABASE_PUBLIC_URL);
 
 if (!databaseUrl || !/^postgres(?:ql)?:\/\//i.test(databaseUrl)) {
   console.error('DATABASE_URL must be set to a postgres:// or postgresql:// URL.');

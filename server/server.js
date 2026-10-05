@@ -361,16 +361,43 @@ const uploadLimiter = rateLimit({
     message: { success: false, message: "Too many uploads. Please wait and try again." }
 });
 
+function cleanDatabaseUrl(value) {
+    if (value == null) return '';
+    let raw = String(value).trim();
+    // Railway / dotenv sometimes wrap the URL in single or double quotes
+    // (local server/.env has DATABASE_PUBLIC_URL="postgresql://...").
+    // A quoted value fails the postgres:// test and silently falls back to
+    // ephemeral SQLite, which wipes passwords on every deploy.
+    if (raw.length >= 2) {
+        const first = raw[0];
+        const last = raw[raw.length - 1];
+        if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+            raw = raw.slice(1, -1).trim();
+        }
+    }
+    return raw;
+}
+
+function resolveDatabaseUrl() {
+    // Prefer the standard variable; fall back to the public proxy URL so a
+    // Railway Postgres plugin that only exposes DATABASE_PUBLIC_URL still
+    // gives us a persistent database instead of ephemeral SQLite.
+    return cleanDatabaseUrl(process.env.DATABASE_URL)
+        || cleanDatabaseUrl(process.env.DATABASE_PUBLIC_URL);
+}
+
 function sqlitePathFromDatabaseUrl(value) {
     if (!value) return path.join(__dirname, 'terminal.db');
-    const raw = String(value).trim();
+    const raw = cleanDatabaseUrl(value);
     if (!raw) return path.join(__dirname, 'terminal.db');
+    if (/^postgres(?:ql)?:\/\//i.test(raw)) return path.join(__dirname, 'terminal.db');
     if (raw.startsWith('sqlite://')) return raw.replace(/^sqlite:\/\//, '');
     if (raw.startsWith('file:')) return new URL(raw).pathname;
     return raw;
 }
 
-const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(process.env.DATABASE_URL || '');
+const resolvedDatabaseUrl = resolveDatabaseUrl();
+const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(resolvedDatabaseUrl);
 
 // A SQLite file lives on the container's ephemeral filesystem. Railway wipes it on
 // every deploy/scale event, so users, balances, bets AND password changes are all
@@ -679,10 +706,11 @@ function createPostgresCompatDb(connectionString) {
     };
 }
 
-const databasePath = sqlitePathFromDatabaseUrl(process.env.DATABASE_URL);
+const databasePath = sqlitePathFromDatabaseUrl(resolvedDatabaseUrl);
 const db = isPostgresDatabaseUrl
-    ? createPostgresCompatDb(process.env.DATABASE_URL)
+    ? createPostgresCompatDb(resolvedDatabaseUrl)
     : new sqlite3.Database(databasePath);
+console.log(`💾 Database mode: ${isPostgresDatabaseUrl ? 'PostgreSQL (persistent)' : `SQLite at ${databasePath} (EPHEMERAL - set DATABASE_URL!)`}`);
 const uploadPath = path.join(publicPath, 'uploads', 'avatars');
 if (!fs.existsSync(uploadPath)) {
     fs.mkdirSync(uploadPath, { recursive: true });
