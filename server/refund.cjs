@@ -1,38 +1,41 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+const { createPool, toPg } = require('./db');
 
-// 1. Double-check your filename! Is it 'database.db' or 'polysoko.db'?
-const dbPath = path.resolve(__dirname, 'terminal.db'); 
-const db = new sqlite3.Database(dbPath);
+const pool = createPool();
 
-console.log("Attempting to connect to:", dbPath);
+console.log('Connected to Postgres.');
 
-db.serialize(() => {
-    const userPhone = '254740650864';
-    const totalRefund = 100000;
+(async () => {
+  const userPhone = '254740650864';
+  const totalRefund = 100000;
 
-    // Check if the table actually exists first
-    db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='users'", (err, row) => {
-        if (!row) {
-            console.error("❌ ERROR: Could not find 'users' table. Are you sure 'terminal.db' is the right filename?");
-            process.exit(1);
-        }
+  // Check if the table actually exists first
+  const table = await pool.query(`SELECT to_regclass('public.users') AS name`).then((r) => r.rows[0]);
+  if (!table || !table.name) {
+    console.error("ERROR: Could not find 'users' table in Postgres.");
+    process.exit(1);
+  }
 
-        // 2. Update the balance
-        db.run(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [totalRefund, userPhone], (err) => {
-            if (err) console.error("Update Error:", err.message);
-            else console.log(`✅ Success: ${totalRefund} SokoShillings restored to ${userPhone}.`);
-        });
+  // Update the balance
+  await pool.query(toPg(`UPDATE users SET balance = balance + ? WHERE phone = ?`), [totalRefund, userPhone]);
+  console.log(`Success: ${totalRefund} SokoShillings restored to ${userPhone}.`);
 
-        // 3. Log the refund
-        const refundNote = "REFUND_MAIL_FAIL";
-        db.run(`INSERT INTO transactions (user_phone, type, amount, status, reference) 
-                VALUES (?, 'refund', 200, 'completed', ?)`, [userPhone, `${refundNote}_1_${Date.now()}`]);
-        
-        db.run(`INSERT INTO transactions (user_phone, type, amount, status, reference) 
-                VALUES (?, 'refund', 200, 'completed', ?)`, [userPhone, `${refundNote}_2_${Date.now()}`], (err) => {
-            if (!err) console.log("✅ Two refund entries added to history.");
-            db.close();
-        });
-    });
-});
+  // Log the refund
+  const refundNote = 'REFUND_MAIL_FAIL';
+  await pool.query(
+    toPg(`INSERT INTO transactions (user_phone, type, amount, status, reference)
+                VALUES (?, 'refund', 200, 'completed', ?)`),
+    [userPhone, `${refundNote}_1_${Date.now()}`]
+  );
+
+  await pool.query(
+    toPg(`INSERT INTO transactions (user_phone, type, amount, status, reference)
+                VALUES (?, 'refund', 200, 'completed', ?)`),
+    [userPhone, `${refundNote}_2_${Date.now()}`]
+  );
+  console.log('Two refund entries added to history.');
+})()
+  .catch((err) => {
+    console.error('Refund failed:', err.message);
+    process.exitCode = 1;
+  })
+  .finally(() => pool.end());

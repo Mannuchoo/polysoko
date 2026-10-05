@@ -16,7 +16,6 @@ import axios from 'axios';
 import cors from 'cors';
 import http from 'http';
 import { Server } from "socket.io";
-import sqlite3 from 'sqlite3';
 import pg from 'pg';
 import { AsyncLocalStorage, AsyncResource } from 'async_hooks';
 import bcrypt from 'bcryptjs';
@@ -227,18 +226,13 @@ app.get('/api/health', async (req, res) => {
     try {
         await dbGet('SELECT 1 AS ok');
         databaseReachable = true;
-        database = isPostgresDatabaseUrl ? 'postgresql' : 'sqlite';
+        database = 'postgresql';
     } catch (err) {
         database = `unreachable: ${err.message}`;
     }
     const mailConfigured = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
-    // A SQLite file is wiped on every deploy, which silently reverts password
-    // changes and deletes accounts. Expose it so monitoring can catch it.
-    const databasePersistent = isPostgresDatabaseUrl;
+    const databasePersistent = true;
     const warnings = [];
-    if (!databasePersistent) {
-        warnings.push('Database is SQLite on an ephemeral container filesystem: all data (including password changes) is lost on every deploy. Set DATABASE_URL to a Postgres URL.');
-    }
     if (!getJwtSecrets().length) {
         warnings.push('No JWT signing secret is available; logins will fail.');
     }
@@ -364,10 +358,8 @@ const uploadLimiter = rateLimit({
 function cleanDatabaseUrl(value) {
     if (value == null) return '';
     let raw = String(value).trim();
-    // Railway / dotenv sometimes wrap the URL in single or double quotes
-    // (local server/.env has DATABASE_PUBLIC_URL="postgresql://...").
-    // A quoted value fails the postgres:// test and silently falls back to
-    // ephemeral SQLite, which wipes passwords on every deploy.
+    // Railway / dotenv sometimes wrap the URL in single or double quotes.
+    // A quoted value fails the postgres:// test, so strip the quotes here.
     if (raw.length >= 2) {
         const first = raw[0];
         const last = raw[raw.length - 1];
@@ -380,44 +372,24 @@ function cleanDatabaseUrl(value) {
 
 function resolveDatabaseUrl() {
     // Prefer the standard variable; fall back to the public proxy URL so a
-    // Railway Postgres plugin that only exposes DATABASE_PUBLIC_URL still
-    // gives us a persistent database instead of ephemeral SQLite.
+    // Railway Postgres plugin that only exposes DATABASE_PUBLIC_URL still connects.
     return cleanDatabaseUrl(process.env.DATABASE_URL)
         || cleanDatabaseUrl(process.env.DATABASE_PUBLIC_URL);
-}
-
-function sqlitePathFromDatabaseUrl(value) {
-    if (!value) return path.join(__dirname, 'terminal.db');
-    const raw = cleanDatabaseUrl(value);
-    if (!raw) return path.join(__dirname, 'terminal.db');
-    if (/^postgres(?:ql)?:\/\//i.test(raw)) return path.join(__dirname, 'terminal.db');
-    if (raw.startsWith('sqlite://')) return raw.replace(/^sqlite:\/\//, '');
-    if (raw.startsWith('file:')) return new URL(raw).pathname;
-    return raw;
 }
 
 const resolvedDatabaseUrl = resolveDatabaseUrl();
 const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(resolvedDatabaseUrl);
 
-// A SQLite file lives on the container's ephemeral filesystem. Railway wipes it on
-// every deploy/scale event, so users, balances, bets AND password changes are all
-// reverted to whatever snapshot was committed to git. That silently rolled every
-// password back on each deploy, which looked like "my password is now incorrect".
+// Postgres-only: there is no SQLite fallback. A container-local .db file is wiped
+// on every Railway redeploy, which used to silently revert passwords and delete
+// accounts. Fail fast here so a missing DATABASE_URL is a loud boot error,
+// never silent data loss.
 if (!isPostgresDatabaseUrl) {
-    console.warn('');
-    console.warn('╔══════════════════════════════════════════════════════════════╗');
-    console.warn('║  DATABASE NOT PERSISTENT - DATA WILL BE LOST ON EVERY DEPLOY   ║');
-    console.warn('╚══════════════════════════════════════════════════════════════╝');
-    console.warn('  No postgres DATABASE_URL is configured, so the app is using the');
-    console.warn('  SQLite file at server/terminal.db, which lives on the container');
-    console.warn('  filesystem. Railway discards it on every redeploy, restoring the');
-    console.warn('  copy committed to git.');
-    console.warn('  CONSEQUENCE: accounts, balances, bets, avatars and PASSWORD CHANGES');
-    console.warn('  are all reverted on every deploy.');
-    console.warn('  FIX: set DATABASE_URL to your Postgres URL in the host dashboard,');
-    console.warn('       run `npm run migrate:postgres`, and only then untrack the file');
-    console.warn('       with `git rm --cached server/terminal.db`.');
-    console.warn('');
+    console.error('');
+    console.error('FATAL: DATABASE_URL (or DATABASE_PUBLIC_URL) must be set to a postgres:// URL.');
+    console.error('This app is Postgres-only. Set DATABASE_URL in the host dashboard and redeploy.');
+    console.error('');
+    process.exit(1);
 }
 
 function normalizeDbArgs(params, callback) {
@@ -466,7 +438,9 @@ function translatePostgresSql(sql) {
         .replace(/\bBLOB\b/gi, 'BYTEA')
         .replace(/\bREAL\b/gi, 'DOUBLE PRECISION')
         .replace(/datetime\('now',\s*'-7 days'\)/gi, "NOW() - INTERVAL '7 days'")
-        .replace(/datetime\('now',\s*'-1 day'\)/gi, "NOW() - INTERVAL '1 day'");
+        .replace(/datetime\('now',\s*'-1 day'\)/gi, "NOW() - INTERVAL '1 day'")
+        .replace(/\bdate\(\s*startTime\s*\)/gi, 'startTime::date')
+        .replace(/\bdate\(\s*\?\s*\)/g, '?::date');
 
     translated = replacePlaceholders(translated);
 
@@ -706,11 +680,8 @@ function createPostgresCompatDb(connectionString) {
     };
 }
 
-const databasePath = sqlitePathFromDatabaseUrl(resolvedDatabaseUrl);
-const db = isPostgresDatabaseUrl
-    ? createPostgresCompatDb(resolvedDatabaseUrl)
-    : new sqlite3.Database(databasePath);
-console.log(`💾 Database mode: ${isPostgresDatabaseUrl ? 'PostgreSQL (persistent)' : `SQLite at ${databasePath} (EPHEMERAL - set DATABASE_URL!)`}`);
+const db = createPostgresCompatDb(resolvedDatabaseUrl);
+console.log('💾 Database mode: PostgreSQL (persistent)');
 const uploadPath = path.join(publicPath, 'uploads', 'avatars');
 if (!fs.existsSync(uploadPath)) {
     fs.mkdirSync(uploadPath, { recursive: true });
@@ -896,8 +867,7 @@ const verifyJwt = (token) => {
     throw lastError;
 };
 
-// Runs `fn` inside a database transaction on Postgres, or simply invokes it on
-// SQLite (where dbRun already serialises and autocommits). Prefer this over
+// Runs `fn` inside a database transaction. Prefer this over
 // manual BEGIN/COMMIT strings: it guarantees the connection is committed,
 // rolled back and returned to the pool exactly once, and it keeps concurrent
 // tasks from being swept into someone else's transaction.
@@ -2397,7 +2367,7 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     addColumnSafely('admin_settings', 'admin_phone', 'TEXT');
     // Guarantee the singleton row exists; the CHECK (id = 1) constraint means an
     // UPDATE against a missing row is a silent no-op.
-    db.run(`INSERT OR IGNORE INTO admin_settings (id, created_at, updated_at) VALUES (1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`);
+    db.run(`INSERT INTO admin_settings (id, created_at, updated_at) VALUES (1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING`);
     setTimeout(() => {
         if (process.env.ADMIN_PHONE) {
             const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
@@ -3138,15 +3108,15 @@ const cleanupOutdatedMarkets = async () => {
 
     // 1. Only purge markets that are already settled/cancelled and old.
     // Deleting "closed" markets breaks settlement because bets still reference them.
-    await dbRun(`DELETE FROM markets WHERE settled = 1 AND timestamp < datetime('now', '-7 days')`);
-    await dbRun(`DELETE FROM markets WHERE status IN ('cancelled') AND timestamp < datetime('now', '-7 days')`);
+    await dbRun(`DELETE FROM markets WHERE settled = 1 AND timestamp < NOW() - INTERVAL '7 days'`);
+    await dbRun(`DELETE FROM markets WHERE status IN ('cancelled') AND timestamp < NOW() - INTERVAL '7 days'`);
     
     // 2. Remove football matches that started before today (only once settled/cancelled)
     await dbRun(
         `DELETE FROM markets 
          WHERE category='football' 
          AND settled = 1
-         AND date(startTime) < date(?)`,
+         AND startTime::date < ?::date`,
         [today]
     );
 
@@ -3154,7 +3124,7 @@ const cleanupOutdatedMarkets = async () => {
     // They must remain until settled; expiry is handled by status updates + settlement engine.
 
     // 4. Remove redundant markets with no startTime that are old (orphaned)
-    await dbRun(`DELETE FROM markets WHERE startTime IS NULL AND timestamp < datetime('now', '-1 day')`);
+    await dbRun(`DELETE FROM markets WHERE startTime IS NULL AND timestamp < NOW() - INTERVAL '1 day'`);
     
     console.log("Ã°Å¸Â§Â¹ Database cleanup complete: Redundant markets cleared.");
 };
@@ -5420,7 +5390,7 @@ app.post('/api/admin/setup-pin', authenticateAdmin, async (req, res) => {
         }
         
         const hashedPin = await bcrypt.hash(String(pin), 10);
-        await dbRun(`INSERT OR REPLACE INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)`, [hashedPin]);
+        await dbRun(`INSERT INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = EXCLUDED.updated_at`, [hashedPin]);
         
         if (typeof global.addActivityLog === 'function') {
             global.addActivityLog(req.user.phone, 'admin_pin_setup', 'Admin PIN was set up', req.ip || '', req.headers['user-agent'] || '');
@@ -6633,8 +6603,7 @@ const gracefulShutdown = (signal) => {
         try { server.close(finish); } catch (e) { finish(); }
     }
 
-    // Close the DB handle. `db.close` exists for both the sqlite3 driver and the
-    // PostgreSQL compatibility wrapper (which resolves its pool via pool.end()).
+    // Close the DB handle (the PostgreSQL wrapper resolves its pool via pool.end()).
     try {
         if (db && typeof db.close === 'function') {
             db.close(() => console.log('Database connection closed.'));

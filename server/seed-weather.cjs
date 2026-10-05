@@ -1,27 +1,20 @@
-const fs = require('fs');
 const path = require('path');
-const { createRequire } = require('module');
+const axios = require('axios');
+const dotenv = require('dotenv');
+const { createPool, toPg } = require('./db');
 
-const req = createRequire(path.join(__dirname, 'server.js'));
-const axios = req('axios');
-const sqlite3 = req('sqlite3');
+dotenv.config({ path: path.join(__dirname, '.env') });
 
-const envText = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
-const weatherKey = envText.match(/^WEATHER_API_KEY=(.+)$/m)?.[1]?.trim();
+const weatherKey = process.env.WEATHER_API_KEY?.trim();
 
 if (!weatherKey) {
   throw new Error('WEATHER_API_KEY missing in server/.env');
 }
 
-const db = new sqlite3.Database(path.join(__dirname, 'terminal.db'));
-const run = (sql, params = []) => new Promise((resolve, reject) => {
-  db.run(sql, params, function(err) {
-    err ? reject(err) : resolve(this.changes);
-  });
-});
-const all = (sql, params = []) => new Promise((resolve, reject) => {
-  db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows));
-});
+const pool = createPool();
+
+const run = (sql, params = []) => pool.query(toPg(sql), params).then((r) => r.rowCount);
+const all = (sql, params = []) => pool.query(toPg(sql), params).then((r) => r.rows);
 
 const towns = [
   { name: 'Mombasa', lat: -4.0435, lon: 39.6682 },
@@ -116,9 +109,9 @@ async function getForecast(town) {
 
   console.log(`weather markets upserted ${made}`);
   console.table(await all('SELECT category, status, COUNT(*) count FROM markets GROUP BY category, status ORDER BY category, status'));
-  db.close();
-})().catch((err) => {
+  await pool.end();
+})().catch(async (err) => {
   console.error(err.response?.data || err.message);
-  db.close();
+  await pool.end();
   process.exit(1);
 });

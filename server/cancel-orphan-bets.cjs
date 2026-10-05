@@ -1,21 +1,15 @@
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
+const { createPool, toPg } = require('./db');
 
-const db = new sqlite3.Database(path.join(__dirname, 'terminal.db'));
+const pool = createPool();
 
 function all(sql, params = []) {
-  return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
+  return pool.query(toPg(sql), params).then((r) => r.rows);
 }
 function run(sql, params = []) {
-  return new Promise((resolve, reject) =>
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve(this);
-    })
-  );
+  return pool.query(toPg(sql), params);
 }
 function get(sql, params = []) {
-  return new Promise((resolve, reject) => db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row))));
+  return pool.query(toPg(sql), params).then((r) => r.rows[0]);
 }
 
 (async () => {
@@ -32,7 +26,7 @@ function get(sql, params = []) {
   console.log(`Found ${orphans.length} orphan active bet transactions...`);
   if (!orphans.length) return;
 
-  await run('BEGIN TRANSACTION');
+  await run('BEGIN');
   try {
     for (const bet of orphans) {
       const refund = Number(Number(bet.amount || 0).toFixed(2));
@@ -56,5 +50,4 @@ function get(sql, params = []) {
     console.error(e);
     process.exitCode = 1;
   })
-  .finally(() => db.close());
-
+  .finally(() => pool.end());

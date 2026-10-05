@@ -1,31 +1,26 @@
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const axios = require('axios');
 const dotenv = require('dotenv');
+const { createPool, toPg } = require('./db');
 
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const FOOTBALL_API_KEY = process.env.FOOTBALL_API_KEY;
 if (!FOOTBALL_API_KEY) {
-  console.error('Missing FOOTBALL_API_KEY in PS/server/.env');
+  console.error('Missing FOOTBALL_API_KEY in server/.env');
   process.exit(1);
 }
 
-const db = new sqlite3.Database(path.join(__dirname, 'terminal.db'));
+const pool = createPool();
 
 function all(sql, params = []) {
-  return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
+  return pool.query(toPg(sql), params).then((r) => r.rows);
 }
 function get(sql, params = []) {
-  return new Promise((resolve, reject) => db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row))));
+  return pool.query(toPg(sql), params).then((r) => r.rows[0]);
 }
 function run(sql, params = []) {
-  return new Promise((resolve, reject) =>
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve(this);
-    })
-  );
+  return pool.query(toPg(sql), params);
 }
 
 async function resolveFixtureResult(marketId) {
@@ -57,7 +52,7 @@ async function cancelMarket(marketId, reason = 'DRAW') {
     `SELECT * FROM transactions WHERE market_id=? AND type='bet' AND status='active'`,
     [marketId]
   );
-  await run('BEGIN TRANSACTION');
+  await run('BEGIN');
   try {
     for (const bet of bets) {
       const refund = Number(Number(bet.amount || 0).toFixed(2));
@@ -82,7 +77,7 @@ async function settleMarket(marketId, winningSide) {
     `SELECT * FROM transactions WHERE market_id=? AND type='bet' AND status='active'`,
     [marketId]
   );
-  await run('BEGIN TRANSACTION');
+  await run('BEGIN');
   try {
     for (const bet of bets) {
       const isWinner = String(bet.side || '').toUpperCase() === String(winningSide || '').toUpperCase();
@@ -153,7 +148,7 @@ async function settleMarket(marketId, winningSide) {
       {
         settled_markets: settledMarkets,
         cancelled_markets: cancelledMarkets,
-        remaining_active_bet_transactions: after?.c || 0
+        remaining_active_bet_transactions: Number(after?.c || 0)
       },
       null,
       2
@@ -164,5 +159,4 @@ async function settleMarket(marketId, winningSide) {
     console.error(e);
     process.exitCode = 1;
   })
-  .finally(() => db.close());
-
+  .finally(() => pool.end());
