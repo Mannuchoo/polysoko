@@ -1107,6 +1107,27 @@ window.toggleSidebar = toggleSidebar;
 
 let selectedAvatarFile = null;
 
+function applyAvatarDisplay(avatarPathOrUrl) {
+    const fullUrl = window.avatarAssetUrl
+        ? window.avatarAssetUrl(avatarPathOrUrl, "logo-mark.png")
+        : (window.assetUrl ? window.assetUrl(avatarPathOrUrl || "logo-mark.png") : avatarPathOrUrl);
+    const fallbackUrl = window.assetUrl ? window.assetUrl("logo-mark.png") : "logo-mark.png";
+
+    ["userAvatar", "headerAvatar"].forEach(id => {
+        const img = document.getElementById(id);
+        if (!img) return;
+        img.src = fullUrl;
+        img.onerror = function() {
+            this.onerror = null;
+            this.src = fallbackUrl;
+        };
+    });
+
+    return fullUrl;
+}
+
+window.applyAvatarDisplay = applyAvatarDisplay;
+
 window.openAvatarPreview = function(src) {
     const imageSrc = src || document.getElementById("userAvatar")?.src || document.getElementById("headerAvatar")?.src;
     if (!imageSrc) return;
@@ -1199,25 +1220,13 @@ function initAvatarUpload() {
         saveBtn.innerText = "Uploading...";
 
         try {
-            const uploadAvatar = (path = '/api/profile/avatar') => fetch(window.apiUrl(path), {
+            const response = await fetch(window.apiUrl('/api/profile/avatar'), {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${token}`
                 },
                 body: formData
             });
-
-            let response = await uploadAvatar();
-            if (response.status === 404) {
-                response = await uploadAvatar('/api/update-avatar');
-            }
-            if (response.status === 404 && typeof window.clearPolySokoBackendOverride === "function") {
-                window.clearPolySokoBackendOverride();
-                response = await uploadAvatar();
-                if (response.status === 404) {
-                    response = await uploadAvatar('/api/update-avatar');
-                }
-            }
 
             const text = await response.text();
             let data;
@@ -1231,11 +1240,9 @@ function initAvatarUpload() {
 
             const avatarUrl = data.avatarUrl || data.url || data.avatar_url || data.avatarPath || '';
             if (avatarUrl) {
-                const fullUrl = window.assetUrl ? window.assetUrl(avatarUrl) : avatarUrl;
-                avatar.src = fullUrl;
-                const headerAvatar = document.getElementById("headerAvatar");
-                if (headerAvatar) headerAvatar.src = fullUrl;
-                localStorage.setItem('saved_avatar_path', avatarUrl);
+                const avatarPath = data.avatarPath || data.avatar_url || avatarUrl;
+                const fullUrl = applyAvatarDisplay(avatarUrl);
+                localStorage.setItem('saved_avatar_path', avatarPath);
                 localStorage.setItem('saved_avatar_url', fullUrl);
             }
             selectedAvatarFile = null;

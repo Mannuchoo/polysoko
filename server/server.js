@@ -154,6 +154,13 @@ const MPESA_BASE_URL = MPESA_ENV === 'production'
     : 'https://sandbox.safaricom.co.ke';
 const MPESA_STK_SHORTCODE = process.env.MPESA_STK_SHORTCODE || (MPESA_ENV === 'sandbox' ? '174379' : process.env.MPESA_SHORTCODE);
 const MPESA_STK_PASSKEY = process.env.MPESA_STK_PASSKEY || process.env.MPESA_PASSKEY;
+const MPESA_STK_TRANSACTION_TYPE = process.env.MPESA_STK_TRANSACTION_TYPE || (MPESA_ENV === 'production' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline');
+const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY;
+const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET;
+const MPESA_B2C_SHORTCODE = process.env.MPESA_B2C_SHORTCODE || (MPESA_ENV === 'sandbox' ? '600989' : process.env.MPESA_SHORTCODE);
+const MPESA_B2C_INITIATOR = process.env.MPESA_B2C_INITIATOR || process.env.MPESA_INITIATOR;
+const MPESA_B2C_SECURITY_CREDENTIAL = process.env.MPESA_B2C_SECURITY_CREDENTIAL || process.env.MPESA_SECURITY_CREDENTIAL;
+const MPESA_B2C_COMMAND_ID = process.env.MPESA_B2C_COMMAND_ID || 'BusinessPayment';
 const API_SPORTS_KEY = process.env.SPORTS_API_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY;
 const sportsSyncDaysConfig = Number(process.env.SPORTS_SYNC_DAYS || 14);
 const SPORTS_SYNC_DAYS = Number.isFinite(sportsSyncDaysConfig)
@@ -248,6 +255,37 @@ app.get('/api/health', async (req, res) => {
         timestamp: new Date().toISOString()
     });
 });
+
+function mpesaConfigStatus() {
+    const stkReady = !!(MPESA_CONSUMER_KEY && MPESA_CONSUMER_SECRET && MPESA_STK_SHORTCODE && MPESA_STK_PASSKEY && STK_CALLBACK_URL);
+    const b2cReady = !!(MPESA_CONSUMER_KEY && MPESA_CONSUMER_SECRET && MPESA_B2C_SHORTCODE && MPESA_B2C_INITIATOR && MPESA_B2C_SECURITY_CREDENTIAL && PUBLIC_API_BASE);
+    return {
+        env: MPESA_ENV,
+        baseUrl: MPESA_BASE_URL,
+        stkReady,
+        b2cReady,
+        stkShortcode: MPESA_STK_SHORTCODE || null,
+        stkTransactionType: MPESA_STK_TRANSACTION_TYPE,
+        b2cShortcode: MPESA_B2C_SHORTCODE || null,
+        b2cCommandId: MPESA_B2C_COMMAND_ID,
+        callbackUrl: STK_CALLBACK_URL,
+        b2cResultUrl: `${PUBLIC_API_BASE}/api/mpesa/result`,
+        b2cTimeoutUrl: `${PUBLIC_API_BASE}/api/mpesa/timeout`,
+        till: ADMIN_TILL
+    };
+}
+
+async function getMpesaAccessToken() {
+    if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET) {
+        throw new Error('M-Pesa consumer key and secret are not configured.');
+    }
+
+    const tokenRes = await axios.get(
+        `${MPESA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
+        { auth: { username: MPESA_CONSUMER_KEY, password: MPESA_CONSUMER_SECRET } }
+    );
+    return tokenRes.data.access_token;
+}
 // Serve a default avatar fallback when the explicit default.png file is missing
 app.get('/uploads/avatars/default.png', (req, res) => {
     const fallback = path.join(publicPath, 'logo-mark.png');
@@ -4024,7 +4062,8 @@ app.get('/api/payment-config', authenticate, (req, res) => {
     res.json({
         success: true,
         adminWallet: getAdminWalletAddress(),
-        adminTill: ADMIN_TILL
+        adminTill: ADMIN_TILL,
+        mpesa: mpesaConfigStatus()
     });
 });
 
@@ -4268,38 +4307,32 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
 });
 
 async function triggerMpesaB2C(phone, amount) {
-    // Validation: B2C payouts only support individual phone numbers (10-13 digits)
     const cleanPhone = phone.toString().replace(/\D/g, '');
     if (cleanPhone.length < 10 || cleanPhone.length > 13) {
         throw new Error(`Invalid recipient: ${phone}. M-Pesa B2C service only supports individual phone numbers, not Till numbers.`);
     }
+    if (!MPESA_B2C_SHORTCODE || !MPESA_B2C_INITIATOR || !MPESA_B2C_SECURITY_CREDENTIAL) {
+        throw new Error('M-Pesa B2C withdrawal is not configured.');
+    }
 
-    const auth = Buffer.from(`${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`).toString('base64');
-    
-    // 1. Get Token
-        const tokenRes = await axios.get(`${MPESA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`, {
-        headers: { Authorization: `Basic ${auth}` }
-    });
-    
-    // 2. The Payout Payload
+    const accessToken = await getMpesaAccessToken();
     const payload = {
-        "InitiatorName": "testapi",
-        "SecurityCredential": "I+H4y6mKg0Ug3PHudwV6K4fVmj4CPFF7rZK8iQOyOaOCmmK1CZV1pWr7wkywroptq98QjNKjpyHamleadcpDkUBR8d441G3I7zJifJCj7CAc2TY0KNtDpXX4tjm0zCyW1hhDVd493jgOlMcMcMa/plM3yhAIcFpQ7XMgNnaPpnMycDd4VY6yRA/X1edylLD5/mS+MMPuC/9o3keqbvfQRXXggk+GCsY7vO5u7vphe2IQekn2TTAaBDs89H7H8cP74Dh4tIHsoIgDiM9z771lZxKqBs2LgfkeqcEnE7Gb9gzCrseAZrx2fqoE5+otYwFKaRBsFr8SxAsQ18drxrRgCw==",
-        "CommandID": "BusinessPayment", // Correct for withdrawals
+        "InitiatorName": MPESA_B2C_INITIATOR,
+        "SecurityCredential": MPESA_B2C_SECURITY_CREDENTIAL,
+        "CommandID": MPESA_B2C_COMMAND_ID,
         "Amount": Math.round(amount),
-        "PartyA": "600989", // This is the Sandbox B2C Shortcode
-        "PartyB": phone,    // The user's phone number
-        "Remarks": "Withdrawal",
+        "PartyA": MPESA_B2C_SHORTCODE,
+        "PartyB": cleanPhone,
+        "Remarks": "PolySoko withdrawal",
         "QueueTimeOutURL": `${PUBLIC_API_BASE}/api/mpesa/timeout`,
         "ResultURL": `${PUBLIC_API_BASE}/api/mpesa/result`,
-        "Occassion": "Withdrawal"
+        "Occassion": "PolySoko withdrawal"
     };
 
-    // 3. Send to Safaricom
     const response = await axios.post(
         `${MPESA_BASE_URL}/mpesa/b2c/v1/paymentrequest`, 
         payload, 
-        { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
+        { headers: { Authorization: `Bearer ${accessToken}` } }
     );
 
     return response.data;
@@ -4360,22 +4393,49 @@ app.post('/api/mpesa/result', async (req, res) => {
         const tx = await dbGet(`SELECT id, user_phone, amount, status FROM transactions WHERE reference = ?`, [ConversationID]);
         if (!tx) return res.status(200).send('OK');
 
-        if (ResultCode === 0) {
-            // SUCCESS
-            await dbRun(`UPDATE transactions SET status = 'completed', reference = ? WHERE id = ?`, [TransactionID, tx.id]);
-            console.log(`Ã¢Å“â€¦ Transaction ${TransactionID} marked as completed.`);
+        if (Number(ResultCode) === 0) {
+            if (tx.status !== 'completed') {
+                await dbRun(
+                    `UPDATE transactions SET status = 'completed', mpesa_receipt = ? WHERE id = ?`,
+                    [TransactionID || ConversationID, tx.id]
+                );
+                console.log(`Withdrawal ${ConversationID} marked as completed with M-Pesa receipt ${TransactionID || 'N/A'}.`);
+                emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: Math.abs(tx.amount || 0), status: 'completed', reference: ConversationID });
+            }
         } else {
-            // FAILED
             if (tx.status !== 'failed' && tx.status !== 'completed') {
                 await dbRun(`UPDATE transactions SET status = 'failed' WHERE id = ?`, [tx.id]);
                 const refund = Math.abs(tx.amount || 0);
                 await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
                 emitBalance(tx.user_phone);
-                console.log(`Ã¢ÂÅ’ Transaction ${ConversationID} failed: ${ResultDesc}. Refunded sKES ${refund} to ${tx.user_phone}`);
+                emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: refund, status: 'failed', reference: ConversationID });
+                console.log(`Withdrawal ${ConversationID} failed: ${ResultDesc}. Refunded sKES ${refund} to ${tx.user_phone}`);
             }
         }
     } catch (e) {
         console.error('Error handling M-Pesa result:', e);
+    }
+
+    res.status(200).send('OK');
+});
+
+app.post('/api/mpesa/timeout', async (req, res) => {
+    const Result = req.body.Result || {};
+    const { ConversationID, ResultDesc } = Result;
+
+    try {
+        if (ConversationID) {
+            const tx = await dbGet(`SELECT id, user_phone, amount, status FROM transactions WHERE reference = ?`, [ConversationID]);
+            if (tx && tx.status !== 'failed' && tx.status !== 'completed') {
+                const refund = Math.abs(tx.amount || 0);
+                await dbRun(`UPDATE transactions SET status = 'failed' WHERE id = ?`, [tx.id]);
+                await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
+                emitBalance(tx.user_phone);
+                emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: refund, status: 'failed', reference: ConversationID });
+            }
+        }
+    } catch (e) {
+        console.error('Error handling M-Pesa timeout:', e);
     }
 
     res.status(200).send('OK');
@@ -4385,37 +4445,37 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
     if (!Number.isFinite(amount) || amount < 1) {
         return res.status(400).json({ success: false, message: "Minimum deposit is 1 sKES." });
     }
-    if (!MPESA_STK_SHORTCODE || !MPESA_STK_PASSKEY) {
+    if (!MPESA_STK_SHORTCODE || !MPESA_STK_PASSKEY || !MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET) {
         return res.status(500).json({ success: false, message: "M-Pesa STK is not configured." });
     }
 
     try {
-        const tokenRes = await axios.get(`${MPESA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
-            { auth:{ username: process.env.MPESA_CONSUMER_KEY, password: process.env.MPESA_CONSUMER_SECRET } });
-        const accessToken = tokenRes.data.access_token;
+        const accessToken = await getMpesaAccessToken();
         const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0,14);
         const password = Buffer.from(`${MPESA_STK_SHORTCODE}${MPESA_STK_PASSKEY}${timestamp}`).toString('base64');
         const formattedPhone = normalizePhone(req.user.phone);
         const callbackUrl = STK_CALLBACK_URL;
+        const roundedAmount = Math.round(amount);
         console.log(`M-Pesa STK callback URL: ${callbackUrl}`);
 
         const stkRes = await axios.post(`${MPESA_BASE_URL}/mpesa/stkpush/v1/processrequest`, {
     BusinessShortCode: MPESA_STK_SHORTCODE, 
     Password: password, 
     Timestamp: timestamp, 
-    TransactionType: 'CustomerPayBillOnline', 
-    Amount: amount, 
+    TransactionType: MPESA_STK_TRANSACTION_TYPE, 
+    Amount: roundedAmount, 
     PartyA: formattedPhone, 
-    PartyB: MPESA_STK_SHORTCODE, // Must match BusinessShortCode
+    PartyB: MPESA_STK_SHORTCODE,
     PhoneNumber: formattedPhone, 
     CallBackURL: callbackUrl, 
     AccountReference: 'PolySoko', 
     TransactionDesc: 'Deposit'
 }, { headers:{ Authorization: `Bearer ${accessToken}` } });
         
-        db.run(`INSERT INTO transactions (user_phone, type, amount, reference, status) VALUES (?, 'stk_request', ?, ?, 'pending')`,
-            [req.user.phone, amount, stkRes.data.CheckoutRequestID]);
-        res.json({ success:true });
+        await dbRun(`INSERT INTO transactions (user_phone, type, amount, reference, internal_id, status) VALUES (?, 'stk_request', ?, ?, ?, 'pending')`,
+            [req.user.phone, roundedAmount, stkRes.data.CheckoutRequestID, stkRes.data.MerchantRequestID || null]);
+        emitAdminEvent('mpesaLogUpdate', { phone: req.user.phone, amount: roundedAmount, status: 'pending', reference: stkRes.data.CheckoutRequestID });
+        res.json({ success:true, checkoutRequestId: stkRes.data.CheckoutRequestID, merchantRequestId: stkRes.data.MerchantRequestID });
    } catch(err) {
     console.error("M-Pesa STK Push Error:", err.response ? err.response.data : err.message);
     res.status(500).json({ 
@@ -4425,70 +4485,59 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
    }
 });
 
-app.post('/api/stkcallback', (req, res) => {
-    console.log("Full Callback Data:", JSON.stringify(req.body, null, 2));
+app.post('/api/stkcallback', async (req, res) => {
     res.json({ ResultCode: 0, ResultDesc: "Accepted" });
 
     const stk = req.body.Body?.stkCallback;
     if (!stk) return;
 
-    if (stk.ResultCode !== 0) {
-        db.run(`UPDATE transactions SET status = 'failed' WHERE reference = ? AND status = 'pending'`, 
-            [stk.CheckoutRequestID]);
-        console.log(`Ã¢ÂÅ’ STK Push failed for ${stk.CheckoutRequestID}: ${stk.ResultDesc}`);
-        emitAdminEvent('mpesaLogUpdate', { reference: stk.CheckoutRequestID, status: 'failed' });
-        return;
-    }
-
-    const metadata = stk.CallbackMetadata.Item;
-    const amount = Number(metadata.find(i => i.Name === 'Amount')?.Value);
-    const mpesaId = metadata.find(i => i.Name === 'MpesaReceiptNumber')?.Value;
     const checkoutID = stk.CheckoutRequestID;
 
-    // --- FIX: GENERATE THE ID HERE ---
-    const internalTxnId = "PS-" + Math.random().toString(36).substr(2, 7).toUpperCase();
-
-    db.get(`SELECT user_phone, status FROM transactions WHERE reference = ?`, [checkoutID], (err, tx) => {
-        // Handle error and check if transaction exists
-        if (err) {
-            console.error("DB Get Error:", err);
+    try {
+        const tx = await dbGet(`SELECT id, user_phone, amount, status FROM transactions WHERE reference = ?`, [checkoutID]);
+        if (!tx) {
+            console.warn(`M-Pesa STK callback had no matching transaction: ${checkoutID}`);
+            return;
+        }
+        if (tx.status !== 'pending') {
+            console.log(`M-Pesa STK callback ignored for ${checkoutID}; current status is ${tx.status}.`);
             return;
         }
 
-        if (tx && tx.status === 'pending') {
-            db.serialize(() => {
-                // 1. Update User Balance
-                db.run(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [amount, tx.user_phone]);
-                
-                // 2. Update Transaction Status with M-Pesa and Internal IDs
-                db.run(
-                    `UPDATE transactions SET status = 'completed', mpesa_receipt = ?, internal_id = ? WHERE reference = ?`, 
-                    [mpesaId, internalTxnId, checkoutID], 
-                    (err) => {
-                        if (!err) {
-                            console.log(`Ã¢Å“â€¦ Deposit Success: KES ${amount} for ${tx.user_phone}`);
-                            
-                            // 3. Send Notification
-                            sendPolysokoPush(tx.user_phone, amount, mpesaId, internalTxnId);
-                            
-                            // 4. Update UI balance via Socket
-                            emitBalance(tx.user_phone);
-
-                            // 5. Notify Admins
-                            emitAdminEvent('mpesaLogUpdate', { 
-                                phone: tx.user_phone, 
-                                amount, 
-                                status: 'completed', 
-                                reference: checkoutID 
-                            });
-                        } else {
-                            console.error("SQL Update Error:", err);
-                        }
-                    }
-                );
-            });
+        if (Number(stk.ResultCode) !== 0) {
+            await dbRun(`UPDATE transactions SET status = 'failed' WHERE id = ? AND status = 'pending'`, [tx.id]);
+            console.log(`STK Push failed for ${checkoutID}: ${stk.ResultDesc}`);
+            emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, reference: checkoutID, status: 'failed' });
+            return;
         }
-    });
+
+        const metadata = stk.CallbackMetadata?.Item || [];
+        const paidAmount = Number(metadata.find(i => i.Name === 'Amount')?.Value);
+        const creditedAmount = Number.isFinite(paidAmount) && paidAmount > 0 ? paidAmount : Number(tx.amount || 0);
+        const mpesaId = metadata.find(i => i.Name === 'MpesaReceiptNumber')?.Value || null;
+        const internalTxnId = "PS-" + Math.random().toString(36).substr(2, 7).toUpperCase();
+
+        await withTransaction(async () => {
+            const update = await dbRun(
+                `UPDATE transactions SET status = 'completed', mpesa_receipt = ?, internal_id = ? WHERE id = ? AND status = 'pending'`,
+                [mpesaId, internalTxnId, tx.id]
+            );
+            if (!update || update.changes === 0) return;
+            await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [creditedAmount, tx.user_phone]);
+        });
+
+        console.log(`Deposit confirmed: KES ${creditedAmount} for ${tx.user_phone}`);
+        sendPolysokoPush(tx.user_phone, creditedAmount, mpesaId, internalTxnId);
+        emitBalance(tx.user_phone);
+        emitAdminEvent('mpesaLogUpdate', {
+            phone: tx.user_phone,
+            amount: creditedAmount,
+            status: 'completed',
+            reference: checkoutID
+        });
+    } catch (e) {
+        console.error('Error handling STK callback:', e);
+    }
 });
 
 app.get('/api/user/sync-wallet', authenticate, async (req, res) => {
@@ -4712,6 +4761,10 @@ app.get('/api/admin/mpesa-log', authenticateAdmin, (req, res) => {
         if (err) return res.status(500).json({ success: false });
         res.json({ success: true, logs: rows });
     });
+});
+
+app.get('/api/admin/mpesa-status', authenticateAdmin, (req, res) => {
+    res.json({ success: true, mpesa: mpesaConfigStatus() });
 });
 
 app.get('/api/admin/all-markets', authenticateAdmin, (req, res) => {
@@ -4978,15 +5031,17 @@ app.post('/api/admin/approve-withdraw-fast', authenticateAdmin, async (req, res)
                 if (mpesaResponse.ResponseCode !== "0") {
                     throw new Error(mpesaResponse.ResponseDescription || "M-Pesa rejected payout");
                 }
+                const mpesaReference = mpesaResponse.ConversationID || mpesaResponse.OriginatorConversationID || `B2C_${Date.now()}`;
 
                 await dbRun(
-                    `UPDATE transactions SET status='completed', reference=? WHERE id=?`,
-                    [mpesaResponse.ConversationID, txId]
+                    `UPDATE transactions SET status='processing', reference=?, internal_id=? WHERE id=?`,
+                    [mpesaReference, mpesaResponse.OriginatorConversationID || null, txId]
                 );
+                emitAdminEvent('mpesaLogUpdate', { phone: userPhone, amount, status: 'processing', reference: mpesaReference });
 
                 sendSms({
                     to: [formatPhone(userPhone)],
-                    message: `Your withdrawal of sKES ${amount} was approved and sent to M-Pesa.`,
+                    message: `Your withdrawal of sKES ${amount} was approved and is being processed by M-Pesa.`,
                     from: "POLYSOKO"
                 }).catch(e => console.log("SMS failed but payout succeeded.", e.message));
             } catch (err) {
@@ -4994,6 +5049,7 @@ app.post('/api/admin/approve-withdraw-fast', authenticateAdmin, async (req, res)
                 await dbRun(`UPDATE transactions SET status='failed' WHERE id=?`, [txId]);
                 await dbRun(`UPDATE users SET balance = balance + ? WHERE phone=?`, [amount, userPhone]);
                 emitBalance(userPhone);
+                emitAdminEvent('mpesaLogUpdate', { phone: userPhone, amount, status: 'failed', reference: tx.reference });
             }
         })();
     } catch (err) {
@@ -5016,30 +5072,28 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
         const amount = Math.abs(tx.amount);
         const userPhone = tx.user_phone;
 
-        // --- STEP 1: M-PESA PAYOUT ---
-        // If this fails, it jumps to the catch block below
+        await dbRun(`UPDATE transactions SET status='processing' WHERE id=? AND status='pending'`, [txId]);
         const mpesaResponse = await triggerMpesaB2C(userPhone, amount);
 
         if (mpesaResponse.ResponseCode !== "0") {
-            // Throwing an error here prevents the database from updating to 'completed'
             throw new Error(`M-Pesa Payout Failed: ${mpesaResponse.ResponseDescription}`);
         }
+        const mpesaReference = mpesaResponse.ConversationID || mpesaResponse.OriginatorConversationID || `B2C_${Date.now()}`;
 
-        // --- STEP 2: UPDATE DATABASE ---
         await dbRun(
-            `UPDATE transactions SET status='completed', reference=? WHERE id=?`,
-            [mpesaResponse.ConversationID, txId]
+            `UPDATE transactions SET status='processing', reference=?, internal_id=? WHERE id=?`,
+            [mpesaReference, mpesaResponse.OriginatorConversationID || null, txId]
         );
+        emitAdminEvent('mpesaLogUpdate', { phone: userPhone, amount, status: 'processing', reference: mpesaReference });
 
-        // --- STEP 3: SMS NOTIFICATION ---
-        const victoryMsg = `Victory! Ã°Å¸Ââ€  Your withdrawal of sKES ${amount} was approved and sent to M-Pesa.`;
+        const victoryMsg = `Your withdrawal of sKES ${amount} was approved and is being processed by M-Pesa.`;
         await sendSms({
             to: [formatPhone(userPhone)],
             message: victoryMsg,
             from: "POLYSOKO"
-        }).catch(e => console.log("SMS failed but payout succeeded."));
+        }).catch(e => console.log("SMS failed but payout was submitted."));
 
-        res.json({ success: true, message: "Withdrawal successful" });
+        res.json({ success: true, message: "Withdrawal payout submitted to M-Pesa." });
 
   } catch (err) {
     // FORCE the terminal to show the error
@@ -5049,11 +5103,12 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
     console.log("------------------------------------");
 
     const tx = await dbGet(`SELECT user_phone, amount, status FROM transactions WHERE id=?`, [txId]);
-    if (tx && tx.status === 'pending') {
+    if (tx && tx.status !== 'failed' && tx.status !== 'completed') {
          await dbRun(`UPDATE transactions SET status='failed' WHERE id=?`, [txId]);
          const refund = Math.abs(tx.amount);
          await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
          emitBalance(tx.user_phone);
+         emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: refund, status: 'failed', reference: tx.reference });
          console.log(`Ã°Å¸â€™Â° Automatic refund issued for failed withdrawal: sKES ${refund} to ${tx.user_phone}`);
     }
     
@@ -5397,48 +5452,7 @@ const avatarUpload = multer({
 
 app.post('/api/profile/avatar', uploadLimiter, authenticate, handleProfileAvatarUpload, persistProfileAvatar);
 
-app.post('/api/update-avatar', uploadLimiter, authenticate, handleAvatarUpload, (req, res) => {
-    if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
-
-    db.get(`SELECT avatar_url FROM users WHERE phone = ?`, [req.user.phone], (err, user) => {
-        if (err) {
-            console.error("Avatar lookup failed:", err.message);
-            return res.status(500).json({ success: false, message: "Unable to update avatar" });
-        }
-
-        if (user && user.avatar_url && !user.avatar_url.includes('default.png')) {
-            // Use absolute pathing for deletion
-            const oldFileName = path.basename(user.avatar_url);
-            const oldFilePath = path.join(uploadPath, oldFileName);
-            if (oldFilePath.startsWith(uploadPath)) {
-                fs.rm(oldFilePath, { force: true, maxRetries: 2 }, (unlinkErr) => {
-                    if (unlinkErr) {
-                        console.warn("Warning: Could not remove old avatar:", unlinkErr.message);
-                    }
-                });
-            }
-        }
-
-        const avatarPath = `/uploads/avatars/${req.file.filename}`;
-        const publicAvatarUrl = publicAssetUrl(req, avatarPath);
-        db.run(
-            `UPDATE users SET avatar_url = ? WHERE phone = ?`, 
-            [avatarPath, req.user.phone], 
-            function(err) {
-                if (err) {
-                    console.error("Avatar update failed:", err.message);
-                    fs.rm(req.file.path, { force: true }, () => {});
-                    return res.status(500).json({ success: false, message: "Database update failed" });
-                }
-                if (!this.changes) {
-                    fs.rm(req.file.path, { force: true }, () => {});
-                    return res.status(404).json({ success: false, message: "User account not found for this session" });
-                }
-                res.json({ success: true, avatarUrl: publicAvatarUrl, url: publicAvatarUrl, avatarPath, avatar_url: avatarPath });
-            }
-        );
-    });
-});
+app.post('/api/update-avatar', uploadLimiter, authenticate, handleProfileAvatarUpload, persistProfileAvatar);
 
 app.get('/api/admin/stats', authenticate, async (req, res) => {
     try {
@@ -5493,6 +5507,7 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                 platformTotal: totalPlatformBalance.total || 0,
                 adminWallet: getAdminWalletAddress(),
                 adminTill: ADMIN_TILL,
+                mpesa: mpesaConfigStatus(),
                 pendingMarkets: pendingMarkets || []
             });
 

@@ -254,16 +254,9 @@ async function fetchProfile() {
         if (document.getElementById("roleBadge")) document.getElementById("roleBadge").innerText = (u.role || "user").toUpperCase();
 
         const defaultAvatar = "logo-mark.png";
-        const avatarUrl = avatarAssetUrl(u.avatarUrl || u.avatar_url, defaultAvatar);
-        const fallbackAvatarUrl = assetUrl(defaultAvatar);
-        if (document.getElementById("userAvatar")) {
-            document.getElementById("userAvatar").src = avatarUrl;
-            document.getElementById("userAvatar").onerror = function() { this.onerror = null; this.src = fallbackAvatarUrl; };
-        }
-        if (document.getElementById("headerAvatar")) {
-            document.getElementById("headerAvatar").src = avatarUrl;
-            document.getElementById("headerAvatar").onerror = function() { this.onerror = null; this.src = fallbackAvatarUrl; };
-        }
+        const avatarUrl = window.applyAvatarDisplay
+            ? window.applyAvatarDisplay(u.avatarUrl || u.avatar_url)
+            : avatarAssetUrl(u.avatarUrl || u.avatar_url, defaultAvatar);
         if (u.avatar_url && !/\/uploads\/avatars\/default\.png$/i.test(u.avatar_url)) {
             localStorage.setItem('saved_avatar_path', u.avatar_url);
             localStorage.setItem('saved_avatar_url', avatarUrl);
@@ -279,6 +272,10 @@ function restoreSavedAvatar() {
     const savedPath = localStorage.getItem('saved_avatar_path');
     const savedUrl = localStorage.getItem('saved_avatar_url');
     if (!savedPath && !savedUrl) return;
+    if (window.applyAvatarDisplay) {
+        window.applyAvatarDisplay(savedPath || savedUrl);
+        return;
+    }
     const normalized = avatarAssetUrl(savedPath || savedUrl);
     if (document.getElementById("userAvatar")) document.getElementById("userAvatar").src = normalized;
     if (document.getElementById("headerAvatar")) document.getElementById("headerAvatar").src = normalized;

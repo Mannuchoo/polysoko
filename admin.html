@@ -14,6 +14,7 @@
     <script>
         const ADMIN_DEFAULT_API_BASE = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname) ? window.location.origin : "https://api.polysoko.online";
         const ADMIN_LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
+        const ADMIN_FRONTEND_ONLY_HOSTS = ["polysoko.online", "www.polysoko.online", "mannuchoo.github.io"];
         const adminIsProduction = !ADMIN_LOCAL_HOSTS.includes(window.location.hostname);
         function normalizeAdminBackend(rawUrl) {
             if (!rawUrl) return "";
@@ -22,9 +23,27 @@
             const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
             return withProtocol.replace(/\/+$/, "");
         }
+        function isAdminFrontendOnlyApiBase(url) {
+            try {
+                const parsed = new URL(url);
+                return ADMIN_FRONTEND_ONLY_HOSTS.includes(parsed.hostname) || parsed.hostname.endsWith(".github.io");
+            } catch {
+                return false;
+            }
+        }
+        function safeAdminBackendUrl(rawUrl, persistBadOverride = false) {
+            const backend = normalizeAdminBackend(rawUrl);
+            if (!backend) return "";
+            if (adminIsProduction && isAdminFrontendOnlyApiBase(backend)) {
+                if (!persistBadOverride) localStorage.removeItem("backend_url_override");
+                console.warn("Ignoring frontend URL as admin API backend:", backend);
+                return "";
+            }
+            return backend;
+        }
         function getAdminBackendFromQuery() {
             const params = new URLSearchParams(window.location.search);
-            const backend = normalizeAdminBackend(params.get("backend") || params.get("api"));
+            const backend = safeAdminBackendUrl(params.get("backend") || params.get("api"), true);
             if (!backend) return "";
             localStorage.setItem("backend_url_override", backend);
             params.delete("backend");
@@ -49,10 +68,10 @@
             `;
             document.body.appendChild(banner);
             document.getElementById("adminBackendSaveBtn").onclick = () => {
-                const resolved = normalizeAdminBackend(document.getElementById("adminBackendUrlInput").value);
+                const resolved = safeAdminBackendUrl(document.getElementById("adminBackendUrlInput").value, true);
                 const msg = document.getElementById("adminBackendSetupMessage");
                 if (!resolved) {
-                    msg.textContent = "Enter your backend URL first.";
+                    msg.textContent = "Enter the API backend URL, for example https://api.polysoko.online.";
                     return;
                 }
                 localStorage.setItem("backend_url_override", resolved);
@@ -61,7 +80,7 @@
             };
         }
         const ADMIN_API_BASE = adminIsProduction
-            ? (getAdminBackendFromQuery() || normalizeAdminBackend(localStorage.getItem("backend_url_override")) || ADMIN_DEFAULT_API_BASE)
+            ? (getAdminBackendFromQuery() || safeAdminBackendUrl(localStorage.getItem("backend_url_override")) || ADMIN_DEFAULT_API_BASE)
             : window.location.origin;
         function adminApiUrl(path) {
             if (/^https?:\/\//i.test(path)) return path;
@@ -645,8 +664,20 @@ tr[onclick] {
     color: black;
 }
 
+.status-processing {
+    background: #3b82f6;
+    color: white;
+}
+
+.status-completed,
 .status-done {
     background: var(--yes);
+    color: white;
+}
+
+.status-failed,
+.status-cancelled {
+    background: var(--no);
     color: white;
 }
 
@@ -1162,6 +1193,9 @@ button, input, select {
                 <p id="platformBalanceTotal" style="margin:0; color:var(--text-dim); font-size:0.9rem;">Total user balances: sKES 0.00</p>
             </div>
         </div>
+        <div id="mpesaStatusPanel" style="margin-top:16px; padding:14px; border:1px solid #333; border-radius:12px; background:#050505; color:var(--text-dim); font-size:0.85rem;">
+            M-Pesa status loading...
+        </div>
         <div style="margin-top:30px;">
             <h3 style="color:var(--text); margin-bottom:15px;">Quick Actions</h3>
             <div class="admin-actions-grid" style="grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));">
@@ -1285,6 +1319,26 @@ function esc(str) {
     </div>
 </div>
 
+<div id="adminLoginGate" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.96); z-index:12000; justify-content:center; align-items:center; padding:20px;">
+    <div style="width:100%; max-width:420px; background:#101014; border:1px solid #333; border-radius:16px; padding:24px; box-shadow:0 24px 70px rgba(0,0,0,.55);">
+        <h2 style="margin:0 0 8px; color:#00ff88;">SuperAdmin Login</h2>
+        <p id="adminLoginGateMessage" style="margin:0 0 16px; color:#aaa; font-size:.9rem;">Enter your 6-digit admin PIN to load users, markets, and transactions.</p>
+        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Admin PIN</label>
+        <input id="adminInlinePinInput" type="password" maxlength="6" inputmode="numeric" autocomplete="current-password" placeholder="6-digit PIN" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1.1rem; letter-spacing:.18em; text-align:center; outline:none;">
+        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin:14px 0 6px;">Master Password</label>
+        <input id="adminInlinePasswordInput" type="password" autocomplete="current-password" placeholder="Use if PIN is not set" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; outline:none;">
+        <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:10px 0; color:#ff7777; font-size:.82rem;"></div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button id="adminInlinePinBtn" onclick="submitInlineAdminLogin('pin')" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Login With PIN</button>
+            <button id="adminInlineMasterBtn" onclick="submitInlineAdminLogin('master')" style="flex:1; min-width:150px; padding:13px; border:1px solid #555; border-radius:10px; background:#191919; color:white; font-weight:800; cursor:pointer;">Master Login</button>
+        </div>
+        <div style="margin-top:14px; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+            <button onclick="setAdminBackendOverrideFromGate()" style="background:none; border:0; color:#00d1ff; cursor:pointer; padding:0; font-size:.8rem;">Change backend</button>
+            <button onclick="location.href='index.html'" style="background:none; border:0; color:#aaa; cursor:pointer; padding:0; font-size:.8rem;">Back to site</button>
+        </div>
+    </div>
+</div>
+
 <!-- 🔑 CHANGE PIN MODAL -->
 <div id="changePinModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:10002; justify-content:center; align-items:center;">
     <div style="background:#1a1b23; width:95%; max-width:400px; padding:30px; border-radius:20px; border:1px solid #333; text-align:center;">
@@ -1356,11 +1410,18 @@ const API = {
         }
 
         try {
+            const token = localStorage.getItem("token");
+            const isLoginRoute = path === '/admin/pin-login' || path === '/admin/master-login';
+            if (!token && !isLoginRoute) {
+                showAdminLoginGate("Admin session required. Log in to load this data.");
+                throw new Error("Admin session required.");
+            }
+
             const res = await fetch(adminApiUrl('/api' + path), {
                 method,
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${localStorage.getItem("token")}`
+                    ...(token ? { Authorization: `Bearer ${token}` } : {})
                 },
                 body: body ? JSON.stringify(body) : null
             });
@@ -1377,7 +1438,14 @@ const API = {
             }
 
             const data = await res.json();
-            if (!res.ok) throw new Error(data.message || "Request failed");
+            if (!res.ok) {
+                const message = data.message || "Request failed";
+                if (res.status === 401 || res.status === 403) {
+                    localStorage.removeItem("token");
+                    showAdminLoginGate(message);
+                }
+                throw new Error(message);
+            }
             return data;
         } catch (err) {
             console.error(`API ERROR [${method} ${path}]`, err);
@@ -1387,6 +1455,76 @@ const API = {
     get(path) { return this.request(path, 'GET'); },
     post(path, body) { return this.request(path, 'POST', body); }
 };
+
+function showAdminLoginGate(message = "Enter your admin PIN to continue.") {
+    const gate = document.getElementById('adminLoginGate');
+    const msg = document.getElementById('adminLoginGateMessage');
+    if (msg) msg.textContent = message;
+    if (gate) {
+        gate.style.display = 'flex';
+        setTimeout(() => document.getElementById('adminInlinePinInput')?.focus(), 50);
+    }
+}
+
+function hideAdminLoginGate() {
+    const gate = document.getElementById('adminLoginGate');
+    if (gate) gate.style.display = 'none';
+}
+
+async function submitInlineAdminLogin(mode = 'pin') {
+    const pinInput = document.getElementById('adminInlinePinInput');
+    const passInput = document.getElementById('adminInlinePasswordInput');
+    const status = document.getElementById('adminInlineLoginStatus');
+    const pinBtn = document.getElementById('adminInlinePinBtn');
+    const masterBtn = document.getElementById('adminInlineMasterBtn');
+    const endpoint = mode === 'master' ? '/admin/master-login' : '/admin/pin-login';
+    const payload = mode === 'master'
+        ? { password: passInput?.value || '' }
+        : { pin: pinInput?.value || '' };
+
+    if (status) {
+        status.style.color = '#aaa';
+        status.textContent = 'Checking credentials...';
+    }
+    [pinBtn, masterBtn].forEach(btn => { if (btn) btn.disabled = true; });
+
+    try {
+        const data = await API.post(endpoint, payload);
+        if (!data.success || !data.token) throw new Error(data.message || 'Admin login failed.');
+        localStorage.setItem('token', data.token);
+        hideAdminLoginGate();
+        if (status) status.textContent = '';
+        await initAdminAfterLogin();
+    } catch (e) {
+        if (status) {
+            status.style.color = '#ff7777';
+            status.textContent = e.message || 'Admin login failed.';
+        }
+    } finally {
+        [pinBtn, masterBtn].forEach(btn => { if (btn) btn.disabled = false; });
+    }
+}
+
+function setAdminBackendOverrideFromGate() {
+    const raw = prompt('Enter the API backend URL', ADMIN_API_BASE || ADMIN_DEFAULT_API_BASE);
+    if (raw === null) return;
+    const resolved = safeAdminBackendUrl(raw, true);
+    if (!resolved) {
+        alert('Use the API backend URL, for example https://api.polysoko.online.');
+        return;
+    }
+    localStorage.setItem('backend_url_override', resolved);
+    location.reload();
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const gate = document.getElementById('adminLoginGate');
+    if (!gate || gate.style.display !== 'flex') return;
+    const active = document.activeElement;
+    if (active?.id === 'adminInlinePasswordInput') submitInlineAdminLogin('master');
+    if (active?.id === 'adminInlinePinInput') submitInlineAdminLogin('pin');
+});
 
 window.filterAdminList = function(containerId, query) {
     const cards = document.querySelectorAll(`#${containerId} > div`);
@@ -1420,7 +1558,8 @@ window.toggleAdminSidebar = function(forceClose = false) {
     }
 };
 
-window.showSection = function(id, btn) {
+window.showSection = function(id, btn, options = {}) {
+    const shouldLoad = options.load !== false;
     document.querySelectorAll('.admin-section').forEach(s => s.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     const section = document.getElementById(id);
@@ -1437,13 +1576,15 @@ window.showSection = function(id, btn) {
     document.getElementById('adminBackBtn').style.display = isDashboard ? 'none' : 'flex';
     document.getElementById('adminMenuBtn').style.display = isDashboard ? 'flex' : 'none';
 
-    if (id === 'adminAccountSection') loadAdminTreasury();
-    if (id === 'usersSection') loadAdminUsers();
-    if (id === 'betsSection') loadGlobalActiveBets();
-    if (id === 'transactionsSection') loadTransactions();
-    if (id === 'marketApprovalsSection') loadPendingMarkets();
-    if (id === 'marketsSection') loadAdminMarkets();
-    if (id === 'activityLogsSection') loadActivityLogs();
+    if (shouldLoad) {
+        if (id === 'adminAccountSection') loadAdminTreasury();
+        if (id === 'usersSection') loadAdminUsers();
+        if (id === 'betsSection') loadGlobalActiveBets();
+        if (id === 'transactionsSection') loadTransactions();
+        if (id === 'marketApprovalsSection') loadPendingMarkets();
+        if (id === 'marketsSection') loadAdminMarkets();
+        if (id === 'activityLogsSection') loadActivityLogs();
+    }
     window.toggleAdminSidebar(true);
 };
 
@@ -1459,6 +1600,19 @@ async function loadAdminTreasury() {
         if(res.success) {
             document.getElementById('adminTreasuryBal').innerText = `sKES ${Number(res.profit || 0).toFixed(2)}`;
             document.getElementById('platformBalanceTotal').innerText = `Total user balances: sKES ${Number(res.platformTotal || 0).toFixed(2)}`;
+            const mpesa = res.mpesa || {};
+            const statusPanel = document.getElementById('mpesaStatusPanel');
+            if (statusPanel) {
+                const stkColor = mpesa.stkReady ? 'var(--yes)' : 'var(--no)';
+                const b2cColor = mpesa.b2cReady ? 'var(--yes)' : 'var(--no)';
+                statusPanel.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                        <div><b style="color:${stkColor};">STK deposits: ${mpesa.stkReady ? 'Ready' : 'Not configured'}</b><br><small>Shortcode: ${esc(mpesa.stkShortcode || 'missing')}</small></div>
+                        <div><b style="color:${b2cColor};">B2C withdrawals: ${mpesa.b2cReady ? 'Ready' : 'Not configured'}</b><br><small>Payout shortcode: ${esc(mpesa.b2cShortcode || 'missing')}</small></div>
+                    </div>
+                    <div style="margin-top:8px;"><small>Callback: ${esc(mpesa.callbackUrl || 'missing')}</small></div>
+                `;
+            }
         }
     } catch(e) { console.error(e); }
 }
@@ -1497,7 +1651,7 @@ window.openWireModal = async function(type) {
     } else {
         icon.innerText = '📲';
         title.innerText = 'Wire to Business Till';
-        desc.innerText = 'Funds will be settled directly to Business Till 4447028 via M-Pesa B2C node.';
+        desc.innerText = `Funds will be settled manually to Business Till ${stats.adminTill || 'Not set'}.`;
     }
     
     amountInput.value = '';
@@ -1526,19 +1680,32 @@ window.openWireModal = async function(type) {
 
 /* ================= INIT ================= */
 window.onload = () => {
-    if (!localStorage.getItem("token")) return adminLogout();
-    
     // Sync the transaction filter pill UI on load
     document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
     document.getElementById('txFilterWithdraw')?.classList.add('active');
 
     const lastView = localStorage.getItem('admin_last_view') || 'adminAccountSection';
-    showSection(lastView);
-    initAdmin();
+    if (!localStorage.getItem("token")) {
+        showSection(lastView, null, { load: false });
+        showAdminLoginGate("Admin session required. Log in to load users, markets, and transactions.");
+        return;
+    }
+
+    initAdminAfterLogin();
 };
+async function initAdminAfterLogin() {
+    const lastView = localStorage.getItem('admin_last_view') || 'adminAccountSection';
+    showSection(lastView, null, { load: false });
+    await loadSuperAdminProfile();
+    const startupLoads = [loadAdminTreasury(), loadGlobalActiveBets(), loadTransactions()];
+    if (lastView === 'usersSection') startupLoads.push(loadAdminUsers());
+    if (lastView === 'marketsSection') startupLoads.push(loadAdminMarkets());
+    if (lastView === 'marketApprovalsSection') startupLoads.push(loadPendingMarkets());
+    if (lastView === 'activityLogsSection') startupLoads.push(loadActivityLogs());
+    await Promise.allSettled(startupLoads);
+}
 async function initAdmin() {
-    loadAdminTreasury();
-    await Promise.all([loadGlobalActiveBets(), loadTransactions()]);
+    return initAdminAfterLogin();
 }
 
 // --- iOS STYLE SWIPE GESTURES ---
@@ -1592,6 +1759,7 @@ async function loadTransactions() {
 
         table.innerHTML = list.map(tx => {
             const isPending = tx.status === 'pending';
+            const isProcessing = tx.status === 'processing';
             const isWithdrawal = tx.type === 'withdraw';
             let actionContent = `<span class="status-pill status-${tx.status}">${tx.status}</span>`;
             if (isPending && isWithdrawal) {
@@ -1599,6 +1767,8 @@ async function loadTransactions() {
                     <button class="btn-approve" onclick="approveWithdraw('${tx.id}')">✅ Approve Withdraw</button>
                     <button class="btn-no" style="padding:6px 12px; background:#ff4444; color:#fff; border:none; border-radius:6px;" onclick="rejectWithdraw('${tx.id}')">❌ Reject</button>
                 `;
+            } else if (isProcessing && isWithdrawal) {
+                actionContent = `<span class="status-pill status-processing">Processing in M-Pesa</span>`;
             }
             
             let typeLabel = tx.type.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -1637,8 +1807,13 @@ window.setTransactionFilter = function(f) {
 async function approveWithdraw(txId) {
     try {
         const data = await API.post('/admin/approve-withdraw-fast', { txId });
-        if (data.success) loadTransactions(); else alert(data.message);
-    } catch (e) { alert("Failed to approve"); }
+        if (data.success) {
+            alert(data.message || "Withdrawal approval started.");
+            loadTransactions();
+        } else {
+            alert(data.message);
+        }
+    } catch (e) { alert(e.message || "Failed to approve"); }
 }
 
 async function rejectWithdraw(txId) {
@@ -1783,7 +1958,10 @@ async function loadAdminUsers() {
                 </tr>
             `).join('');
         }
-    } catch (e) { console.error("Users load failed", e); }
+    } catch (e) {
+        console.error("Users load failed", e);
+        table.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:22px;color:#ff7777;">Could not load users: ${esc(e.message || 'Request failed')}</td></tr>`;
+    }
 }
 
 function autoFillReason() {
@@ -2042,7 +2220,8 @@ async function loadAdminMarkets() {
         `).join('');
 
     } catch (err) {
-        container.innerHTML = `<p style="color:red;">Failed to load markets</p>`;
+        console.error("Market load failed:", err);
+        container.innerHTML = `<p style="color:#ff7777;text-align:center;">Could not load markets: ${esc(err.message || 'Request failed')}</p>`;
     }
 }
 
@@ -2223,15 +2402,20 @@ function clearMarketForm() {
 
 /* ================= AUTH ================= */
 window.adminLogout = function() {
-    localStorage.clear();
-    location.href = "admin-login.html";
+    localStorage.removeItem("token");
+    localStorage.removeItem("user_data");
+    localStorage.removeItem("admin_user");
+    showAdminLoginGate("Logged out. Enter your admin PIN to continue.");
 };
 
 /* ================= AUTO REFRESH ================= */
-setInterval(loadTransactions, 30000);
+setInterval(() => {
+    if (localStorage.getItem("token")) loadTransactions();
+}, 30000);
 
 // SuperAdmin profile populate & edit
-(async function(){
+async function loadSuperAdminProfile(){
+    if (!localStorage.getItem('token')) return;
     try {
         const profileRes = await fetch(adminApiUrl('/api/profile'), {
             headers: {
@@ -2241,19 +2425,19 @@ setInterval(loadTransactions, 30000);
         const data = await profileRes.json();
         if (data && data.user) {
             const u = data.user;
-            const avatarUrl = adminAssetUrl(u.avatar_url || u.avatar);
+            const avatarUrl = adminAssetUrl(u.avatarUrl || u.avatar_url || u.avatar, "logo-mark.png");
             const adminHeaderAvatar = document.getElementById('adminHeaderAvatar');
             const adminUserNameHeader = document.getElementById('adminUserNameHeader');
             if (adminHeaderAvatar) {
                 adminHeaderAvatar.src = avatarUrl;
-                adminHeaderAvatar.onerror = function() { this.onerror = null; this.src = adminAssetUrl('/uploads/avatars/default.png'); };
+                adminHeaderAvatar.onerror = function() { this.onerror = null; this.src = adminAssetUrl('logo-mark.png'); };
             }
             if (adminUserNameHeader) {
                 adminUserNameHeader.textContent = u.name || 'SuperAdmin';
             }
         }
     } catch(e) { console.warn('Could not load superadmin profile', e); }
-})();
+}
 
 /* ================= CHANGE PIN ================= */
 window.openChangePinModal = function() {
