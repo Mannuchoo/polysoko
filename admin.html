@@ -1499,7 +1499,14 @@ async function submitInlineAdminLogin(mode = 'pin') {
 
     try {
         const data = await API.post(endpoint, payload);
-        if (!data.success || !data.token) throw new Error(data.message || 'Admin login failed.');
+        if (!data.success || !data.token) {
+            // A misconfigured server is a deployment problem, not a bad PIN. Say so
+            // explicitly, otherwise the panel just shows a bare "Login failed".
+            if (data.code === 'ADMIN_NOT_CONFIGURED') {
+                throw new Error('This server has no admin identity configured. Add ADMIN_PHONE to the API environment variables, then reload.');
+            }
+            throw new Error(data.message || 'Admin login failed.');
+        }
         localStorage.setItem('token', data.token);
         hideAdminLoginGate();
         if (status) status.textContent = '';
@@ -1509,6 +1516,7 @@ async function submitInlineAdminLogin(mode = 'pin') {
             status.style.color = '#ff7777';
             status.textContent = e.message || 'Admin login failed.';
         }
+        showAdminLoginGate(e.message || 'Admin login failed.');
     } finally {
         [pinBtn, masterBtn].forEach(btn => { if (btn) btn.disabled = false; });
     }

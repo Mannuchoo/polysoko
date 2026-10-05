@@ -359,6 +359,8 @@ function translatePostgresSql(sql) {
     if (/^COMMIT$/i.test(translated) || /^ROLLBACK$/i.test(translated)) return { sql: translated.toUpperCase() };
 
     translated = translated
+        .replace(/INSERT\s+OR\s+IGNORE\s+INTO\s+admin_settings\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)/i,
+            'INSERT INTO admin_settings ($1) VALUES ($2) ON CONFLICT (id) DO NOTHING')
         .replace(/INSERT\s+OR\s+REPLACE\s+INTO\s+admin_settings\s*\(id,\s*pin_hash,\s*updated_at\)\s*VALUES\s*\(1,\s*\?,\s*CURRENT_TIMESTAMP\)/i,
             'INSERT INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = EXCLUDED.updated_at')
         .replace(/INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY')
@@ -783,6 +785,93 @@ const normalizePhone = (phone) => {
     if (p.startsWith('0')) return '254' + p.slice(1);
     return p;
 };
+
+// --- ADMIN IDENTITY RESOLUTION ---------------------------------------------
+// Admin login is driven by ADMIN_PHONE, but that variable is routinely missing
+// on the host (Railway), which made /api/admin/pin-login and /admin/master-login
+// reject every attempt with "Admin not configured on this server."
+//
+// The identity is resolved once and cached so that pin-login, master-login and
+// the authenticateAdmin middleware ALWAYS agree on the same phone. That
+// agreement is essential: if login minted a token for a fallback identity while
+// the middleware compared against the (absent) env var, every subsequent admin
+// API call would fail with 403 straight after a "successful" login.
+//
+// Resolution order:
+//   1. ADMIN_PHONE from the environment (authoritative when present).
+//   2. admin_settings.admin_phone, persisted on first successful configuration.
+//   3. The first user already flagged role='admin' in the database.
+// Credentials (PIN / master password) are still required in every case - this
+// only decides WHICH identity the resulting token is issued for.
+let cachedAdminPhone = null;
+let adminPhoneResolution = null;
+
+async function resolveAdminPhone() {
+    if (cachedAdminPhone) return cachedAdminPhone;
+    if (adminPhoneResolution) return adminPhoneResolution;
+
+    adminPhoneResolution = (async () => {
+        const fromEnv = normalizePhone(process.env.ADMIN_PHONE);
+        if (fromEnv) {
+            cachedAdminPhone = fromEnv;
+            return fromEnv;
+        }
+
+        try {
+            const stored = await dbGet(
+                `SELECT admin_phone FROM admin_settings WHERE id = 1`
+            ).catch(() => null);
+            const fromSettings = normalizePhone(stored?.admin_phone);
+            if (fromSettings) {
+                cachedAdminPhone = fromSettings;
+                console.warn(`[ADMIN] ADMIN_PHONE is not set; using the admin phone saved in the database (${fromSettings}). Set ADMIN_PHONE to make this explicit.`);
+                return fromSettings;
+            }
+        } catch (err) {
+            console.error('[ADMIN] Could not read the stored admin phone:', err.message);
+        }
+
+        // Last resort: reuse whichever account the database already treats as an
+        // admin. The PIN/master-password check still gates access.
+        try {
+            const row = await dbGet(
+                `SELECT phone FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1`
+            ).catch(() => null);
+            const fromDb = normalizePhone(row?.phone);
+            if (fromDb) {
+                cachedAdminPhone = fromDb;
+                console.warn(`[ADMIN] ADMIN_PHONE is not set; falling back to the existing admin account ${fromDb}. Set ADMIN_PHONE to make this explicit.`);
+                return fromDb;
+            }
+        } catch (err) {
+            console.error('[ADMIN] Could not resolve an admin account from the database:', err.message);
+        }
+
+        return null;
+    })();
+
+    try {
+        return await adminPhoneResolution;
+    } finally {
+        // Allow a later retry (e.g. after an admin account is created) instead of
+        // caching the failure for the lifetime of the process.
+        adminPhoneResolution = null;
+    }
+}
+
+async function persistAdminPhone(phone) {
+    const normalized = normalizePhone(phone);
+    if (!normalized) return;
+    cachedAdminPhone = normalized;
+    try {
+        await dbRun(
+            `UPDATE admin_settings SET admin_phone = ? WHERE id = 1`,
+            [normalized]
+        );
+    } catch (err) {
+        console.error('[ADMIN] Could not persist the admin phone:', err.message);
+    }
+}
 
 const formatNairobiDate = (offsetDays = 0) => {
     const date = new Date();
@@ -2143,13 +2232,20 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     addColumnSafely('bets', 'transaction_id', 'INTEGER');
     addColumnSafely('bets', 'reference', 'TEXT');
 
-    // Admin settings table (stores hashed PIN)
+    // Admin settings table (stores hashed PIN + the resolved admin phone)
     db.run(`CREATE TABLE IF NOT EXISTS admin_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         pin_hash TEXT,
+        admin_phone TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
+    // `admin_phone` lets admin login survive a host that does not define
+    // ADMIN_PHONE. Added separately so existing databases are upgraded in place.
+    addColumnSafely('admin_settings', 'admin_phone', 'TEXT');
+    // Guarantee the singleton row exists; the CHECK (id = 1) constraint means an
+    // UPDATE against a missing row is a silent no-op.
+    db.run(`INSERT OR IGNORE INTO admin_settings (id, created_at, updated_at) VALUES (1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`);
     setTimeout(() => {
         if (process.env.ADMIN_PHONE) {
             const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
@@ -2157,7 +2253,17 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
                 if (err) console.error("Ã¢ÂÅ’ Admin Assignment Failed:", err.message);
                 else console.log(`Ã°Å¸â€˜â€˜ SuperAdmin verified: ${adminPhone}`);
             });
+            return;
         }
+        // ADMIN_PHONE is optional. When it is absent, adopt whichever account the
+        // database already treats as an admin so the panel remains reachable, and
+        // remember it so later restarts resolve the same identity.
+        resolveAdminPhone()
+            .then((resolved) => {
+                if (resolved) console.log(`Ã°Å¸â€˜â€˜ SuperAdmin identity resolved: ${resolved}`);
+                else console.warn('⚠️  No admin identity available. Set ADMIN_PHONE to enable the admin panel.');
+            })
+            .catch((err) => console.error('Admin identity resolution failed:', err.message));
     }, 2000); 
 });
 // --- UTILS ---
@@ -2215,14 +2321,17 @@ const authenticateAdmin = (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(403).json({ success: false, message: "Authentication token missing" });
 
-    jwtSecretReady.then(() => {
+    jwtSecretReady.then(async () => {
         let decoded;
         try {
             decoded = verifyJwt(token);
         } catch {
             return res.status(403).json({ success: false, code: 'TOKEN_INVALID', message: "Invalid or expired session" });
         }
-        const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
+        // Must use the same resolver as the login routes. Comparing against a
+        // missing ADMIN_PHONE here would reject every token that pin-login or
+        // master-login had just issued for the fallback identity.
+        const adminPhone = await resolveAdminPhone();
         const userPhone = normalizePhone(decoded.phone);
 
         if (!adminPhone || userPhone !== adminPhone) {
@@ -5010,10 +5119,16 @@ app.post('/api/admin/delete-market', authenticateAdmin, async (req, res) => {
 // SuperAdmin PIN Login (6-digit PIN only, no phone required)
 app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
     const { pin } = req.body;
-    const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
+    // Falls back to the stored/DB admin identity when ADMIN_PHONE is absent on
+    // the host, which previously made this route unusable in production.
+    const adminPhone = await resolveAdminPhone();
     
     if (!adminPhone) {
-        return res.json({ success: false, message: "Admin not configured on this server." });
+        return res.status(503).json({
+            success: false,
+            code: 'ADMIN_NOT_CONFIGURED',
+            message: "Admin is not configured on this server. Set the ADMIN_PHONE environment variable to your admin phone number."
+        });
     }
     
     if (!pin || String(pin).length !== 6) {
@@ -5058,11 +5173,15 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
 // Master password login (for first-time PIN setup, accepts full ADMIN_PASSWORD)
 app.post('/api/admin/master-login', authLimiter, async (req, res) => {
     const { password } = req.body;
-    const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
+    const adminPhone = await resolveAdminPhone();
     const adminPassword = process.env.ADMIN_PASSWORD || 'Polymarket2024';
     
     if (!adminPhone) {
-        return res.json({ success: false, message: "Admin not configured on this server." });
+        return res.status(503).json({
+            success: false,
+            code: 'ADMIN_NOT_CONFIGURED',
+            message: "Admin is not configured on this server. Set the ADMIN_PHONE environment variable to your admin phone number."
+        });
     }
     
     if (!password || String(password) !== String(adminPassword)) {
@@ -5072,6 +5191,13 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
     
     const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
     
+    // Persist the identity that was actually used. If ADMIN_PHONE is absent this
+    // records the fallback so every future restart resolves the same admin
+    // instead of depending on whichever account happens to be flagged first.
+    if (!process.env.ADMIN_PHONE) {
+        await persistAdminPhone(adminPhone);
+    }
+
     try {
         await dbRun(`UPDATE users SET role='admin' WHERE phone=?`, [adminPhone]);
     } catch (e) { /* ignore */ }
@@ -5161,7 +5287,7 @@ app.post('/api/admin/change-pin', authenticateAdmin, async (req, res) => {
 
 app.post('/api/admin/wire-funds', authenticateAdmin, async (req, res) => {
     const { amount, type } = req.body;
-    const adminPhone = normalizePhone(process.env.ADMIN_PHONE) || 'SYSTEM';
+    const adminPhone = (await resolveAdminPhone()) || 'SYSTEM';
     try {
         if (!amount || Number(amount) <= 0) {
             return res.status(400).json({ success: false, message: 'Invalid amount provided.' });
@@ -5651,7 +5777,7 @@ app.post('/api/update-avatar', uploadLimiter, authenticate, handleProfileAvatarU
 
 app.get('/api/admin/stats', authenticate, async (req, res) => {
     try {
-        const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
+        const adminPhone = await resolveAdminPhone();
         const userPhone = normalizePhone(req.user.phone);
         const isSuperAdmin = adminPhone && userPhone === adminPhone;
 
@@ -5761,7 +5887,7 @@ app.post('/api/admin/users/manage', authenticateAdmin, async (req, res) => {
         const user = await dbGet("SELECT name, email, is_suspended, balance, referral_code FROM users WHERE phone=?", [norm]);
         if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-        const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
+        const adminPhone = await resolveAdminPhone();
         const effectiveReason = reason || (action === 'upgrade' ? 'Manual Admin Promotion' : 'No reason provided');
         let emailBody = "";
         let subject = "PolySoko Support Update";
