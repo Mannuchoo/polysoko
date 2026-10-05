@@ -33,7 +33,7 @@ jobs:
           mkdir -p site
           cp index.html login.html reset.password.html news-detail.html admin.html style.css api.js app.js ui.js pwa.js sw.js CNAME .nojekyll 404.html site/
           cp favicon.ico favicon.png apple-touch-icon.png icon-192.png icon-512.png logo-mark.png site.webmanifest "logo 2.jpg" site/
-          cp -f profile.html sidebar.html history.html site/ 2>/dev/null || true
+          cp -f profile.html sidebar.html history.html verify.html site/ 2>/dev/null || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
