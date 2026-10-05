@@ -3730,7 +3730,7 @@ app.post('/api/register', authLimiter, async (req, res) => {
                 if (err) return res.status(400).json({ success: false, message: "User already exists." });
 
                 const verifyLink = `${verificationUrl(verificationToken)}`;
-                const mailResult = await sendPolyMail(email, "PolySoko Account Verification",
+                const mailResult = await sendPolyMail(email, "PolySoko Account Access",
                     `<p>Hello ${name},</p>
                      <p>Please verify your PolySoko account to activate your referral benefits.</p>
                      <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
@@ -4093,7 +4093,7 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
         }
         const verifyLink = `${verificationUrl(token)}`;
         if (!user.email) return res.status(400).json({ success: false, message: "This account has no email address on file." });
-        const mailResult = await sendPolyMail(user.email, "PolySoko Account Verification", 
+        const mailResult = await sendPolyMail(user.email, "PolySoko Account Access", 
             `<p>Hello ${user.name || 'there'},</p>
              <p>Click the link below to verify your account and start using PolySoko.</p>
              <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
@@ -4115,20 +4115,35 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
 app.post('/api/forgot-password', async (req, res) => {
     const { phone } = req.body;
     const norm = normalizePhone(phone);
-    db.get(`SELECT email, name FROM users WHERE phone=?`, [norm], async (err, user) => {
+    db.get(`SELECT email, name, status, verification_token FROM users WHERE phone=?`, [norm], async (err, user) => {
         if (err) return res.status(500).json({ success: false, message: "Server error. Please try again." });
         if (!user) return res.json({ success: false, message: "Not registered" });
         if (!user.email) return res.status(400).json({ success: false, message: "This account has no email address on file." });
         const token = crypto.randomBytes(32).toString('hex');
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 1200000;
+        let verifySection = '';
+        if (user.status !== 'verified') {
+            let verificationToken = user.verification_token;
+            if (!verificationToken) {
+                verificationToken = crypto.randomBytes(32).toString('hex');
+                await dbRun(`UPDATE users SET verification_token = ? WHERE phone = ?`, [verificationToken, norm]);
+            }
+            const verifyLink = verificationUrl(verificationToken);
+            verifySection = `
+                 <hr style="border:none;border-top:1px solid #ddd;margin:22px 0;">
+                 <p>Your account is still waiting for email verification. You can also verify it here:</p>
+                 <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
+                 <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${verifyLink}</span></p>`;
+        }
         db.run(`INSERT INTO password_resets (phone, token, otp, expires) VALUES (?, ?, ?, ?)`, [norm, token, otp, expires], async (err) => {
             if (err) return res.status(500).json({ success: false, message: "Could not create a reset request." });
             const resetLink = passwordResetUrl(token, otp);
             const mailResult = await sendPolyMail(user.email, "PolySoko Password Reset", 
                 `<p>Use this secure link to reset your PolySoko password. It expires in 20 minutes.</p>
                  <p><a href="${resetLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Reset Password</a></p>
-                 <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${resetLink}</span></p>`);
+                 <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${resetLink}</span></p>
+                 ${verifySection}`);
             if (!mailResult.success) {
                 return res.status(503).json({
                     success: false,
@@ -5929,7 +5944,7 @@ const forceVerifyLegacyUsers = async () => {
         const token = crypto.randomBytes(32).toString('hex');
         await dbRun("UPDATE users SET verification_token = ? WHERE id = ?", [token, user.id]);
         const verifyLink = `${verificationUrl(token)}`;
-        sendPolyMail(user.email, "PolySoko Account Verification", 
+        sendPolyMail(user.email, "PolySoko Account Access", 
             `<p>Hello ${user.name || 'there'},</p>
              <p>Please verify your account to unlock your referral code.</p>
              <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Now</a></p>
