@@ -3143,16 +3143,33 @@ const syncFootballNews = async () => {
     }
 };
 
+// Stablecoins, wrapped/derivative assets and tokenised credit products make for
+// dull "will it close higher today?" questions (they are pegged or illiquid), so
+// they are skipped in favour of tradeable coins such as BNB, BTC and ETH.
+const NON_PREDICTABLE_COINS = new Set([
+    'tether', 'usd-coin', 'dai', 'usds', 'fdusd', 'usde', 'pyusd', 'tusd', 'usdtb',
+    'ethena', 'first-digital-usd', 'ondo-us-yield', 'mountain-protocol',
+    'wrapped-bitcoin', 'wrapped-ether', 'weth', 'steth', 'wsteth', 'wbtc', 'cbbtc',
+    'bsc', 'binance-staked-sol', 'staked-ether', 'blackrock', 'circle',
+    'figure-heloc'
+]);
+
 const syncAllMarkets = async () => {
     console.log(`[${new Date().toLocaleTimeString()}] Ã°Å¸â€â€ž STARTING GLOBAL SYNC...`);
     // --- 2. CRYPTO MARKETS (Using CoinGecko + AI Enhancements) ---
     try {
-        const cryptoRes = await axios.get('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false&price_change_percentage=24h');
-        
+        // Widen the slice (previously top-10) so the crypto tab and the guest
+        // preview have plenty of markets to display.
+        const cryptoRes = await axios.get('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=25&page=1&sparkline=false&price_change_percentage=24h');
+
+        // BNB sits comfortably inside the top-25 by market cap so it is always
+        // synced; dropping pegged assets frees the remaining slots for real coins.
+        const coins = (cryptoRes.data || []).filter((coin) => coin?.id && !NON_PREDICTABLE_COINS.has(String(coin.id).toLowerCase()));
+
         const marketDate = formatNairobiDate();
         const expiryTime = new Date(new Date().setHours(23, 59, 59, 999)).toISOString();
 
-        for (const coin of cryptoRes.data) {
+        for (const coin of coins) {
             const marketId = `crypto_${coin.id}_${marketDate}`;            
             
             // Fallback values
@@ -3227,8 +3244,11 @@ app.get('/api/markets/preview', async (req, res) => {
             []
         );
 
+        // Serve a few markets per category instead of a single one, so guests see
+        // a full, scrollable preview rather than one lonely card per section.
         const wanted = ['sports', 'crypto', 'news', 'weather', 'politics', 'tech', 'football'];
-        const byCategory = new Map();
+        const perCategoryLimit = 3;
+        const byCategory = new Map(wanted.map((category) => [category, []]));
 
         for (const market of rows || []) {
             // fb_* fixtures and sp_* matches go to 'sports' category
@@ -3236,11 +3256,13 @@ app.get('/api/markets/preview', async (req, res) => {
             const category = (market.id?.startsWith('fb_') || market.id?.startsWith('sp_')) && market.category === 'sports'
                 ? 'sports'
                 : String(market.category || 'other').toLowerCase();
-            if (!wanted.includes(category) || byCategory.has(category)) continue;
-            byCategory.set(category, { ...market, category });
+            if (!byCategory.has(category)) continue;
+            const bucket = byCategory.get(category);
+            if (bucket.length >= perCategoryLimit) continue;
+            bucket.push({ ...market, category });
         }
 
-        const markets = wanted.map(category => byCategory.get(category)).filter(Boolean);
+        const markets = wanted.flatMap((category) => byCategory.get(category));
         res.json({ success: true, markets });
     } catch (e) {
         console.error("Preview markets failed:", e.message);

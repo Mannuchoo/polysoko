@@ -118,11 +118,36 @@
 .live-market-window {
     min-width: 0;
     width: min(100%, 760px);
-    overflow: auto;
+    /* Keep the guest preview a fixed, scrollable window so the login form
+       below it stays reachable instead of being pushed down the page. */
+    max-height: 62vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
     border: 1px solid rgba(0, 255, 136, 0.18);
     border-radius: 8px;
     background: rgba(8, 13, 18, 0.88);
     padding: 18px;
+}
+
+.live-market-window::-webkit-scrollbar {
+    width: 8px;
+}
+
+.live-market-window::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 999px;
+}
+
+.live-market-window::-webkit-scrollbar-thumb {
+    background: rgba(0, 255, 136, 0.35);
+    border-radius: 999px;
+}
+
+.live-market-window::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 255, 136, 0.6);
 }
 
 .live-market-header {
@@ -162,7 +187,8 @@
     }
 
     .live-market-window {
-        max-height: none;
+        /* Keep it scrollable on phones too, just a little shorter. */
+        max-height: 52vh;
     }
 }
 
@@ -1227,6 +1253,25 @@ main {
         padding: 0 10px;
         font-size: 0.72rem;
     }
+}
+
+/* Header row of a market card: badges stay on one line and never wrap. */
+.market-card-toprow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+
+.market-card-toprow .league-tag {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
 }
 
 .market-card:focus-visible {

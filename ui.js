@@ -55,6 +55,10 @@ function isNewsLikeMarket(m) {
     return ['news', 'tech', 'politics'].includes(normalizeCategory(m?.category)) || isFootballNewsMarket(m);
 }
 
+function isCryptoMarket(m) {
+    return normalizeCategory(m?.category) === 'crypto';
+}
+
 function isFootballFixtureMarket(m) {
     const cat = normalizeCategory(m?.category);
     return m?.id?.startsWith("fb_") || (
@@ -259,10 +263,14 @@ function renderFilteredMarkets() {
         return;
     }
 
-    // 1. Split into groups
+    // 1. Split into groups. Crypto markets are pulled out of the generic
+    // "upcoming" bucket so coins like BNB are not buried under hundreds of
+    // sports fixtures (they all share country "Global", which sorted them into
+    // an arbitrary spot far down the list).
     const live = allMarkets.filter(m => m.status === 'live');
+    const crypto = allMarkets.filter(m => m.status !== 'live' && isCryptoMarket(m));
     const news = allMarkets.filter(m => isNewsLikeMarket(m));
-    const upcoming = allMarkets.filter(m => m.status !== 'live' && !isNewsLikeMarket(m))
+    const upcoming = allMarkets.filter(m => m.status !== 'live' && !isNewsLikeMarket(m) && !isCryptoMarket(m))
         .sort((a, b) => (a.country || "Z").localeCompare(b.country || "Z"));
 
     let html = "";
@@ -278,7 +286,16 @@ function renderFilteredMarkets() {
         live.forEach(m => html += createMarketCard(m));
     }
 
-    // 2. Render News Feed (compact cards only; expanded feed loads on demand)
+    // 2b. Render Crypto Section (surfaced early so BNB & co. are easy to find)
+    if (crypto.length > 0) {
+        html += `<div class="main-category-label" style="color:#f0b90b; font-weight:800; padding:20px 0 10px 0;">🪙 CRYPTO PRICES</div>`;
+        crypto
+            .slice()
+            .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")))
+            .forEach(m => html += createMarketCard(m));
+    }
+
+    // 3. Render News Feed (compact cards only; expanded feed loads on demand)
     if (news.length > 0) {
         html += `<div class="main-category-label" style="color: #00ff88; font-weight: 800; padding: 20px 0 10px 0;">📰 LATEST NEWS</div>`;
         news.forEach(m => html += createMarketCard(m));
@@ -423,12 +440,33 @@ function renderSportsPage(container, sportsMarkets) {
         html += createMarketCard(m);
     });
 
-    container.innerHTML = `${html}</div>`;
+container.innerHTML = `${html}</div>`;
 }
+
+// Derive a short coin label (e.g. "BNB") for crypto cards. Market ids look like
+// "crypto_<coingecko-id>_<date>", e.g. "crypto_binancecoin_2026-10-05".
+const COIN_LABELS = {
+    binancecoin: 'BNB', bitcoin: 'BTC', ethereum: 'ETH', solana: 'SOL', ripple: 'XRP',
+    cardano: 'ADA', dogecoin: 'DOGE', tron: 'TRX', polkadot: 'DOT', chainlink: 'LINK',
+    avalanche: 'AVAX', litecoin: 'LTC', uniswap: 'UNI', stellar: 'XLM',
+    'bitcoin-cash': 'BCH', 'internet-computer': 'ICP', filecoin: 'FIL',
+    hedera: 'HBAR', aptos: 'APT', near: 'NEAR', arbitrum: 'ARB', optimism: 'OP',
+    cosmos: 'ATOM', vechain: 'VET', algorand: 'ALGO',
+    'polygon-ecosystem-token': 'POL', 'injective-protocol': 'INJ'
+};
+
+function coinLabelFor(m) {
+    const match = String(m?.id || '').match(/^crypto_([a-z0-9-]+?)_\d{4}-\d{2}-\d{2}$/i);
+    if (!match) return m?.symbol || m?.coin || '';
+    const key = match[1].toLowerCase();
+    return COIN_LABELS[key] || String(key).replace(/-/g, ' ').toUpperCase();
+}
+
 function createMarketCard(m) {
     const isFootball = isFootballFixtureMarket(m);
     const isSports = ['sports', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'].includes(m.category) || m.id?.startsWith("sp_") || m.id?.startsWith("fb_") || isFootballFixtureMarket(m);
     const isNews = isNewsLikeMarket(m);
+    const isCrypto = isCryptoMarket(m);
     const titleFallback = m.sideA && m.sideB ? `${m.sideA} vs ${m.sideB}` : "";
     const rawDisplayTitle = isNews ? (m.betQuestion || m.title) : (m.title || titleFallback);
     const safeTitle = (rawDisplayTitle || "").replace(/'/g, "\\'");
@@ -441,10 +479,14 @@ function createMarketCard(m) {
         badgeText = (parts.length ? parts.join(' — ') : 'Sports').toUpperCase();
     } else if (isNews) {
         badgeText = (m.source || m.country || 'NEWS').toUpperCase();
+    } else if (isCrypto) {
+        // Crypto markets carry no league/source, so label them with the coin
+        // itself (e.g. "BNB") instead of a meaningless "GLOBAL" tag.
+        badgeText = (coinLabelFor(m) || 'CRYPTO').toUpperCase();
     } else {
         badgeText = (m.league || m.source || "GLOBAL").toUpperCase();
     }
-    let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : "#888");
+    let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : (isCrypto ? "#f0b90b" : "#888"));
     const boostBadge = m.is_boosted ? `<span style="background: rgba(255, 214, 0, 0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); padding:4px 10px; border-radius:999px; font-size:0.68rem; font-weight:700;">BOOSTED +10%</span>` : '';
 
     // For news items we show a compact card; full content only in modal
@@ -452,6 +494,12 @@ function createMarketCard(m) {
     const mediaPreview = '';
     const miniProbBar = isNews ? renderMiniProbBar(m) : '';
     const sparkline = isNews ? renderNewsSparkline(m.id) : '';
+    // Crypto cards get their coin icon so assets like BNB are instantly recognisable.
+    const cryptoLogo = (isCrypto && m.media_url)
+        ? `<img src="${escapeHtml(m.media_url)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+                 style="width:16px; height:16px; border-radius:50%; object-fit:cover; flex:0 0 auto;"
+                 onerror="this.style.display='none';" />`
+        : '';
 
     return `
 <div class="market-card ${isNews ? 'news-style' : ''}" 
@@ -459,14 +507,15 @@ function createMarketCard(m) {
      onclick="openMarket('${m.id}')"
      style="border-left: 3px solid ${isNews ? '#00ff88' : 'transparent'};">
      
-    <div style="display:flex; justify-content:space-between; margin-bottom:10px; gap:10px; flex-wrap:wrap;">
-        <span class="league-tag" style="color:${badgeColor}; border-color:${badgeColor}; font-size:0.6rem;">
-            ${badgeText}
+    <div class="market-card-toprow">
+        <span class="league-tag" style="color:${badgeColor}; border-color:${badgeColor}; font-size:0.6rem; display:inline-flex; align-items:center; gap:6px; min-width:0;">
+            ${cryptoLogo}
+            <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${badgeText}</span>
         </span>
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:10px; flex:0 0 auto;">
             ${boostBadge}
-            <span class="live-dot" style="font-size:0.65rem; color: ${m.status === 'live' ? '#ff4d4d' : '#555'}">
-                ● ${m.status === "live" ? "LIVE" : isNews ? "NEWS" : "UPCOMING"}
+            <span class="live-dot" style="font-size:0.65rem; white-space:nowrap; color: ${m.status === 'live' ? '#ff4d4d' : '#555'}">
+                ● ${m.status === "live" ? "LIVE" : isNews ? "NEWS" : isCrypto ? "OPEN" : "UPCOMING"}
             </span>
         </div>
     </div>
