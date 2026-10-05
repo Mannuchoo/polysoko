@@ -1590,27 +1590,70 @@ function cleanMarketDescription(value) {
     if (!text) return 'Follow the source update and resolve this market using reliable public records.';
     return text.length > 260 ? `${text.slice(0, 257).trim()}...` : text;
 }
+
+function normalizeEmailAddress(value) {
+    const email = String(value || '').trim();
+    return email || null;
+}
+
+function htmlToEmailText(html) {
+    return String(html || '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, '\n')
+        .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => `${label.replace(/<[^>]+>/g, '').trim()} (${href})`)
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/gi, '"')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
 const sendPolyMail = async (to, subject, html) => {
-    console.log(`[mail] Attempting to send "${subject}" to: "${to}"`);
-    if (!to || to === "null") return { success: false, error: 'missing recipient' };
+    const recipient = normalizeEmailAddress(to);
+    console.log(`[mail] Attempting to send "${subject}" to: "${recipient || 'missing recipient'}"`);
+    if (!recipient || recipient === "null") return { success: false, error: 'missing recipient' };
     if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
         const error = 'EMAIL_USER / EMAIL_PASS are not configured';
-        console.error(`[mail] ERROR sending "${subject}" to ${to}: ${error}`);
+        console.error(`[mail] ERROR sending "${subject}" to ${recipient}: ${error}`);
         return { success: false, error };
     }
     try {
+        const text = htmlToEmailText(html);
         const info = await transporter.sendMail({
             from: `"${EMAIL_FROM_NAME}" <${process.env.EMAIL_USER}>`,
-            to, subject, html
+            sender: process.env.EMAIL_USER,
+            replyTo: process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+            to: recipient,
+            subject,
+            text: text || subject,
+            html,
+            headers: {
+                'X-PolySoko-Email-Type': 'transactional'
+            }
         });
-        console.log(`[mail] Sent "${subject}" to ${to} (id=${info && info.messageId ? info.messageId : 'n/a'})`);
-        return { success: true, messageId: info && info.messageId };
+        const accepted = Array.isArray(info?.accepted) ? info.accepted : [];
+        const rejected = Array.isArray(info?.rejected) ? info.rejected : [];
+        const pending = Array.isArray(info?.pending) ? info.pending : [];
+        if (rejected.length || pending.length || accepted.length === 0) {
+            const error = `SMTP did not accept recipient. accepted=${accepted.join(',') || 'none'} rejected=${rejected.join(',') || 'none'} pending=${pending.join(',') || 'none'}`;
+            console.error(`[mail] ERROR sending "${subject}" to ${recipient}: ${error}`);
+            return { success: false, error, messageId: info?.messageId, accepted, rejected, pending };
+        }
+        console.log(`[mail] Accepted "${subject}" for ${recipient} (id=${info?.messageId || 'n/a'}, accepted=${accepted.join(',')})`);
+        return { success: true, messageId: info?.messageId, accepted };
     } catch (e) {
         // Gmail rejects normal account passwords with "534-5.7.9 Application-specific
         // password required". That was previously swallowed into one log line, so
         // verification emails silently never arrived. Report the cause explicitly.
         const message = (e && e.message) ? e.message : String(e);
-        console.error(`[mail] ERROR sending "${subject}" to ${to}:`, message);
+        console.error(`[mail] ERROR sending "${subject}" to ${recipient}:`, message);
         if (/Application-specific password|534-5\.7\.9|Invalid login/i.test(message)) {
             console.error('[mail] EMAIL_PASS must be a Google App Password (16 chars), not the normal Gmail password.');
             console.error('[mail] Create one at https://myaccount.google.com/apppasswords');
@@ -1782,12 +1825,10 @@ function publicSiteUrl() {
     return DEFAULT_PUBLIC_SITE_URL;
 }
 
-// Every user-facing link (verification, password reset) is built from this single
-// canonical site URL, so a stale APP_URL/PUBLIC_SITE_URL can never leak into an email.
-// The API base is appended to the token endpoints because that is where /api/verify
-// lives â€” the static GitHub Pages site cannot execute the verification itself.
 function verificationUrl(token) {
-    return `${PUBLIC_API_BASE}/api/verify?token=${encodeURIComponent(token)}`;
+    const url = new URL('/verify.html', PUBLIC_SITE_URL);
+    url.searchParams.set('token', token);
+    return url.toString();
 }
 
 function passwordResetUrl(token, otp) {
@@ -3689,10 +3730,11 @@ app.post('/api/register', authLimiter, async (req, res) => {
                 if (err) return res.status(400).json({ success: false, message: "User already exists." });
 
                 const verifyLink = `${verificationUrl(verificationToken)}`;
-                const mailResult = await sendPolyMail(email, "Welcome to PolySoko - Verify Your Account",
-                    `<h1>Welcome ${name}!</h1>
-                     <p>Soko ni Soko. Please verify your account to activate your referral benefits:</p>
-                     <a href="${verifyLink}" style="padding:10px 20px; background:#00ff88; color:black; text-decoration:none; border-radius:5px; font-weight:bold;">Verify Account</a>`);
+                const mailResult = await sendPolyMail(email, "PolySoko Account Verification",
+                    `<p>Hello ${name},</p>
+                     <p>Please verify your PolySoko account to activate your referral benefits.</p>
+                     <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
+                     <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${verifyLink}</span></p>`);
                 if (!mailResult.success) {
                     return res.status(503).json({
                         success: false,
@@ -4051,11 +4093,12 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
         }
         const verifyLink = `${verificationUrl(token)}`;
         if (!user.email) return res.status(400).json({ success: false, message: "This account has no email address on file." });
-        const mailResult = await sendPolyMail(user.email, "PolySoko - Verify Your Account", 
-            `<h1>Hello ${user.name}!</h1>
-             <p>Click the link below to verify your account and start using PolySoko:</p>
-             <a href="${verifyLink}" style="padding:12px 20px; background:#00ff88; color:black; text-decoration:none; border-radius:8px; font-weight:bold; display:inline-block;">Verify Account</a>
-             <p style="color:#888; font-size:0.8rem;">If you didn't create an account, you can ignore this email.</p>`);
+        const mailResult = await sendPolyMail(user.email, "PolySoko Account Verification", 
+            `<p>Hello ${user.name || 'there'},</p>
+             <p>Click the link below to verify your account and start using PolySoko.</p>
+             <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
+             <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${verifyLink}</span></p>
+             <p style="color:#666;font-size:0.85rem;">If you did not create an account, you can ignore this email.</p>`);
         if (!mailResult.success) {
             return res.status(503).json({
                 success: false,
@@ -5886,10 +5929,11 @@ const forceVerifyLegacyUsers = async () => {
         const token = crypto.randomBytes(32).toString('hex');
         await dbRun("UPDATE users SET verification_token = ? WHERE id = ?", [token, user.id]);
         const verifyLink = `${verificationUrl(token)}`;
-        sendPolyMail(user.email, "Action Required: Verify Your PolySoko Account", 
-            `<h1>Hello ${user.name}!</h1>
-             <p>We've updated our security. Please verify your account to unlock your referral code:</p>
-             <a href="${verifyLink}" style="padding:12px 20px; background:#00ff88; color:black; text-decoration:none; border-radius:8px; font-weight:bold; display:inline-block;">Verify Now</a>`);
+        sendPolyMail(user.email, "PolySoko Account Verification", 
+            `<p>Hello ${user.name || 'there'},</p>
+             <p>Please verify your account to unlock your referral code.</p>
+             <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Now</a></p>
+             <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${verifyLink}</span></p>`);
     }
 };
 

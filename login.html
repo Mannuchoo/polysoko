@@ -316,6 +316,9 @@
                     method: 'POST',
                     body: { phone: currentVerifyPhone }
                 });
+                if (!data || !data.success) {
+                    throw new Error(data?.message || 'Verification email was not sent.');
+                }
                 btn.innerHTML = '✅ Email Sent! Check your inbox.';
                 btn.style.background = 'linear-gradient(135deg,#00ff88,#00cc66)';
                 btn.style.color = '#020405';
@@ -327,6 +330,8 @@
                 }, 3000);
             } catch (err) {
                 btn.innerHTML = '❌ Failed - Try Again';
+                const msg = document.getElementById('verifyModalMsg');
+                if (msg) msg.textContent = err.message || 'Verification email was not sent.';
                 setTimeout(() => {
                     btn.innerHTML = '📧 Resend Verification Email';
                     btn.disabled = false;

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#070b10">
+    <title>Verify Account - PolySoko</title>
+    <link rel="stylesheet" href="style.css?v=13">
+</head>
+<body class="auth-page" style="background:#0b0c10;">
+    <main class="auth-card" style="max-width:420px;text-align:center;margin:10vh auto;">
+        <h2 id="verifyTitle">Verifying Account</h2>
+        <p id="verifyMsg" style="color:#888;font-size:0.9rem;line-height:1.6;margin:18px 0 24px;">Please wait while we activate your PolySoko account.</p>
+        <button id="loginBtn" class="btn-login" style="display:none;" onclick="window.location.href='login.html?verified=1'">Continue to Login</button>
+    </main>
+
+    <script src="api.js?v=13"></script>
+    <script>
+        async function verifyAccount() {
+            const title = document.getElementById('verifyTitle');
+            const msg = document.getElementById('verifyMsg');
+            const loginBtn = document.getElementById('loginBtn');
+            const token = new URLSearchParams(window.location.search).get('token');
+
+            if (!token) {
+                title.textContent = 'Verification Link Missing';
+                msg.textContent = 'This verification link is missing its token. Please request a new verification email from the login page.';
+                loginBtn.style.display = 'block';
+                return;
+            }
+
+            try {
+                const data = await apiFetch(`verify?token=${encodeURIComponent(token)}&format=json`);
+                if (!data || !data.success) throw new Error(data?.message || 'Verification failed.');
+                window.location.href = 'login.html?verified=1';
+            } catch (err) {
+                title.textContent = 'Verification Failed';
+                msg.textContent = err.message || 'This verification link is invalid or expired. Please request a new verification email from the login page.';
+                loginBtn.textContent = 'Back to Login';
+                loginBtn.style.display = 'block';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', verifyAccount);
+    </script>
+</body>
+</html>
