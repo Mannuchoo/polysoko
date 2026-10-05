@@ -18,6 +18,7 @@ import http from 'http';
 import { Server } from "socket.io";
 import sqlite3 from 'sqlite3';
 import pg from 'pg';
+import { AsyncLocalStorage, AsyncResource } from 'async_hooks';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -231,6 +232,7 @@ app.get('/api/health', async (req, res) => {
     } catch (err) {
         database = `unreachable: ${err.message}`;
     }
+    const mailConfigured = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
     res.status(200).json({
         success: true,
         service: 'polysoko-api',
@@ -239,6 +241,9 @@ app.get('/api/health', async (req, res) => {
         database,
         databaseReachable,
         jwtConfigured: !!JWT_SECRET,
+        mailConfigured,
+        publicSiteUrl: PUBLIC_SITE_URL,
+        publicApiBase: PUBLIC_API_BASE,
         uptimeSeconds: Math.round(process.uptime()),
         timestamp: new Date().toISOString()
     });
@@ -374,12 +379,48 @@ function createPostgresCompatDb(connectionString) {
         return result.rows;
     };
 
-    // A single pooled client is pinned while a transaction is open so that
-    // BEGIN / COMMIT / ROLLBACK and the statements in between run on the same
-    // connection (a bare pg.Pool would spread them across different clients).
-    let transactionClient = null;
+    // Transactions are scoped per async context instead of sharing one
+    // module-level client. With a single shared client, one task's BEGIN pinned
+    // the connection for *every* concurrent task, and a single failed statement
+    // poisoned it (Postgres abort-on-error) so unrelated queries failed with
+    // "current transaction is aborted" until a ROLLBACK happened by luck.
+    //
+    // NB: the store is seeded in the *synchronous* part of run/get/all (see
+    // `beginTx`) and holds the pending connect() promise. Seeding it after an
+    // await would attach the store to the wrong async frame, so later statements
+    // would silently escape the transaction.
+    const txStore = new AsyncLocalStorage();
 
-    const query = async (sql, params = []) => {
+    const currentTx = () => txStore.getStore() || null;
+
+    const toError = (e) => (e instanceof Error ? e : new Error(String(e?.message || e)));
+
+    // Settle a transaction: clear the context, then run COMMIT/ROLLBACK and
+    // always hand the connection back to the pool exactly once.
+    // `settled` lives on the shared tx object, so it stays authoritative even if
+    // the async-context store has already been cleared from another frame.
+    const endTx = async (statement, tx) => {
+        const target = tx || currentTx();
+        if (!target) return;
+        if (target.settled) return; // abortTx() already released it.
+        target.settled = true;
+        let client;
+        try {
+            client = await target.pending;
+        } catch {
+            return; // connect() itself failed; nothing to release.
+        }
+        try {
+            await client.query(statement);
+        } catch (err) {
+            console.error(`PostgreSQL ${statement} failed:`, err.message);
+        } finally {
+            client.release();
+        }
+    };
+
+    // Runs a statement, routing it to this context's transaction when present.
+    const exec = async (sql, params = []) => {
         const pragmaMatch = String(sql || '').match(/^\s*PRAGMA\s+table_info\(([^)]+)\)\s*;?\s*$/i);
         if (pragmaMatch) return { rows: await tableInfo(pragmaMatch[1]), rowCount: 0 };
         const translated = translatePostgresSql(sql);
@@ -387,56 +428,134 @@ function createPostgresCompatDb(connectionString) {
         const bare = text.toUpperCase();
 
         if (bare === 'BEGIN') {
-            if (!transactionClient) {
-                const client = await pool.connect();
-                try {
-                    await client.query('BEGIN');
-                    transactionClient = client;
-                } catch (err) {
-                    client.release();
-                    throw err;
-                }
+            // `dispatch` already seeded the store synchronously in the caller's
+            // frame; just wait for the connection to be ready.
+            const tx = currentTx();
+            if (!tx) return { rows: [], rowCount: 0 };
+            try {
+                await tx.pending;
+            } catch (err) {
+                txStore.enterWith(null);
+                throw err;
             }
             return { rows: [], rowCount: 0 };
         }
 
         if (bare === 'COMMIT' || bare === 'ROLLBACK') {
-            if (!transactionClient) return { rows: [], rowCount: 0 };
-            const client = transactionClient;
-            transactionClient = null;
-            try {
-                await client.query(bare);
-            } finally {
-                client.release();
-            }
+            await endTx(bare);
             return { rows: [], rowCount: 0 };
         }
 
-        try {
-            if (transactionClient) return await transactionClient.query(text, params);
-            return await pool.query(text, params);
-        } catch (err) {
-            console.error('PostgreSQL query failed:', err.message, '\nSQL:', text);
-            throw err;
-        }
+        // Note: rollback/abort is owned by `transaction()` (or by an explicit
+        // ROLLBACK from the caller). Doing it here as well would race with that
+        // path and release the connection twice.
+        const tx = currentTx();
+        if (tx) return await (await tx.pending).query(text, params);
+        return await pool.query(text, params);
     };
 
+    // Seeding AND clearing the transaction store must happen in the caller's
+    // synchronous frame. Doing it inside the async `exec` would bind the store
+    // to the wrong async context, so later statements would silently escape the
+    // transaction (running outside it and leaking the connection).
+    const dispatch = (sql, params) => {
+        const text = String(sql || '');
+
+        if (/^\s*BEGIN\b/i.test(text)) {
+            if (!currentTx()) {
+                const pending = pool.connect().then(async (client) => {
+                    await client.query('BEGIN');
+                    return client;
+                });
+                // Swallow the rejection here; `exec` awaits `pending` and
+                // rethrows, this only avoids an unhandled rejection warning.
+                pending.catch(() => {});
+                txStore.enterWith({ pending, settled: false });
+            }
+            return exec(sql, params);
+        }
+
+        if (/^\s*(COMMIT|ROLLBACK)\b/i.test(text)) {
+            const tx = currentTx();
+            txStore.enterWith(null);
+            return endTx(text.trim().toUpperCase(), tx)
+                .then(() => ({ rows: [], rowCount: 0 }));
+        }
+
+        return exec(sql, params);
+    };
+
+    // `transaction(fn)` runs `fn` with this context bound to a dedicated connection.
+    // AsyncResource.run scopes the binding strictly to `fn` and its own async
+    // descendants, so unrelated work running concurrently in the same event-loop
+    // context is NOT dragged into the transaction. This is why callers must use
+    // this helper rather than bare BEGIN/COMMIT strings.
+    const transaction = (fn) => new Promise((resolve, reject) => {
+        const resource = new AsyncResource('pg-transaction');
+        const pending = pool.connect().then(async (client) => {
+            await client.query('BEGIN');
+            return client;
+        });
+        pending.catch(() => {}); // surfaced via `tx` once awaited
+        const tx = { pending, settled: false };
+        resource.runInAsyncScope(() => {
+            (async () => {
+                const client = await pending; // throws if connect/BEGIN failed
+                let released = false;
+                const release = () => {
+                    if (released) return;
+                    released = true;
+                    client.release();
+                };
+                txStore.enterWith(tx);
+                try {
+                    const value = await fn();
+                    txStore.enterWith(null);
+                    tx.settled = true;
+                    try {
+                        await client.query('COMMIT');
+                    } catch (err) {
+                        console.error('PostgreSQL COMMIT failed:', err.message);
+                    }
+                    return value;
+                } catch (err) {
+                    txStore.enterWith(null);
+                    if (!tx.settled) {
+                        tx.settled = true;
+                        try {
+                            await client.query('ROLLBACK');
+                        } catch (rollbackErr) {
+                            // Connection is unusable; destroy it instead of
+                            // returning a poisoned client to the pool.
+                            released = true;   // stop `finally` double-releasing
+                            client.release(toError(rollbackErr));
+                        }
+                    }
+                    throw err;
+                } finally {
+                    release();
+                }
+            })().then(resolve, reject);
+        });
+    });
+
     return {
+        transaction,
         get(sql, params, callback) {
             const args = normalizeDbArgs(params, callback);
-            query(sql, args.params)
+            dispatch(sql, args.params)
                 .then(result => args.callback?.(null, result.rows[0]))
                 .catch(err => args.callback?.(err));
         },
         all(sql, params, callback) {
             const args = normalizeDbArgs(params, callback);
-            query(sql, args.params)
+            dispatch(sql, args.params)
                 .then(result => args.callback?.(null, result.rows))
                 .catch(err => args.callback?.(err));
         },
         run(sql, params, callback) {
             const args = normalizeDbArgs(params, callback);
-            query(sql, args.params)
+            dispatch(sql, args.params)
                 .then(result => {
                     const context = {
                         lastID: result.rows?.[0]?.id ?? null,
@@ -473,6 +592,16 @@ const dbAll = (query, params = []) => new Promise((resolve, reject) => {
 const dbRun = (query, params = []) => new Promise((resolve, reject) => {
     db.run(query, params, function(err) { err ? reject(err) : resolve(this); });
 });
+
+// Runs `fn` inside a database transaction on Postgres, or simply invokes it on
+// SQLite (where dbRun already serialises and autocommits). Prefer this over
+// manual BEGIN/COMMIT strings: it guarantees the connection is committed,
+// rolled back and returned to the pool exactly once, and it keeps concurrent
+// tasks from being swept into someone else's transaction.
+const withTransaction = (fn) => {
+    if (typeof db.transaction === 'function') return db.transaction(fn);
+    return Promise.resolve().then(fn);
+};
 
 async function ensureDbColumn(tableName, columnName, definition) {
     const columns = await dbAll(`PRAGMA table_info(${tableName})`);
@@ -1464,6 +1593,11 @@ function cleanMarketDescription(value) {
 const sendPolyMail = async (to, subject, html) => {
     console.log(`[mail] Attempting to send "${subject}" to: "${to}"`);
     if (!to || to === "null") return { success: false, error: 'missing recipient' };
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+        const error = 'EMAIL_USER / EMAIL_PASS are not configured';
+        console.error(`[mail] ERROR sending "${subject}" to ${to}: ${error}`);
+        return { success: false, error };
+    }
     try {
         const info = await transporter.sendMail({
             from: `"${EMAIL_FROM_NAME}" <${process.env.EMAIL_USER}>`,
@@ -1484,6 +1618,17 @@ const sendPolyMail = async (to, subject, html) => {
         return { success: false, error: message };
     }
 };
+
+function mailFailureMessage(result, fallback = "Email could not be sent. Please try again shortly.") {
+    const raw = String(result?.error || '');
+    if (/EMAIL_USER|EMAIL_PASS|Missing credentials/i.test(raw)) {
+        return "Email is not configured on the server. Add EMAIL_USER and EMAIL_PASS to server/.env locally and to Railway variables in production, then restart.";
+    }
+    if (/Application-specific password|534-5\.7\.9|Invalid login/i.test(raw)) {
+        return "Email login failed. For Gmail, EMAIL_PASS must be a Google App Password, not your normal Gmail password.";
+    }
+    return fallback;
+}
 // Define the paths you need
 const foldersToCreate = [
     uploadPath,
@@ -2584,8 +2729,7 @@ const cancelMarket = async (marketId, reason = 'CANCELLED') => {
             AND status = 'active'
         `, [marketId]);
 
-        await dbRun("BEGIN TRANSACTION");
-
+        await withTransaction(async () => {
         for (const bet of bets) {
             const refund = Number(Number(bet.amount || 0).toFixed(2));
             if (refund > 0) {
@@ -2614,14 +2758,13 @@ const cancelMarket = async (marketId, reason = 'CANCELLED') => {
             `UPDATE markets SET status='cancelled', result=?, settled=1 WHERE id=?`,
             [String(reason || 'CANCELLED').toUpperCase(), marketId]
         );
+        });
 
-        await dbRun("COMMIT");
         emitMarkets();
         console.log(`Ã¢Å“â€¦ Market ${marketId} cancelled/refunded`);
         return { success: true, cancelledBets: bets.length };
     } catch (e) {
         console.error("Ã¢ÂÅ’ Market cancel failed:", e.message);
-        try { await dbRun("ROLLBACK"); } catch { /* ignore */ }
     }
 };
 
@@ -2693,8 +2836,7 @@ const settleMarket = async (marketId, winningSide) => {
         let totalStake = 0;
         const winnersToNotify = [];
 
-        await dbRun("BEGIN TRANSACTION");
-
+        await withTransaction(async () => {
         for (const bet of bets) {
             totalStake += Number(bet.amount || 0);
 
@@ -2770,8 +2912,7 @@ const settleMarket = async (marketId, winningSide) => {
             SET status='settled', result=?, settled=1 
             WHERE id=?
         `, [normalizeSettlementSide(winningSide), marketId]);
-
-        await dbRun("COMMIT");
+        });
 
         console.log(`Ã¢Å“â€¦ Market ${marketId} fully settled`);
 
@@ -2822,7 +2963,6 @@ const settleMarket = async (marketId, winningSide) => {
 
     } catch (e) {
         console.error("Ã¢ÂÅ’ Settlement failed:", e.message);
-        try { await dbRun("ROLLBACK"); } catch { /* ignore */ }
         throw e;
     }
 };
@@ -2833,8 +2973,7 @@ const cancelBetById = async (betId, reason = 'ADMIN_CANCELLED') => {
     if (bet.status !== 'active') return { success: true, alreadySettled: true };
 
     const refund = Number(Number(bet.amount || 0).toFixed(2));
-    await dbRun("BEGIN TRANSACTION");
-    try {
+    return withTransaction(async () => {
         if (refund > 0) {
             await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, bet.user_phone]);
         }
@@ -2851,13 +2990,10 @@ const cancelBetById = async (betId, reason = 'ADMIN_CANCELLED') => {
              )`,
             [refund, bet.id, bet.transaction_id || -1, bet.market_id, bet.user_phone, bet.picked]
         );
-        await dbRun("COMMIT");
+    }).then(() => {
         emitBalance(bet.user_phone);
         return { success: true, cancelledBets: 1, refunded: refund, reason };
-    } catch (e) {
-        await dbRun("ROLLBACK");
-        throw e;
-    }
+    });
 };
 
 const settleBetById = async (betId, winningSide) => {
@@ -2876,8 +3012,7 @@ const settleBetById = async (betId, winningSide) => {
     const payout = isWinner ? Number((Number(bet.amount || 0) * Number(bet.odds || 1)).toFixed(2)) : 0;
     const nextStatus = isWinner ? 'won' : 'lost';
 
-    await dbRun("BEGIN TRANSACTION");
-    try {
+    await withTransaction(async () => {
         if (payout > 0) {
             await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [payout, bet.user_phone]);
         }
@@ -2895,7 +3030,9 @@ const settleBetById = async (betId, winningSide) => {
             [nextStatus, payout, bet.id, bet.transaction_id || -1, bet.market_id, bet.user_phone, bet.picked]
         );
         await dbRun(`UPDATE markets SET result=COALESCE(NULLIF(result, ''), ?), status='settled', settled=1 WHERE id=?`, [outcome, bet.market_id]);
-        await dbRun("COMMIT");
+    });
+
+    try {
         emitBalance(bet.user_phone);
         if (isWinner && payout > 0) {
             io.to(normalizePhone(bet.user_phone)).emit('winningPayout', {
@@ -2950,7 +3087,6 @@ const settleBetById = async (betId, winningSide) => {
 
         return { success: true, settledBets: 1, status: nextStatus, payout };
     } catch (e) {
-        await dbRun("ROLLBACK");
         throw e;
     }
 };
@@ -3048,12 +3184,12 @@ const refreshBoostedMarkets = async () => {
             .slice(0, 10)
             .map(m => m.id);
 
-        await dbRun("BEGIN TRANSACTION");
-        await dbRun(`UPDATE markets SET is_boosted = 0 WHERE is_boosted = 1`);
-        for (const id of selectedIds) {
-            await dbRun(`UPDATE markets SET is_boosted = 1 WHERE id = ?`, [id]);
-        }
-        await dbRun("COMMIT");
+        await withTransaction(async () => {
+            await dbRun(`UPDATE markets SET is_boosted = 0 WHERE is_boosted = 1`);
+            for (const id of selectedIds) {
+                await dbRun(`UPDATE markets SET is_boosted = 1 WHERE id = ?`, [id]);
+            }
+        });
 
         if (selectedIds.length) {
             console.log(`Ã°Å¸Å¸Â© Refreshed boosted markets: ${selectedIds.join(', ')}`);
@@ -3061,7 +3197,6 @@ const refreshBoostedMarkets = async () => {
         }
     } catch (e) {
         console.error("Ã¢ÂÅ’ Boosted markets refresh failed:", e.message);
-        await dbRun("ROLLBACK");
     }
 };
 
@@ -3550,14 +3685,21 @@ app.post('/api/register', authLimiter, async (req, res) => {
         const verificationToken = crypto.randomBytes(32).toString('hex');
 
         db.run(`INSERT INTO users (name, phone, password, email, referral_code, referred_by, verification_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified')`,
-            [name, normalized, hashedPassword, email, myReferralCode, referralCode || null, verificationToken], function(err) {
+            [name, normalized, hashedPassword, email, myReferralCode, referralCode || null, verificationToken], async function(err) {
                 if (err) return res.status(400).json({ success: false, message: "User already exists." });
 
                 const verifyLink = `${verificationUrl(verificationToken)}`;
-                sendPolyMail(email, "Welcome to PolySoko - Verify Your Account",
+                const mailResult = await sendPolyMail(email, "Welcome to PolySoko - Verify Your Account",
                     `<h1>Welcome ${name}!</h1>
                      <p>Soko ni Soko. Please verify your account to activate your referral benefits:</p>
                      <a href="${verifyLink}" style="padding:10px 20px; background:#00ff88; color:black; text-decoration:none; border-radius:5px; font-weight:bold;">Verify Account</a>`);
+                if (!mailResult.success) {
+                    return res.status(503).json({
+                        success: false,
+                        accountCreated: true,
+                        message: mailFailureMessage(mailResult, "Account created, but the verification email could not be sent. Please try resending it shortly.")
+                    });
+                }
 
                 if (referralCode) {
                     db.get(`SELECT phone, is_upgraded FROM users WHERE UPPER(referral_code) = UPPER(?)`, [referralCode], (err, referrer) => {
@@ -3908,11 +4050,18 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
             await dbRun(`UPDATE users SET verification_token = ? WHERE phone = ?`, [token, norm]);
         }
         const verifyLink = `${verificationUrl(token)}`;
-        sendPolyMail(user.email, "PolySoko - Verify Your Account", 
+        if (!user.email) return res.status(400).json({ success: false, message: "This account has no email address on file." });
+        const mailResult = await sendPolyMail(user.email, "PolySoko - Verify Your Account", 
             `<h1>Hello ${user.name}!</h1>
              <p>Click the link below to verify your account and start using PolySoko:</p>
              <a href="${verifyLink}" style="padding:12px 20px; background:#00ff88; color:black; text-decoration:none; border-radius:8px; font-weight:bold; display:inline-block;">Verify Account</a>
              <p style="color:#888; font-size:0.8rem;">If you didn't create an account, you can ignore this email.</p>`);
+        if (!mailResult.success) {
+            return res.status(503).json({
+                success: false,
+                message: mailFailureMessage(mailResult, "Verification email could not be sent. Please try again shortly.")
+            });
+        }
         res.json({ success: true, message: "Verification email resent! Check your inbox (including spam)." });
     } catch (e) {
         console.error('Resend verification error:', e);
@@ -3920,20 +4069,29 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
     }
 });
 
-app.post('/api/forgot-password', (req, res) => {
+app.post('/api/forgot-password', async (req, res) => {
     const { phone } = req.body;
     const norm = normalizePhone(phone);
-    db.get(`SELECT email, name FROM users WHERE phone=?`, [norm], (err, user) => {
+    db.get(`SELECT email, name FROM users WHERE phone=?`, [norm], async (err, user) => {
+        if (err) return res.status(500).json({ success: false, message: "Server error. Please try again." });
         if (!user) return res.json({ success: false, message: "Not registered" });
+        if (!user.email) return res.status(400).json({ success: false, message: "This account has no email address on file." });
         const token = crypto.randomBytes(32).toString('hex');
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 1200000;
-        db.run(`INSERT INTO password_resets (phone, token, otp, expires) VALUES (?, ?, ?, ?)`, [norm, token, otp, expires], () => {
+        db.run(`INSERT INTO password_resets (phone, token, otp, expires) VALUES (?, ?, ?, ?)`, [norm, token, otp, expires], async (err) => {
+            if (err) return res.status(500).json({ success: false, message: "Could not create a reset request." });
             const resetLink = passwordResetUrl(token, otp);
-            sendPolyMail(user.email, "PolySoko Password Reset", 
+            const mailResult = await sendPolyMail(user.email, "PolySoko Password Reset", 
                 `<p>Use this secure link to reset your PolySoko password. It expires in 20 minutes.</p>
                  <p><a href="${resetLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Reset Password</a></p>
                  <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${resetLink}</span></p>`);
+            if (!mailResult.success) {
+                return res.status(503).json({
+                    success: false,
+                    message: mailFailureMessage(mailResult, "Password reset email could not be sent. Please try again shortly.")
+                });
+            }
             
             sendSms({
                 to: [formatPhone(norm)],
@@ -3990,18 +4148,20 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         const isBoostedBet = isElite && isBoostedMarket ? 1 : 0;
 
         // Using a transaction for atomicity
-        await dbRun("BEGIN TRANSACTION");
+        let betRow = null;
+        let insufficient = false;
+        await withTransaction(async () => {
+            // Deduct balance
+            const deduction = await dbRun(`
+                UPDATE users SET balance = balance - ?
+                WHERE phone = ? AND balance >= ?
+            `, [stake, req.user.phone, stake]);
 
-        // Deduct balance
-        const deduction = await dbRun(`
-            UPDATE users SET balance = balance - ? 
-            WHERE phone = ? AND balance >= ?
-        `, [stake, req.user.phone, stake]);
-
-        if (deduction.changes === 0) {
-            await dbRun("ROLLBACK");
-            return res.status(400).json({ success: false, message: "Insufficient balance" });
-        }
+            if (deduction.changes === 0) {
+                // Throwing aborts the transaction, so no balance is deducted.
+                insufficient = true;
+                throw new Error('INSUFFICIENT_BALANCE');
+            }
 
         // Update market volume
         await dbRun(`UPDATE markets SET ${col} = ${col} + ? WHERE id=?`, [stake, marketId]);
@@ -4020,10 +4180,13 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         `, [req.user.phone, marketId, market.title, side, stake, boostedOdds, market.category || 'general', market.startTime || null, isBoostedBet, transactionId, reference]);
 
         const betId = betInsert.lastID;
-        await dbRun(`UPDATE transactions SET bet_id=? WHERE id=?`, [betId, transactionId]);
-        const betRow = await dbGet(`SELECT * FROM bets WHERE id=?`, [betId]);
+            await dbRun(`UPDATE transactions SET bet_id=? WHERE id=?`, [betId, transactionId]);
+            betRow = await dbGet(`SELECT * FROM bets WHERE id=?`, [betId]);
+        });
 
-        await dbRun("COMMIT");
+        if (insufficient) {
+            return res.status(400).json({ success: false, message: "Insufficient balance" });
+        }
 
         // Run background tasks after commit
         recalculateOdds(marketId).catch(e => console.error("Odds error:", e.message));
@@ -4039,7 +4202,9 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
 
     } catch (e) {
         console.error("Ã¢ÂÅ’ Place Bet Error:", e.message);
-        try { await dbRun("ROLLBACK"); } catch (rollbackErr) { /* ignore */ }
+        if (e.message === 'INSUFFICIENT_BALANCE') {
+            return res.status(400).json({ success: false, message: "Insufficient balance" });
+        }
         return res.status(500).json({ success: false, message: "Internal server error" });
     }
 });
@@ -4097,19 +4262,22 @@ app.post('/api/withdraw', authenticate, async (req, res) => {
         const currentBalance = Number(user.balance);
         if (currentBalance < withdrawAmt) return res.json({ success: false, message: "Insufficient balance." });
 
-        // Start transaction manually using serialize + run
-        await dbRun("BEGIN TRANSACTION");
+        let withdrawFailed = false;
+        await withTransaction(async () => {
+            const updateRes = await dbRun(`UPDATE users SET balance = balance - ? WHERE phone = ? AND balance >= ?`, [withdrawAmt, userPhone, withdrawAmt]);
+            if (!updateRes || updateRes.changes === 0) {
+                // Throwing aborts, so no funds are moved.
+                withdrawFailed = true;
+                throw new Error('BALANCE_UPDATE_FAILED');
+            }
 
-        const updateRes = await dbRun(`UPDATE users SET balance = balance - ? WHERE phone = ? AND balance >= ?`, [withdrawAmt, userPhone, withdrawAmt]);
-        if (!updateRes || updateRes.changes === 0) {
-            await dbRun("ROLLBACK");
+            const reference = "WD_" + Date.now();
+            await dbRun(`INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, 'withdraw', ?, 'pending', ?)`, [userPhone, -withdrawAmt, reference]);
+        });
+
+        if (withdrawFailed) {
             return res.status(400).json({ success: false, message: "Balance update failed." });
         }
-
-        const reference = "WD_" + Date.now();
-        await dbRun(`INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, 'withdraw', ?, 'pending', ?)`, [userPhone, -withdrawAmt, reference]);
-
-        await dbRun("COMMIT");
 
         emitBalance(userPhone);
         try {
@@ -4119,7 +4287,9 @@ app.post('/api/withdraw', authenticate, async (req, res) => {
         return res.json({ success: true, message: "Withdrawal request received and is pending approval." });
     } catch (e) {
         console.error('Withdraw error:', e);
-        try { await dbRun("ROLLBACK"); } catch (_) {}
+        if (e.message === 'BALANCE_UPDATE_FAILED') {
+            return res.status(400).json({ success: false, message: "Balance update failed." });
+        }
         return res.status(500).json({ success: false });
     }
 });
@@ -4927,13 +5097,17 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
         }
 
         let approvedCount = 0;
-        await dbRun("BEGIN TRANSACTION");
+        const notifyCreators = [];
+        await withTransaction(async () => {
+            for (const market of pendingEliteMarkets) {
+                await dbRun(`UPDATE markets SET status='open' WHERE id=?`, [market.id]);
+                approvedCount++;
+                // Notifications are dispatched after the commit below.
+                notifyCreators.push(market);
+            }
+        });
 
-        for (const market of pendingEliteMarkets) {
-            await dbRun(`UPDATE markets SET status='open' WHERE id=?`, [market.id]);
-            approvedCount++;
-
-            // Notify creator
+        for (const market of notifyCreators) {
             createNotification(market.creator, "Ã°Å¸Å¡â‚¬ Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
             if (market.creator_email) {
                 const subject = `Ã°Å¸Å¡â‚¬ Your Market is LIVE: ${market.title}`;
@@ -4952,14 +5126,12 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
             }
         }
 
-        await dbRun("COMMIT");
         emitMarkets(); // Update all clients with the new open markets
 
         res.json({ success: true, message: `${approvedCount} markets approved.`, count: approvedCount });
 
     } catch (e) {
         console.error("Bulk approve elite markets error:", e);
-        await dbRun("ROLLBACK");
         res.status(500).json({ success: false, message: "Server error during bulk approval." });
     }
 });
@@ -5090,8 +5262,7 @@ app.post('/api/admin/settle-backlog', authenticateAdmin, async (req, res) => {
         );
         let orphanRefunded = 0;
         if (orphanBets.length) {
-            await dbRun("BEGIN TRANSACTION");
-            try {
+            await withTransaction(async () => {
                 for (const bet of orphanBets) {
                     const refund = Number(Number(bet.amount || 0).toFixed(2));
                     if (refund > 0) {
@@ -5103,13 +5274,9 @@ app.post('/api/admin/settle-backlog', authenticateAdmin, async (req, res) => {
                         [bet.market_id, bet.user_phone]
                     );
                     orphanRefunded++;
-                    emitBalance(bet.user_phone);
                 }
-                await dbRun("COMMIT");
-            } catch (e) {
-                await dbRun("ROLLBACK");
-                throw e;
-            }
+            });
+            orphanBets.forEach(bet => emitBalance(bet.user_phone));
         }
 
         // 1) Settle anything that already has an explicit result
@@ -5767,8 +5934,6 @@ const startServer = async () => {
     // process is not accepting connections within the startup window. The schema
     // repair below talks to Postgres, so any connection failure or slow query
     // used to reject here and kill the process *before* it ever listened.
-    server.listen(PORT, '0.0.0.0');
-
     // Schema repairs run after the socket is open and must never be able to
     // prevent the API from coming up. Failures are logged and retried on the
     // next deploy rather than crashing the service.
