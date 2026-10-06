@@ -129,11 +129,18 @@ function setNoStoreHeaders(res) {
     res.setHeader('Expires', '0');
 }
 
+function setEmbeddableImageHeaders(res) {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+}
+
 const staticOptions = {
     etag: false,
     lastModified: false,
-    setHeaders(res) {
+    setHeaders(res, filePath) {
         setNoStoreHeaders(res);
+        if (/\.(png|jpe?g|webp|gif|ico)$/i.test(filePath)) {
+            setEmbeddableImageHeaders(res);
+        }
     }
 };
 
@@ -197,7 +204,7 @@ app.use(
                 "script-src": ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://cdn.socket.io"], // Allow common CDNs as needed
         "script-src-attr": ["'unsafe-inline'"],
         "style-src": ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
-                "connect-src": ["'self'", configuredPublicSiteUrl, configuredPublicApiBase, "https://ipapi.co", "https://*.ipapi.co", "https://api.weatherapi.com", "https://nominatim.openstreetmap.org", "ws:", "wss:"],
+                "connect-src": ["'self'", configuredPublicSiteUrl, configuredPublicApiBase, "https://cdn.socket.io", "https://ipapi.co", "https://*.ipapi.co", "https://api.weatherapi.com", "https://nominatim.openstreetmap.org", "ws:", "wss:"],
         "frame-src": ["'self'", "https://www.youtube.com", "https://www.youtube-nocookie.com"],
         "media-src": ["'self'", "data:", "blob:", "https:"],
         "img-src": ["'self'", "data:", "https:"],
@@ -297,8 +304,26 @@ async function getMpesaAccessToken() {
     );
     return tokenRes.data.access_token;
 }
+
+function mpesaTimestamp() {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Africa/Nairobi',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).formatToParts(new Date()).reduce((acc, part) => {
+        if (part.type !== 'literal') acc[part.type] = part.value;
+        return acc;
+    }, {});
+    return `${parts.year}${parts.month}${parts.day}${parts.hour}${parts.minute}${parts.second}`;
+}
 // Serve a default avatar fallback when the explicit default.png file is missing
 app.get('/uploads/avatars/default.png', (req, res) => {
+    setEmbeddableImageHeaders(res);
     const fallback = path.join(publicPath, 'logo-mark.png');
     if (fs.existsSync(fallback)) return res.sendFile(fallback);
     res.status(404).end();
@@ -313,6 +338,7 @@ app.get('/api/avatar/:phone', async (req, res) => {
     try {
         const row = await dbGet(`SELECT avatar_mime, avatar_data FROM users WHERE phone = ?`, [phone]);
         const data = row?.avatar_data;
+        setEmbeddableImageHeaders(res);
         if (!data || !Buffer.isBuffer(data) || data.length === 0) {
             const fallback = path.join(publicPath, 'logo-mark.png');
             if (fs.existsSync(fallback)) return res.sendFile(fallback);
@@ -345,6 +371,7 @@ function canonicalAvatarPathForUser(user) {
 // browser received text/html for an <img> and rendered a broken image. Answer
 // with the logo instead so the UI degrades gracefully.
 app.get(/^\/uploads\/avatars\/.+\.(png|jpe?g|webp|gif)$/i, (req, res) => {
+    setEmbeddableImageHeaders(res);
     const fallback = path.join(publicPath, 'logo-mark.png');
     if (fs.existsSync(fallback)) return res.sendFile(fallback);
     res.status(404).end();
@@ -960,6 +987,7 @@ const normalizePhone = (phone) => {
     // Remove all non-digit characters except leading zero logic
     let p = phone.toString().replace(/\D/g, ''); 
     if (p.startsWith('0')) return '254' + p.slice(1);
+    if (p.length === 9 && /^[17]/.test(p)) return `254${p}`;
     return p;
 };
 
@@ -5120,7 +5148,7 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
 
     try {
         const accessToken = await getMpesaAccessToken();
-        const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0,14);
+        const timestamp = mpesaTimestamp();
         const password = Buffer.from(`${MPESA_STK_SHORTCODE}${MPESA_STK_PASSKEY}${timestamp}`).toString('base64');
         const formattedPhone = normalizePhone(req.user.phone);
         const callbackUrl = STK_CALLBACK_URL;

@@ -7,7 +7,7 @@
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self';
         script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.socket.io;
-        connect-src 'self' https://ipapi.co https://*.ipapi.co https://api.polysoko.online https://polysoko.online https://www.polysoko.online https://api.weatherapi.com https://nominatim.openstreetmap.org ws: wss:;
+        connect-src 'self' https://ipapi.co https://*.ipapi.co https://api.polysoko.online https://polysoko.online https://www.polysoko.online https://cdn.socket.io https://api.weatherapi.com https://nominatim.openstreetmap.org ws: wss:;
         frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com;
         media-src 'self' data: blob: https:;
         style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com;
@@ -105,7 +105,6 @@
     <div class="category-filter-row" id="categoryFilterRow">
         <button class="pill active" data-cat="all" onclick="setCategory('all')">All</button>
         <button class="pill" data-cat="sports" onclick="setCategory('sports')">⚽ Sports</button>
-        <button class="pill" data-cat="football" onclick="setCategory('football')">⚽ Football</button>
         <button class="pill" data-cat="crypto" onclick="setCategory('crypto')">🪙 Crypto</button>
         <button class="pill" data-cat="news" onclick="setCategory('news')">📰 News</button>
         <button class="pill" data-cat="weather" onclick="setCategory('weather')">🌦️ Weather</button>
@@ -161,4 +160,4 @@
 </div>
 </main>
 </body>
-</html>
+</html>

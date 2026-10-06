@@ -72,7 +72,9 @@ window.onload = async () => {
                     adminEntry.innerHTML = `<button class="sidebar-btn" id="openAdminConsole">👑 Admin Console</button>`;
                     mainSidebar.insertBefore(adminEntry, adminBtn.nextSibling);
 
-                    document.getElementById('openAdminConsole')?.addEventListener('click', () => { window.openAdminPanel ? window.openAdminPanel() : window.location.href = 'admin.html'; });
+                    document.getElementById('openAdminConsole')?.addEventListener('click', () => {
+                        window.location.href = 'admin.html';
+                    });
                 }
             }
         } catch (e) { /* ignore */ }

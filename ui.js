@@ -1,7 +1,7 @@
 window.state = window.state || {
     allMarkets: [],
     filteredMarkets: [],
-    category: localStorage.getItem("last_category") || "all",
+    category: localStorage.getItem("last_category") === "football" ? "sports" : (localStorage.getItem("last_category") || "all"),
     sportsType: localStorage.getItem("last_category") === "sports" ? (localStorage.getItem("last_sports_type") || "") : "",
     sportsCategories: [],
     search: "",
@@ -73,13 +73,19 @@ function isFootballNewsMarket(m) {
     return cat === "football" && !isFootballFixtureMarket(m);
 }
 
+function isSportsMarket(m) {
+    const cat = normalizeCategory(m?.category);
+    const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
+    return (sportKeys.includes(cat) && !isFootballNewsMarket(m)) || m?.id?.startsWith("sp_") || m?.id?.startsWith("fb_") || isFootballFixtureMarket(m);
+}
+
 window.setCategory = function (category) {
     if (!window.state) {
         console.warn("state not ready yet");
         return;
     }
 
-    const active = normalizeCategory(category || "all");
+    const active = normalizeCategory(category || "all") === "football" ? "sports" : normalizeCategory(category || "all");
     window.state.category = active;
     window.state.sportsType = "";
     localStorage.removeItem("last_sports_type");
@@ -115,15 +121,16 @@ function applyStateAndRender() {
     let filtered = (state.allMarkets || []).filter(m => !isInvalidSportsMarket(m));
     const active = state.category || "all";
     
-    const sportCategoryKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
-    if (active !== "all") {
+    if (active === "all") {
+        filtered = filtered.filter(m => !isSportsMarket(m));
+    } else {
         filtered = filtered.filter(m => {
             const cat = normalizeCategory(m.category);
             if (active === "football") {
-                return isFootballNewsMarket(m);
+                return isSportsMarket(m);
             }
             if (active === "sports") {
-                return (sportCategoryKeys.includes(cat) && !isFootballNewsMarket(m)) || m.id?.startsWith("sp_") || m.id?.startsWith("fb_");
+                return isSportsMarket(m);
             }
             if (active === "news") {
                 return isNewsLikeMarket(m);
@@ -335,12 +342,8 @@ function renderFilteredMarkets() {
 
 function renderSportsPage(container, sportsMarkets) {
     const sportsCatalog = ["Football", "NBA", "NFL", "Basketball", "Baseball", "Hockey", "Volleyball", "Rugby", "Handball", "Tennis", "MMA", "F1", "Cricket", "Golf", "AFL"];
-    const sportCategoryKeys2 = ['sports', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
     const source = (sportsMarkets || [])
-        .filter(m => {
-            const cat = normalizeCategory(m.category);
-            return (sportCategoryKeys2.includes(cat) && !isFootballNewsMarket(m)) || m.id?.startsWith("sp_") || m.id?.startsWith("fb_") || isFootballFixtureMarket(m);
-        })
+        .filter(m => isSportsMarket(m))
         .filter(m => !isInvalidSportsMarket(m));
     const selected = normalizeCategory(state.sportsType || "");
     
@@ -464,7 +467,7 @@ function coinLabelFor(m) {
 
 function createMarketCard(m) {
     const isFootball = isFootballFixtureMarket(m);
-    const isSports = ['sports', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'].includes(m.category) || m.id?.startsWith("sp_") || m.id?.startsWith("fb_") || isFootballFixtureMarket(m);
+    const isSports = isSportsMarket(m);
     const isNews = isNewsLikeMarket(m);
     const isCrypto = isCryptoMarket(m);
     const titleFallback = m.sideA && m.sideB ? `${m.sideA} vs ${m.sideB}` : "";
@@ -1097,20 +1100,20 @@ window.renderBetCard = function(bet) {
 function applyFilters(source) {
     let data = source || state.allMarkets;
 
-    const active = (state.category || "all").toLowerCase();
+    const active = (state.category || "all").toLowerCase() === "football" ? "sports" : (state.category || "all").toLowerCase();
     const search = (state.search || "").toLowerCase();
 
     let filtered = data.filter(m => {
-        if (active === "all") return true;
+        if (active === "all") return !isSportsMarket(m);
 
         const cat = (m.category || "").toLowerCase();
 
         if (active === "football") {
-            return isFootballNewsMarket(m);
+            return isSportsMarket(m);
         }
 
         if (active === "sports") {
-            return (sportCategoryKeys.includes(cat) && !isFootballNewsMarket(m)) || m.id?.startsWith("sp_") || m.id?.startsWith("fb_");
+            return isSportsMarket(m);
         }
 
         return cat === active;
@@ -1846,7 +1849,8 @@ window.fetchMarkets = async function() {
         syncMarketMap(merged);
 
         if (document.getElementById("marketsList") || document.getElementById("ongoing")) {
-            renderApp();
+            applyStateAndRender();
+            renderTrending();
         }
         return { markets: merged };
 

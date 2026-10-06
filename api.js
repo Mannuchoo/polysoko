@@ -239,6 +239,10 @@ async function fetchProfile() {
                 adminBtn.innerHTML = '⚙️';
                 adminBtn.onclick = (e) => { 
                     e.stopPropagation();
+                    if (u.role === 'admin') {
+                        window.location.href = 'admin.html';
+                        return;
+                    }
                     window.openAdminPanel ? window.openAdminPanel() : window.location.href = 'admin.html'; 
                 };
                 balanceBtn.insertAdjacentElement('afterend', adminBtn);
@@ -667,6 +671,19 @@ window.handleDepositSubmit = async function(event) {
     }
 
     try {
+        const config = await apiFetch('payment-config').catch(() => null);
+        const mpesa = config?.mpesa || {};
+        if (mpesa && mpesa.stkReady === false) {
+            const missing = Array.isArray(mpesa.stkMissing) && mpesa.stkMissing.length
+                ? ` Missing: ${mpesa.stkMissing.join(', ')}.`
+                : '';
+            alert(`M-Pesa STK deposits are not configured.${missing}`);
+            return;
+        }
+        if (mpesa?.env === 'sandbox') {
+            console.warn('M-Pesa STK is running in sandbox mode; real customer phones will not receive live payment prompts.');
+        }
+
         const result = await apiFetch('stkpush', {
             method: 'POST',
             body: { amount: amount }
@@ -718,4 +735,4 @@ window.API = {
     markNotificationsRead
 };
 window.API.apiFetch = apiFetch;
-window.apiFetch = apiFetch;
+window.apiFetch = apiFetch;
