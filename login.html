@@ -309,33 +309,45 @@
 
         async function resendFromModal() {
             const btn = document.getElementById('resendVerifyBtn');
-            btn.disabled = true;
-            btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-radius:50%;border-top-color:#fff;animation:spin 0.8s linear infinite;margin-right:8px;vertical-align:middle;"></span>Sending...';
+            if (!btn || btn.disabled) return;
+            setEmailButtonCooling(btn, 0, '📧 Resend Verification Email');
             try {
                 const data = await apiFetch('resend-verification', {
                     method: 'POST',
                     body: { phone: currentVerifyPhone }
                 });
                 if (!data || !data.success) {
-                    throw new Error(data?.message || 'Verification email was not sent.');
+                    const cooldownErr = new Error(data?.message || 'Verification email was not sent.');
+                    cooldownErr.retryAfterSec = data?.retryAfterSec;
+                    cooldownErr.cooldown = !!data?.cooldown;
+                    throw cooldownErr;
                 }
+                // Delivered: lock the button out of tab order for the cooldown
+                // the server returned (default 5 min). Only a failure lets the
+                // user retry immediately.
+                const waitSec = Number(data.retryAfterSec) || 300;
+                setEmailButtonCooling(btn, waitSec, '📧 Resend Verification Email');
                 btn.innerHTML = '✅ Email Sent! Check your inbox.';
                 btn.style.background = 'linear-gradient(135deg,#00ff88,#00cc66)';
                 btn.style.color = '#020405';
-                setTimeout(() => {
-                    btn.innerHTML = '📧 Resend Verification Email';
-                    btn.style.background = 'linear-gradient(135deg,#ff8800,#cc6600)';
-                    btn.style.color = 'white';
-                    btn.disabled = false;
-                }, 3000);
-            } catch (err) {
-                btn.innerHTML = '❌ Failed - Try Again';
                 const msg = document.getElementById('verifyModalMsg');
-                if (msg) msg.textContent = err.message || 'Verification email was not sent.';
-                setTimeout(() => {
-                    btn.innerHTML = '📧 Resend Verification Email';
-                    btn.disabled = false;
-                }, 3000);
+                if (msg) msg.textContent = data.message || 'Verification email resent! Check your inbox (including spam).';
+            } catch (err) {
+                const waitSec = Number(err?.retryAfterSec) || 0;
+                if (err?.cooldown && waitSec > 0) {
+                    // Server says a recent send is still cooling down: reflect
+                    // the remaining wait instead of re-enabling the button.
+                    setEmailButtonCooling(btn, waitSec, '📧 Resend Verification Email');
+                    const msg = document.getElementById('verifyModalMsg');
+                    if (msg) msg.textContent = err.message || 'Verification email was already sent. Please wait before requesting again.';
+                } else {
+                    // Not delivered (SMTP down / validation): stay retryable.
+                    restoreEmailButton(btn, '📧 Resend Verification Email', 'linear-gradient(135deg,#ff8800,#cc6600)', 'white');
+                    btn.innerHTML = '❌ Failed - Try Again';
+                    const msg = document.getElementById('verifyModalMsg');
+                    if (msg) msg.textContent = err.message || 'Verification email was not sent.';
+                    setTimeout(() => restoreEmailButton(btn, '📧 Resend Verification Email', 'linear-gradient(135deg,#ff8800,#cc6600)', 'white'), 3000);
+                }
             }
         }
 
@@ -405,21 +417,102 @@
         async function submitForgotRequest() {
             const phone = document.getElementById('forgotPhone').value.trim();
             const status = document.getElementById('forgotStatus');
+            const btn = document.querySelector('#forgotPasswordModal .btn-login');
             if (!phone) return alert("Enter phone");
+            if (btn && btn.disabled) return;
 
             try {
+                if (btn) setEmailButtonCooling(btn, 0, 'Send Link');
+                status.style.color = "#888";
                 status.innerText = "Processing...";
                 const data = await apiFetch('forgot-password', {
                     method: 'POST',
                     body: { phone }
                 });
-                status.style.color = data.success ? "#00ff88" : "#ff4444";
-                status.innerText = data.success ? "Reset link sent to your email!" : (data.message || "Failed");
-                if(data.success) setTimeout(closeForgotModal, 3000);
+                if (!data || !data.success) {
+                    const cooldownErr = new Error(data?.message || "Failed");
+                    cooldownErr.retryAfterSec = data?.retryAfterSec;
+                    cooldownErr.cooldown = !!data?.cooldown;
+                    throw cooldownErr;
+                }
+                // Delivered: disable + remove from tab order until the server
+                // cooldown lapses (default 5 min). Undelivered (503) retries now.
+                const waitSec = Number(data.retryAfterSec) || 300;
+                if (btn) setEmailButtonCooling(btn, waitSec, 'Send Link');
+                status.style.color = "#00ff88";
+                status.innerText = (data.message || "Reset link sent to your email!") + ` You can request again in ${formatCooldownClock(waitSec)}.`;
+                setTimeout(closeForgotModal, 5000);
             } catch (err) {
-                status.style.color = "#ff4444";
-                status.innerText = err.message || "Server error. Check connection.";
+                const waitSec = Number(err?.retryAfterSec) || 0;
+                if (err?.cooldown && waitSec > 0 && btn) {
+                    setEmailButtonCooling(btn, waitSec, 'Send Link');
+                    status.style.color = "#ff8800";
+                    status.innerText = err.message || "Reset email was already sent. Please wait before requesting again.";
+                } else {
+                    if (btn) restoreEmailButton(btn, 'Send Link', '', '');
+                    status.style.color = "#ff4444";
+                    status.innerText = err.message || "Server error. Check connection.";
+                }
             }
+        }
+
+        // --- Email-button cooldown (shared) --------------------------------
+        // While cooling down the button is disabled, dimmed, aria-disabled and
+        // tabindex=-1 so keyboard users cannot tab to it. Failures restore it
+        // immediately because the email was NOT delivered.
+        const emailCooldownTimers = new WeakMap();
+        function formatCooldownClock(totalSec) {
+            const s = Math.max(0, Math.ceil(Number(totalSec) || 0));
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return m > 0 ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`;
+        }
+        function setEmailButtonCooling(btn, waitSec, label) {
+            if (!btn) return;
+            if (emailCooldownTimers.has(btn)) {
+                clearInterval(emailCooldownTimers.get(btn));
+                emailCooldownTimers.delete(btn);
+            }
+            btn.disabled = true;
+            btn.setAttribute('aria-disabled', 'true');
+            btn.tabIndex = -1;
+            btn.style.opacity = '0.55';
+            btn.style.cursor = 'not-allowed';
+            let remaining = Math.max(0, Math.ceil(Number(waitSec) || 0));
+            if (remaining <= 0) {
+                btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);border-radius:50%;border-top-color:#fff;animation:spin 0.8s linear infinite;margin-right:8px;vertical-align:middle;"></span>Sending...';
+                return;
+            }
+            const tick = () => {
+                if (remaining <= 0) {
+                    restoreEmailButton(btn, label, '', '');
+                    // Restore the resend button's brand gradient (forgot keeps .btn-login).
+                    if (btn.id === 'resendVerifyBtn') {
+                        btn.style.background = 'linear-gradient(135deg,#ff8800,#cc6600)';
+                        btn.style.color = 'white';
+                    }
+                    return;
+                }
+                btn.textContent = `⏳ Try again in ${formatCooldownClock(remaining)}`;
+                remaining -= 1;
+            };
+            tick();
+            emailCooldownTimers.set(btn, setInterval(tick, 1000));
+        }
+        function restoreEmailButton(btn, label, background, color) {
+            if (!btn) return;
+            if (emailCooldownTimers.has(btn)) {
+                clearInterval(emailCooldownTimers.get(btn));
+                emailCooldownTimers.delete(btn);
+            }
+            btn.disabled = false;
+            btn.removeAttribute('aria-disabled');
+            btn.tabIndex = 0;
+            btn.style.opacity = '';
+            btn.style.cursor = 'pointer';
+            if (background !== undefined && background !== '') btn.style.background = background;
+            if (color !== undefined && color !== '') btn.style.color = color;
+            if (label) btn.innerHTML = label;
         }
 
         window.toggleAuth = toggleAuth;

@@ -143,9 +143,11 @@ const MPESA_ENV = String(process.env.MPESA_ENV || 'sandbox').toLowerCase();
 const MPESA_BASE_URL = MPESA_ENV === 'production'
     ? 'https://api.safaricom.co.ke'
     : 'https://sandbox.safaricom.co.ke';
-const MPESA_STK_SHORTCODE = process.env.MPESA_STK_SHORTCODE || (MPESA_ENV === 'sandbox' ? '174379' : process.env.MPESA_SHORTCODE);
+const MPESA_STK_SHORTCODE = process.env.MPESA_STK_SHORTCODE || process.env.MPESA_SHORTCODE || (MPESA_ENV === 'sandbox' ? '174379' : '');
 const MPESA_STK_PASSKEY = process.env.MPESA_STK_PASSKEY || process.env.MPESA_PASSKEY;
 const MPESA_STK_TRANSACTION_TYPE = process.env.MPESA_STK_TRANSACTION_TYPE || (MPESA_ENV === 'production' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline');
+const MPESA_STK_PARTY_B = process.env.MPESA_STK_PARTY_B || process.env.MPESA_STK_TILL || (MPESA_STK_TRANSACTION_TYPE === 'CustomerBuyGoodsOnline' ? ADMIN_TILL : MPESA_STK_SHORTCODE);
+const MPESA_STK_ACCOUNT_REFERENCE = process.env.MPESA_STK_ACCOUNT_REFERENCE || 'PolySoko';
 const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY;
 const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET;
 const MPESA_B2C_SHORTCODE = process.env.MPESA_B2C_SHORTCODE || (MPESA_ENV === 'sandbox' ? '600989' : process.env.MPESA_SHORTCODE);
@@ -256,14 +258,24 @@ app.get('/api/health', async (req, res) => {
 });
 
 function mpesaConfigStatus() {
-    const stkReady = !!(MPESA_CONSUMER_KEY && MPESA_CONSUMER_SECRET && MPESA_STK_SHORTCODE && MPESA_STK_PASSKEY && STK_CALLBACK_URL);
+    const stkMissing = [
+        ['MPESA_CONSUMER_KEY', MPESA_CONSUMER_KEY],
+        ['MPESA_CONSUMER_SECRET', MPESA_CONSUMER_SECRET],
+        ['MPESA_STK_SHORTCODE', MPESA_STK_SHORTCODE],
+        ['MPESA_STK_PASSKEY', MPESA_STK_PASSKEY],
+        ['MPESA_STK_PARTY_B', MPESA_STK_PARTY_B],
+        ['CALLBACK_URL/PUBLIC_API_BASE', STK_CALLBACK_URL]
+    ].filter(([, value]) => !value).map(([name]) => name);
+    const stkReady = stkMissing.length === 0;
     const b2cReady = !!(MPESA_CONSUMER_KEY && MPESA_CONSUMER_SECRET && MPESA_B2C_SHORTCODE && MPESA_B2C_INITIATOR && MPESA_B2C_SECURITY_CREDENTIAL && PUBLIC_API_BASE);
     return {
         env: MPESA_ENV,
         baseUrl: MPESA_BASE_URL,
         stkReady,
+        stkMissing,
         b2cReady,
         stkShortcode: MPESA_STK_SHORTCODE || null,
+        stkPartyB: MPESA_STK_PARTY_B || null,
         stkTransactionType: MPESA_STK_TRANSACTION_TYPE,
         b2cShortcode: MPESA_B2C_SHORTCODE || null,
         b2cCommandId: MPESA_B2C_COMMAND_ID,
@@ -318,6 +330,16 @@ app.get('/api/avatar/:phone', async (req, res) => {
         return res.status(500).json({ success: false, message: 'Could not load profile picture' });
     }
 });
+
+function canonicalAvatarPathForUser(user) {
+    if (!user) return '/uploads/avatars/default.png';
+    const hasStoredAvatar = !!(user.avatar_data && Buffer.isBuffer(user.avatar_data) && user.avatar_data.length);
+    if (hasStoredAvatar) return avatarPathFor(user.phone);
+    const currentPath = user.avatar_url || '';
+    if (/^\/api\/avatar\//.test(currentPath)) return currentPath;
+    if (currentPath && !/\/uploads\/avatars\/default\.png$/i.test(currentPath)) return currentPath;
+    return '/uploads/avatars/default.png';
+}
 
 // A missing avatar used to fall through to the HTML error handler, so the
 // browser received text/html for an <img> and rendered a broken image. Answer
@@ -393,6 +415,20 @@ function resolveDatabaseUrl() {
 const resolvedDatabaseUrl = resolveDatabaseUrl();
 const isPostgresDatabaseUrl = /^postgres(?:ql)?:\/\//i.test(resolvedDatabaseUrl);
 
+// Short non-secret fingerprint (host + db name) so Railway logs prove every
+// deploy is talking to the SAME Postgres. If this changes between deploys,
+// users appear "reset" because the app is reading a different database.
+function databaseFingerprint(url) {
+    try {
+        const parsed = new URL(String(url || ''));
+        const host = parsed.hostname || 'unknown-host';
+        const dbName = (parsed.pathname || '').replace(/^\//, '') || 'unknown-db';
+        return `${host}/${dbName}`;
+    } catch {
+        return 'unparseable-url';
+    }
+}
+
 // Postgres-only: there is no SQLite fallback. A container-local .db file is wiped
 // on every Railway redeploy, which used to silently revert passwords and delete
 // accounts. Fail fast here so a missing DATABASE_URL is a loud boot error,
@@ -463,6 +499,10 @@ function translatePostgresSql(sql) {
         // Avatar bytes are stored in the DB; `BLOB` is not a PostgreSQL type.
         .replace(/\bBLOB\b/gi, 'BYTEA')
         .replace(/\bREAL\b/gi, 'DOUBLE PRECISION')
+        // BIGINT must survive translation: Date.now() millis (~1.7T) overflow
+        // Postgres INTEGER (int4). Without this the password_resets widening
+        // migration would silently stay int4 on fresh databases. BIGINT ->
+        // int8 is native Postgres so it needs no translation at all.
         .replace(/datetime\('now',\s*'-7 days'\)/gi, "NOW() - INTERVAL '7 days'")
         .replace(/datetime\('now',\s*'-1 day'\)/gi, "NOW() - INTERVAL '1 day'")
         .replace(/\bdate\(\s*startTime\s*\)/gi, 'startTime::date')
@@ -708,6 +748,7 @@ function createPostgresCompatDb(connectionString) {
 
 const db = createPostgresCompatDb(resolvedDatabaseUrl);
 console.log('💾 Database mode: PostgreSQL (persistent)');
+console.log(`💾 Database host fingerprint: ${databaseFingerprint(resolvedDatabaseUrl)}`);
 const uploadPath = path.join(publicPath, 'uploads', 'avatars');
 if (!fs.existsSync(uploadPath)) {
     fs.mkdirSync(uploadPath, { recursive: true });
@@ -2058,6 +2099,96 @@ function mailFailureMessage(result, fallback = "Email could not be sent. Please 
     }
     return fallback;
 }
+
+// --- EMAIL SEND COOLDOWN -----------------------------------------------
+// Forgot-password and resend-verification buttons must not be spammable:
+// after one SUCCESSFUL send the same phone+purpose is blocked for
+// EMAIL_COOLDOWN_MS. A FAILED send (SMTP down / 503) never starts a
+// cooldown, so "if the email was not delivered" the user can retry now.
+// The frontend also disables + removes the button from tab order while the
+// cooldown is active and shows a countdown. Backend enforces it too so a
+// direct API call cannot bypass it.
+const EMAIL_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const EMAIL_COOLDOWN_SEC = Math.round(EMAIL_COOLDOWN_MS / 1000);
+
+function formatCooldownRemaining(ms) {
+    const totalSec = Math.max(1, Math.ceil(ms / 1000));
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    if (mins <= 0) return `${secs}s`;
+    return `${mins}m ${String(secs).padStart(2, '0')}s`;
+}
+
+async function getEmailCooldown(phone, purpose) {
+    try {
+        const row = await dbGet(
+            `SELECT last_sent_at, last_status FROM email_cooldowns WHERE phone = ? AND purpose = ?`,
+            [phone, purpose]
+        );
+        if (!row || row.last_status !== 'sent') return { blocked: false, remainingMs: 0 };
+        const lastSent = Date.parse(row.last_sent_at);
+        if (Number.isNaN(lastSent)) return { blocked: false, remainingMs: 0 };
+        const remainingMs = (lastSent + EMAIL_COOLDOWN_MS) - Date.now();
+        if (remainingMs <= 0) return { blocked: false, remainingMs: 0 };
+        return { blocked: true, remainingMs, retryAfterSec: Math.ceil(remainingMs / 1000) };
+    } catch (e) {
+        // If the table does not exist yet (first boot before migration),
+        // fail open rather than breaking password resets entirely.
+        console.warn('[email-cooldown] lookup failed (fail-open):', e.message);
+        return { blocked: false, remainingMs: 0 };
+    }
+}
+
+async function recordEmailCooldown(phone, purpose, status) {
+    try {
+        await dbRun(
+            `INSERT INTO email_cooldowns (phone, purpose, last_sent_at, last_status)
+             VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+             ON CONFLICT(phone, purpose) DO UPDATE SET last_sent_at = excluded.last_sent_at, last_status = excluded.last_status`,
+            [phone, purpose, status]
+        );
+    } catch (e) {
+        console.warn('[email-cooldown] record failed:', e.message);
+    }
+}
+
+function emailCooldownBlockedResponse(res, remainingMs, purposeLabel) {
+    const retryAfterSec = Math.ceil(remainingMs / 1000);
+    res.set('Retry-After', String(retryAfterSec));
+    return res.status(429).json({
+        success: false,
+        cooldown: true,
+        retryAfterSec,
+        message: `${purposeLabel} email was already sent. Please wait ${formatCooldownRemaining(remainingMs)} before requesting again. If it never arrives, check spam or try again after the wait.`
+    });
+}
+
+// --- SUSPENSION HELPER --------------------------------------------------
+// `is_suspended` used to be checked as a bare truthy flag, so an account
+// whose suspension had EXPIRED (or was set to boolean TRUE by Postgres vs
+// integer 1 by SQLite) stayed locked forever — including the admin account.
+// This helper treats a suspension as active only while its expiry is in the
+// future (or no expiry was set), auto-clears stale flags, and lets the
+// resolved admin phone always log in so one bad admin action cannot lock
+// the whole panel out.
+async function isSuspensionActive(userRow, phone) {
+    const rawFlag = userRow?.is_suspended;
+    const flagOn = rawFlag === true || rawFlag === 1 || rawFlag === '1' || rawFlag === 't' || rawFlag === 'true';
+    if (!flagOn) return false;
+    const expiresRaw = userRow?.suspension_expires;
+    if (expiresRaw) {
+        const expiresMs = Date.parse(expiresRaw);
+        if (!Number.isNaN(expiresMs) && expiresMs <= Date.now()) {
+            try {
+                await dbRun(`UPDATE users SET is_suspended = 0, suspension_expires = NULL WHERE phone = ?`, [phone]);
+            } catch (e) {
+                console.warn('[auth] failed to auto-clear expired suspension for', phone, e.message);
+            }
+            return false;
+        }
+    }
+    return true;
+}
 // Define the paths you need
 const foldersToCreate = [
     uploadPath,
@@ -2274,7 +2405,14 @@ db.run(`CREATE TABLE IF NOT EXISTS password_resets (
     phone TEXT,
     token TEXT,
         otp TEXT,
-    expires INTEGER
+    expires BIGINT
+)`);
+db.run(`CREATE TABLE IF NOT EXISTS email_cooldowns (
+    phone TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    last_sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_status TEXT DEFAULT 'sent',
+    PRIMARY KEY (phone, purpose)
 )`);
 db.run(`
 CREATE TABLE IF NOT EXISTS bets (
@@ -2350,6 +2488,19 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     addColumnSafely('users', 'upgrade_expiry', 'DATETIME');
     addColumnSafely('users', 'is_suspended', 'INTEGER DEFAULT 0');
     addColumnSafely('users', 'suspension_expires', 'DATETIME');
+    addColumnSafely('password_resets', 'expires', 'BIGINT');
+    // Postgres INTEGER (int4) tops out at ~2.1B but Date.now() millis are
+    // ~1.7T, so an INTEGER `expires` column made EVERY forgot-password /
+    // reset-password query throw "value is out of range for type integer".
+    // That surfaced as "could not create reset request" / "link invalid" and
+    // looked like passwords "reset" on deploy. Widen to BIGINT (int8).
+    // NOTE: this block runs inside db.serialize() (non-async), so no await —
+    // the compat layer queues the statement like every other migration here.
+    db.run(`ALTER TABLE password_resets ALTER COLUMN expires TYPE BIGINT USING expires::bigint`, (alterErr) => {
+        if (alterErr && !/already|exists|bigint|duplicate/i.test(alterErr.message || '')) {
+            console.warn('[schema] could not widen password_resets.expires to BIGINT:', alterErr.message);
+        }
+    });
     
     // Activity logs table
     db.run(`CREATE TABLE IF NOT EXISTS activity_logs (
@@ -4322,7 +4473,22 @@ app.post('/api/login', authLimiter, (req, res) => {
         if (!user.password || !(await bcrypt.compare(password, user.password))) {
             return res.status(401).json({ success: false, message: "Incorrect password for this account." });
         }
-        if (user.is_suspended) return res.json({ success: false, message: "This account has been suspended." });
+        // The admin identity is never blocked by the suspension flag: a
+        // mistaken/expired suspend must not be able to lock the panel out.
+        // Everyone else is blocked only while the suspension is actually
+        // active (expiry-aware, auto-clears stale flags).
+        try {
+            const adminPhone = await resolveAdminPhone();
+            const suspended = await isSuspensionActive(user, normalized);
+            if (suspended && !(adminPhone && normalizePhone(adminPhone) === normalized)) {
+                const until = user.suspension_expires
+                    ? ` Suspended until ${new Date(user.suspension_expires).toLocaleString()}.`
+                    : '';
+                return res.status(403).json({ success: false, message: `This account has been suspended.${until}` });
+            }
+        } catch (e) {
+            console.warn('[auth] suspension check failed (fail-open):', e.message);
+        }
 
         if (user.status !== 'verified') {
             return res.json({
@@ -4379,7 +4545,7 @@ app.post('/api/logout', (req, res) => {
 
 function attachAvatarDisplayUrl(req, user) {
     if (!user) return user;
-    const avatarPath = user.avatar_url || '/uploads/avatars/default.png';
+    const avatarPath = canonicalAvatarPathForUser(user);
     const avatarUrl = publicAssetUrl(req, avatarPath);
     // Cache-bust only legacy per-file disk paths. The new `/api/avatar/<phone>`
     // route has a stable URL, so versioning it would pin the browser to a stale
@@ -4399,7 +4565,7 @@ function attachAvatarDisplayUrl(req, user) {
 }
 
 app.get('/api/profile', authenticate, (req, res) => {
-    db.get(`SELECT name, phone, email, balance, referral_code, avatar_url, role, is_upgraded FROM users WHERE phone=?`, [req.user.phone], (err, user) => {
+    db.get(`SELECT name, phone, email, balance, referral_code, avatar_url, avatar_mime, avatar_data, role, is_upgraded FROM users WHERE phone=?`, [req.user.phone], (err, user) => {
         if (err) return res.status(500).json({ success: false });
         if (!user) return res.status(404).json({ success: false, message: "User account not found for this session" });
         res.json({ success: true, user: attachAvatarDisplayUrl(req, user) });
@@ -4409,7 +4575,7 @@ app.get('/api/profile', authenticate, (req, res) => {
 app.get('/api/user/me', authenticate, async (req, res) => {
     try {
         const user = await dbGet(
-            `SELECT name, phone, balance, role, avatar_url, is_upgraded FROM users WHERE phone=?`,
+            `SELECT name, phone, balance, role, avatar_url, avatar_mime, avatar_data, is_upgraded FROM users WHERE phone=?`,
             [req.user.phone]
         );
         if (!user) return res.status(404).json({ success: false });
@@ -4420,7 +4586,7 @@ app.get('/api/user/me', authenticate, async (req, res) => {
 });
 
 app.get('/api/user/profile', authenticate, (req, res) => {
-    db.get(`SELECT name, phone, email, balance, referral_code, avatar_url, role, is_upgraded FROM users WHERE phone=?`,
+    db.get(`SELECT name, phone, email, balance, referral_code, avatar_url, avatar_mime, avatar_data, role, is_upgraded FROM users WHERE phone=?`,
     [req.user.phone], (err, user) => {
         if (err || !user) return res.status(404).json({ success: false });
         res.json({ success: true, user: attachAvatarDisplayUrl(req, user) });
@@ -4580,6 +4746,11 @@ app.get('/api/user/history', authenticate, (req, res) => {
 app.post('/api/resend-verification', authLimiter, async (req, res) => {
     const { phone } = req.body;
     const norm = normalizePhone(phone);
+    if (!norm) return res.status(400).json({ success: false, message: "Enter a valid phone number." });
+    // Cooldown: one successful send per phone per EMAIL_COOLDOWN_MS. Checked
+    // before doing any work so repeat taps stay cheap. Failures never count.
+    const cooldown = await getEmailCooldown(norm, 'verify');
+    if (cooldown.blocked) return emailCooldownBlockedResponse(res, cooldown.remainingMs, 'Verification');
     try {
         const user = await dbGet(`SELECT name, email, verification_token, status FROM users WHERE phone=?`, [norm]);
         if (!user) return res.json({ success: false, message: "Account not found." });
@@ -4598,12 +4769,14 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
              <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${verifyLink}</span></p>
              <p style="color:#666;font-size:0.85rem;">If you did not create an account, you can ignore this email.</p>`);
         if (!mailResult.success) {
+            await recordEmailCooldown(norm, 'verify', 'failed');
             return res.status(503).json({
                 success: false,
                 message: mailFailureMessage(mailResult, "Verification email could not be sent. Please try again shortly.")
             });
         }
-        res.json({ success: true, message: "Verification email resent! Check your inbox (including spam)." });
+        await recordEmailCooldown(norm, 'verify', 'sent');
+        res.json({ success: true, retryAfterSec: EMAIL_COOLDOWN_SEC, message: "Verification email resent! Check your inbox (including spam)." });
     } catch (e) {
         console.error('Resend verification error:', e);
         res.status(500).json({ success: false, message: "Server error. Please try again." });
@@ -4613,6 +4786,12 @@ app.post('/api/resend-verification', authLimiter, async (req, res) => {
 app.post('/api/forgot-password', async (req, res) => {
     const { phone } = req.body;
     const norm = normalizePhone(phone);
+    if (!norm) return res.status(400).json({ success: false, message: "Enter a valid phone number." });
+    // Same 5-minute cooldown as resend-verification: enforced here too so a
+    // direct POST cannot spam the mailbox while the button looks disabled.
+    // Only a DELIVERED email starts the cooldown; 503 failures stay retryable.
+    const cooldown = await getEmailCooldown(norm, 'forgot');
+    if (cooldown.blocked) return emailCooldownBlockedResponse(res, cooldown.remainingMs, 'Password reset');
     db.get(`SELECT email, name, status, verification_token FROM users WHERE phone=?`, [norm], async (err, user) => {
         if (err) return res.status(500).json({ success: false, message: "Server error. Please try again." });
         if (!user) return res.json({ success: false, message: "Not registered" });
@@ -4643,6 +4822,7 @@ app.post('/api/forgot-password', async (req, res) => {
                  <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${resetLink}</span></p>
                  ${verifySection}`);
             if (!mailResult.success) {
+                await recordEmailCooldown(norm, 'forgot', 'failed');
                 return res.status(503).json({
                     success: false,
                     message: mailFailureMessage(mailResult, "Password reset email could not be sent. Please try again shortly.")
@@ -4655,7 +4835,8 @@ app.post('/api/forgot-password', async (req, res) => {
                 from: "POLYSOKO"
             }).catch(e => console.warn("SMS bypassed or failed. OTP sent via Email."));
 
-            res.json({ success: true, message: "Check your email for the reset link." });
+            await recordEmailCooldown(norm, 'forgot', 'sent');
+            res.json({ success: true, retryAfterSec: EMAIL_COOLDOWN_SEC, message: "Check your email for the reset link." });
         });
     });
 });
@@ -4933,6 +5114,9 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
     if (!MPESA_STK_SHORTCODE || !MPESA_STK_PASSKEY || !MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET) {
         return res.status(500).json({ success: false, message: "M-Pesa STK is not configured." });
     }
+    if (!MPESA_STK_PARTY_B) {
+        return res.status(500).json({ success: false, message: "M-Pesa STK PartyB is not configured." });
+    }
 
     try {
         const accessToken = await getMpesaAccessToken();
@@ -4950,10 +5134,10 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
     TransactionType: MPESA_STK_TRANSACTION_TYPE, 
     Amount: roundedAmount, 
     PartyA: formattedPhone, 
-    PartyB: MPESA_STK_SHORTCODE,
+    PartyB: MPESA_STK_PARTY_B,
     PhoneNumber: formattedPhone, 
     CallBackURL: callbackUrl, 
-    AccountReference: 'PolySoko', 
+    AccountReference: MPESA_STK_ACCOUNT_REFERENCE, 
     TransactionDesc: 'Deposit'
 }, { headers:{ Authorization: `Bearer ${accessToken}` } });
         
@@ -6536,6 +6720,39 @@ const runSafely = (label, task) => {
         .catch(err => console.error(`Startup task "${label}" failed (continuing):`, err.message));
 };
 
+// Crash-loop-proof diagnostics: detect a suspiciously empty production
+// database (all users gone after a Railway redeploy) and log it loudly
+// instead of silently serving an empty user table that looks like
+// "passwords reset". Also surfaces a suspended admin account at boot.
+async function logDatabaseIdentityCheck() {
+    try {
+        const usersRow = await dbGet(`SELECT COUNT(*) AS count FROM users`).catch(() => null);
+        const userCount = Number(usersRow?.count ?? NaN);
+        console.log(`💾 Database identity: host=${databaseFingerprint(resolvedDatabaseUrl)} users=${Number.isFinite(userCount) ? userCount : 'unknown'}`);
+        if (Number.isFinite(userCount) && userCount === 0 && process.env.NODE_ENV === 'production') {
+            console.error('⚠️  PRODUCTION database has 0 users. If accounts existed before this deploy, DATABASE_URL is pointing at a NEW/EMPTY Postgres database — passwords were NOT reset, the app is reading the wrong DB. Fix: Railway dashboard -> API service -> Variables -> DATABASE_URL reference -> must point at the SAME Postgres service as before, then redeploy.');
+        }
+        try {
+            const adminPhone = await resolveAdminPhone();
+            if (adminPhone) {
+                const admin = await dbGet(`SELECT is_suspended, suspension_expires FROM users WHERE phone = ?`, [adminPhone]).catch(() => null);
+                if (admin) {
+                    console.log(`💾 Admin identity: phone=${adminPhone} suspended=${admin.is_suspended} expires=${admin.suspension_expires || 'none'}`);
+                    if (await isSuspensionActive(admin, adminPhone)) {
+                        console.error(`⚠️  Admin account ${adminPhone} is currently SUSPENDED (expires=${admin.suspension_expires || 'no expiry'}). Correct-password logins will report "account has been suspended". Unsuspend it in the admin panel or run: UPDATE users SET is_suspended=0, suspension_expires=NULL WHERE phone='${adminPhone}'.`);
+                    }
+                } else {
+                    console.warn(`💾 Admin identity: phone=${adminPhone} has no matching users row.`);
+                }
+            }
+        } catch (e) {
+            console.warn('[startup] admin suspension check failed:', e.message);
+        }
+    } catch (e) {
+        console.warn('[startup] database identity check failed:', e.message);
+    }
+}
+
 const startServer = async () => {
     await tryAutoKillPort();
 
@@ -6560,6 +6777,10 @@ const startServer = async () => {
         console.log(`Ã°Å¸Å¡â‚¬ Terminal Online on Port ${PORT}`);
         // Socket is already accepting connections; safe to touch the DB now.
         runStartupRepairs();
+        // Proves every deploy reads the SAME database and surfaces the two
+        // most common "it broke on deploy" states: wrong/empty DB (looks
+        // like passwords were reset) and a suspended admin account.
+        runSafely('logDatabaseIdentityCheck', logDatabaseIdentityCheck);
         const skipStartupSync = process.env.SKIP_STARTUP_SYNC === '1' || process.env.SKIP_STARTUP_SYNC === 'true';
         // Every background/startup job is wrapped so a transient failure cannot
         // reject unhandled and terminate the Node process on Railway.

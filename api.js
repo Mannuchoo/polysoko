@@ -207,7 +207,18 @@ async function apiFetch(endpoint, options = {}, attempt = 0) {
         throw new Error(data?.message || "Unauthorized access or session expired.");
     }
 
-    if (!res.ok) throw new Error(data.message || data.error || `API Error (${res.status})`);
+    if (!res.ok) {
+        // Preserve structured cooldown info (429 from forgot-password /
+        // resend-verification) so the button can show the remaining wait
+        // instead of a generic error.
+        const cooldownErr = new Error(data.message || data.error || `API Error (${res.status})`);
+        if (data && typeof data === 'object') {
+            if (data.retryAfterSec != null) cooldownErr.retryAfterSec = data.retryAfterSec;
+            if (data.cooldown != null) cooldownErr.cooldown = data.cooldown;
+            if (data.retryAfterSec != null || data.cooldown) cooldownErr.status = res.status;
+        }
+        throw cooldownErr;
+    }
     return data;
 }
 async function fetchProfile() {
@@ -289,7 +300,8 @@ async function fetchProfile() {
         const avatarUrl = window.applyAvatarDisplay
             ? window.applyAvatarDisplay(u.avatarUrl || u.avatar_url)
             : avatarAssetUrl(u.avatarUrl || u.avatar_url, defaultAvatar);
-        if (u.avatar_url && !/\/uploads\/avatars\/default\.png$/i.test(u.avatar_url)) {
+        const isStoredAvatar = /^\/api\/avatar\//i.test(u.avatar_url || '') || /\/api\/avatar\//i.test(u.avatarUrl || '');
+        if (isStoredAvatar) {
             localStorage.setItem('saved_avatar_path', u.avatar_url);
             localStorage.setItem('saved_avatar_url', avatarUrl);
         } else {
@@ -304,6 +316,11 @@ function restoreSavedAvatar() {
     const savedPath = localStorage.getItem('saved_avatar_path');
     const savedUrl = localStorage.getItem('saved_avatar_url');
     if (!savedPath && !savedUrl) return;
+    if (!/\/api\/avatar\//i.test(savedPath || savedUrl || '')) {
+        localStorage.removeItem('saved_avatar_path');
+        localStorage.removeItem('saved_avatar_url');
+        return;
+    }
     if (window.applyAvatarDisplay) {
         window.applyAvatarDisplay(savedPath || savedUrl);
         return;
