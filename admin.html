@@ -1138,6 +1138,10 @@ button, input, select {
                 <div style="font-size:1.8rem;">📋</div>
                 <span>Activity Logs</span>
             </button>
+            <button onclick="showSection('staySection'); loadStayAdmin();">
+                <div style="font-size:1.8rem;">🏠</div>
+                <span>Stay BnB Manager</span>
+            </button>
             <button onclick="location.reload()">
                 <div style="font-size:1.8rem;">🔄</div>
                 <span>Resync</span>
@@ -1175,6 +1179,44 @@ button, input, select {
                     <tr><td colspan="5" style="text-align:center; padding:30px; color:#666;">Loading activity logs...</td></tr>
                 </tbody>
             </table>
+        </div>
+    </div>
+</div>
+
+<!-- 🏠 STAY BNB MANAGER -->
+<div id="staySection" class="admin-section">
+    <div class="stat-card">
+        <div class="card-header" style="margin-bottom:20px;">
+            <h2>🏠 Stay BnB Manager</h2>
+            <p class="sub">Listings CMS + guest bookings (public checkout needs no login)</p>
+        </div>
+        <div style="display:grid;gap:14px;">
+            <div style="border:1px solid #333;border-radius:12px;padding:14px;background:#0a0d12;">
+                <h3 style="margin:0 0 10px;">Add Listing</h3>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                    <input id="stayTitle" placeholder="Title e.g. Nyali Beachfront Apartment" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayLocation" placeholder="Location e.g. Nyali, Mombasa" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayPrice" type="number" min="1" placeholder="Price/night KSh" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayGuestsN" type="number" min="1" value="2" placeholder="Max guests" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                </div>
+                <textarea id="stayDesc" placeholder="Description" rows="2" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;"></textarea>
+                <div style="margin-top:10px;color:#9fb0c0;font-size:.82rem;">Amenities (tick to include):</div>
+                <div id="stayAmenRow" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;font-size:.82rem;color:#cfe3ff;"></div>
+                <input id="stayImages" placeholder="Image URL(s), comma separated" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                <button onclick="createStayProperty()" class="btn-primary" style="margin-top:10px;padding:11px 16px;">Add Property</button>
+                <div id="stayFormMsg" style="margin-top:8px;font-size:.85rem;color:#8b98a5;"></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <h3 style="margin:0;">Bookings</h3>
+                <button onclick="loadStayAdmin()" class="btn-primary" style="padding:8px 14px;font-size:.75rem;">Refresh</button>
+                <span id="stayCount" style="color:#8b98a5;font-size:.82rem;"></span>
+            </div>
+            <div class="table-responsive">
+                <table class="market-table">
+                    <thead><tr><th>Guest</th><th>Property</th><th>Dates</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody id="stayBookingsTable"><tr><td colspan="6" style="text-align:center;padding:24px;color:#666;">Open Stay BnB Manager to load bookings...</td></tr></tbody>
+                </table>
+            </div>
         </div>
     </div>
 </div>
@@ -1462,7 +1504,9 @@ const API = {
         }
     },
     get(path) { return this.request(path, 'GET'); },
-    post(path, body) { return this.request(path, 'POST', body); }
+    post(path, body) { return this.request(path, 'POST', body); },
+    patch(path, body) { return this.request(path, 'PATCH', body); },
+    put(path, body) { return this.request(path, 'PUT', body); }
 };
 
 function showAdminLoginGate(message = "Enter your admin PIN to continue.") {
@@ -1601,6 +1645,7 @@ window.showSection = function(id, btn, options = {}) {
         if (id === 'marketApprovalsSection') loadPendingMarkets();
         if (id === 'marketsSection') loadAdminMarkets();
         if (id === 'activityLogsSection') loadActivityLogs();
+        if (id === 'staySection' && typeof loadStayAdmin === 'function') loadStayAdmin();
     }
     window.toggleAdminSidebar(true);
 };
@@ -1694,6 +1739,72 @@ window.openWireModal = async function(type) {
         }
     };
 };
+
+/* ================= STAY BNB MANAGER ================= */
+const STAY_AMENITIES = ['WiFi', 'AC', 'Pool', 'Generator', 'Parking', 'Kitchen', 'Smart TV', 'Workspace', 'Chef', 'Beach Access'];
+function renderStayAmenBoxes() {
+    const row = document.getElementById('stayAmenRow');
+    if (!row || row.dataset.done === '1') return;
+    row.dataset.done = '1';
+    row.innerHTML = STAY_AMENITIES.map((a) => `<label style="display:inline-flex;gap:6px;align-items:center;background:#101820;border:1px solid #2b3d52;border-radius:999px;padding:6px 10px;"><input type="checkbox" value="${a}" /> ${a}</label>`).join('');
+}
+async function loadStayAdmin() {
+    renderStayAmenBoxes();
+    const tb = document.getElementById('stayBookingsTable');
+    const count = document.getElementById('stayCount');
+    if (tb) tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:#666;">Loading bookings...</td></tr>';
+    try {
+        const res = await API.get('/admin/bookings');
+        const rows = res.bookings || [];
+        if (count) count.textContent = `${rows.length} booking(s)`;
+        if (!tb) return;
+        if (!rows.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:#666;">No bookings yet.</td></tr>'; return; }
+        tb.innerHTML = rows.map((b) => {
+            const st = String(b.payment_status || 'pending');
+            const color = st === 'paid' ? '#00ff88' : st === 'cancelled' ? '#ff6b6b' : '#ffcc00';
+            return `<tr><td><b>${esc(b.guest_name)}</b><br><small style="color:#8b98a5;">${esc(b.guest_phone)}<br>${esc(b.guest_email)}<br>Ref: ${esc(b.booking_reference)}</small></td>` +
+                `<td>${esc(b.property_title || ('#' + b.property_id))}<br><small style="color:#8b98a5;">${esc(b.property_location || '')}</small></td>` +
+                `<td><small>${esc(b.check_in)} → ${esc(b.check_out)}</small></td>` +
+                `<td>KSh ${Number(b.total_price || 0).toLocaleString()}</td>` +
+                `<td><span style="color:${color};font-weight:800;text-transform:uppercase;font-size:.72rem;">${esc(st)}</span></td>` +
+                `<td style="white-space:nowrap;"><button onclick="setStayStatus(${Number(b.id)},'paid')" class="btn-primary" style="padding:6px 10px;font-size:.7rem;">Mark Paid</button> ` +
+                `<button onclick="setStayStatus(${Number(b.id)},'cancelled')" style="padding:6px 10px;font-size:.7rem;background:#3a1214;color:#ff8080;border:1px solid #5a1e22;border-radius:8px;cursor:pointer;">Cancel</button></td></tr>`;
+        }).join('');
+    } catch (e) {
+        if (tb) tb.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:#ff8080;">${esc(e.message || 'Failed to load')}</td></tr>`;
+    }
+}
+async function setStayStatus(id, payment_status) {
+    try {
+        await API.patch(`/admin/bookings/${id}`, { payment_status });
+        await loadStayAdmin();
+    } catch (e) { alert('Update failed: ' + (e.message || 'error')); }
+}
+async function createStayProperty() {
+    const msg = document.getElementById('stayFormMsg');
+    msg.style.color = '#8b98a5'; msg.textContent = 'Saving...';
+    try {
+        const amenities = [...document.querySelectorAll('#stayAmenRow input:checked')].map((x) => x.value);
+        const images = String(document.getElementById('stayImages').value || '').split(',').map((s) => s.trim()).filter(Boolean);
+        const body = {
+            title: document.getElementById('stayTitle').value.trim(),
+            location: document.getElementById('stayLocation').value.trim(),
+            price_per_night: Number(document.getElementById('stayPrice').value),
+            max_guests: Number(document.getElementById('stayGuestsN').value) || 2,
+            description: document.getElementById('stayDesc').value.trim(),
+            amenities, images, is_active: 1
+        };
+        const res = await API.post('/admin/properties', body);
+        if (!res.success) throw new Error(res.message || 'Save failed');
+        msg.style.color = '#00ff88'; msg.textContent = 'Property added.';
+        document.getElementById('stayTitle').value = '';
+        document.getElementById('stayLocation').value = '';
+        document.getElementById('stayPrice').value = '';
+        document.getElementById('stayDesc').value = '';
+        document.getElementById('stayImages').value = '';
+        document.querySelectorAll('#stayAmenRow input:checked').forEach((x) => { x.checked = false; });
+    } catch (e) { msg.style.color = '#ff8080'; msg.textContent = e.message || 'Save failed'; }
+}
 
 /* ================= INIT ================= */
 window.onload = () => {

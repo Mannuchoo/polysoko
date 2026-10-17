@@ -28,7 +28,17 @@ import AfricasTalking from 'africastalking';
 import fs from 'fs';
 import helmet from 'helmet';
 import { exec } from 'child_process';
+import { createRequire } from 'module';
 import { getSokoBalance, sendSoko, getAdminWalletAddress, isValidAddress } from './blockchain.js';
+
+const stayRequire = createRequire(import.meta.url);
+// Stay BnB isolated router (CJS). Loaded lazily-guarded so a missing file never breaks boot.
+let stayRoutes = null;
+try {
+    stayRoutes = stayRequire('./routes/stayRoutes.cjs');
+} catch (e) {
+    console.warn('[stay] router not loaded:', e.message);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -112,7 +122,7 @@ const corsOptions = {
         return cb(new Error('Not allowed by CORS'));
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 };
 const io = new Server(server, { cors: corsOptions });
@@ -6653,6 +6663,26 @@ app.use(express.static(publicPath, staticOptions));
 app.get('/login', (req, res) => {
     res.sendFile(path.join(publicPath, 'login.html'));
 });
+
+// ---- Stay BnB isolated module (public catalog + admin manager) ----
+// Mounted BEFORE the /api 404 so these routes resolve. All other
+// Polysoko routes/sockets are untouched. Table creation is deferred
+// to boot (non-blocking) and uses CREATE TABLE IF NOT EXISTS only.
+let stayMounted = false;
+try {
+    if (stayRoutes && stayRoutes.createStayApiRouter) {
+        app.use('/api', stayRoutes.createStayApiRouter({ dbAll, dbGet, dbRun, authenticateAdmin }));
+        stayMounted = true;
+        console.log('🏠 Stay BnB API mounted: /api/stays, /api/admin/bookings, /api/admin/properties');
+    }
+} catch (e) {
+    console.error('[stay] mount failed (existing routes unaffected):', e.message);
+}
+if (stayRoutes && stayRoutes.ensureStayTables) {
+    stayRoutes.ensureStayTables({ dbRun, dbGet }).catch((e) => {
+        console.error('[stay] table init failed (existing routes unaffected):', e.message);
+    });
+}
 
 app.get(/^\/([A-Za-z0-9_-]+)$/, (req, res, next) => {
     const page = req.params[0];
