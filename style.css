@@ -293,15 +293,27 @@
 .header-left {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     margin-right: auto;
     min-width: 0;
     flex: 1 1 auto;
+    overflow: hidden;
 }
 
-.header-left .logo { flex: 0 0 auto; white-space: nowrap; }
+.header-left .logo { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 
 .mobile-header .profile-trigger { margin-left: auto; flex: 0 0 auto; }
+
+/* Ensure Stay & Roam and header actions never overlap */
+.mobile-header {
+    gap: 10px;
+}
+
+@media (max-width: 560px) {
+    .header-left .logo { font-size: 0; }
+    .header-left .brand-mark { width: 28px; height: 28px; }
+    .mobile-header { gap: 6px; padding: 12px 10px; }
+}
 
 /* HEADER SEARCH BAR */
 .header-search-wrap {

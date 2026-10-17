@@ -132,7 +132,7 @@ function applyStateAndRender() {
     const active = state.category || "all";
     
     if (active === "all") {
-        filtered = filtered.filter(m => !isSportsMarket(m));
+        // "all" intentionally includes sports — see Sports pill for clickable subcategories
     } else {
         filtered = filtered.filter(m => {
             const cat = normalizeCategory(m.category);
@@ -1117,7 +1117,7 @@ function applyFilters(source) {
     const search = (state.search || "").toLowerCase();
 
     let filtered = data.filter(m => {
-        if (active === "all") return !isSportsMarket(m);
+        if (active === "all") return true;
 
         const cat = (m.category || "").toLowerCase();
 
@@ -1864,6 +1864,7 @@ window.fetchMarkets = async function() {
         if (document.getElementById("marketsList") || document.getElementById("ongoing")) {
             applyStateAndRender();
             renderTrending();
+            if (document.getElementById("greetingText")) { loadGreeting(); }
         }
         return { markets: merged };
 
@@ -1872,3 +1873,4 @@ window.fetchMarkets = async function() {
         return { markets: window.state.allMarkets || [] };
     }
 }
+
