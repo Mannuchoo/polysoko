@@ -32,7 +32,7 @@ import { createRequire } from 'module';
 import { getSokoBalance, sendSoko, getAdminWalletAddress, isValidAddress } from './blockchain.js';
 
 const stayRequire = createRequire(import.meta.url);
-// Stay BnB isolated router (CJS). Loaded lazily-guarded so a missing file never breaks boot.
+// Stay & Roam isolated router (CJS). Loaded lazily-guarded so a missing file never breaks boot.
 let stayRoutes = null;
 try {
     stayRoutes = stayRequire('./routes/stayRoutes.cjs');
@@ -176,6 +176,15 @@ const sportsSyncDaysConfig = Number(process.env.SPORTS_SYNC_DAYS || 14);
 const SPORTS_SYNC_DAYS = Number.isFinite(sportsSyncDaysConfig)
     ? Math.max(2, Math.min(sportsSyncDaysConfig, 30))
     : 14;
+
+// Rate-limit guards for settlement API calls (api-sports free tier ~100 req/day).
+// Settlement runs every 30 minutes (48 runs/day); caps keep us safely under quota.
+const SETTLEMENT_BACKLOG_LIMIT = Number.isFinite(Number(process.env.SETTLEMENT_BACKLOG_LIMIT))
+    ? Math.max(1, Number(process.env.SETTLEMENT_BACKLOG_LIMIT))
+    : 20;   // max api-sports calls per settleFootballBacklog run
+const SETTLEMENT_SUSPENDED_LIMIT = Number.isFinite(Number(process.env.SETTLEMENT_SUSPENDED_LIMIT))
+    ? Math.max(1, Number(process.env.SETTLEMENT_SUSPENDED_LIMIT))
+    : 1;    // max api-sports calls per suspended-market sweep run
 const DEFAULT_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
 // AfricasTalking validates its credentials at construction time and throws
 // ("Username can't be blank") when AT_USERNAME / AT_API_KEY are absent. That throw
@@ -2481,6 +2490,8 @@ CREATE TABLE IF NOT EXISTS user_devices (
     db.run(`CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_transactions_phone ON transactions(user_phone)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_markets_settle ON markets(status, settled, startTime)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_markets_category ON markets(category, sport, status)`);
 
 const addColumnSafely = (tableName, columnName, definition, callback) => {
     db.all(`PRAGMA table_info(${tableName})`, (err, columns) => {
@@ -3803,26 +3814,26 @@ const settleWeatherMarkets = async () => {
 };
 const closeExpiredMarkets = async () => {
     try {
-        const now = Date.now();
-
-        const markets = await dbAll(
-            `SELECT * FROM markets 
-             WHERE status IN ('upcoming', 'live', 'open') AND startTime IS NOT NULL`
+        // Lightweight SQL-only sweep (no external API calls): expired upcoming/open
+        // markets become 'closed'; stale live matches past the visibility window
+        // become 'suspended' so the batch settlement worker can pick them up.
+        // Runs every 10 minutes via the scheduler below.
+        const closed = await dbRun(
+            `UPDATE markets SET status='closed'
+              WHERE status IN ('upcoming', 'open')
+                AND startTime IS NOT NULL
+                AND startTime <= NOW()`,
+            []
         );
-
-        for (const m of markets) {
-            const start = new Date(m.startTime).getTime();
-            const isExpiredUpcoming = (m.status === "upcoming" || m.status === "open") && start <= now;
-            const isStaleLive = m.status === "live" && start + (3 * 60 * 60 * 1000) <= now;
-
-            if (isExpiredUpcoming || isStaleLive) {
-                await dbRun(
-                    `UPDATE markets SET status='closed' WHERE id=?`,
-                    [m.id]
-                );
-
-                console.log(`Ã¢â€ºâ€ Market closed: ${m.id}`);
-            }
+        const suspended = await dbRun(
+            `UPDATE markets SET status='suspended'
+              WHERE status = 'live'
+                AND startTime IS NOT NULL
+                AND startTime < NOW() - (${LIVE_VISIBILITY_MINUTES} * INTERVAL '1 minute')`,
+            []
+        );
+        if (Number(closed?.changes || 0) + Number(suspended?.changes || 0) > 0) {
+            console.log(`Market sweep: closed=${closed?.changes || 0} suspended=${suspended?.changes || 0}`);
         }
 
         emitMarkets();
@@ -4023,6 +4034,46 @@ const syncAllMarkets = async () => {
     }
 };
 
+// --- MARKET CATEGORY NORMALIZATION -------------------------------------------
+// Canonical aliases: one user-facing tab may match several stored values / ids.
+// football -> football fixtures (fb_*), league slugs, soccer_* leagues, sport='Football'
+// gaming   -> esports titles (sp_* ids, sport labels, league slugs)
+// Kept in one place so GET /api/markets, preview, and sports/categories agree.
+const FOOTBALL_LEAGUE_ALIASES = ['football', 'soccer', 'soccer_epl', 'soccer_spain_la_liga', 'soccer_uefa_champs_league'];
+const GAMING_LEAGUE_ALIASES = ['gaming', 'esports', 'csgo', 'dota2', 'valorant', 'leagueoflegends', 'league-of-legends', 'lol'];
+const LIVE_VISIBILITY_MINUTES = 120;
+
+const normalizeMarketCategoryParam = (value) => String(value || '').trim().toLowerCase();
+
+// Builds: AND ( <alias ORs> ) — appended to a WHERE clause with ? params
+// (the Postgres translator rewrites ? ->  positionally).
+// Extra columns (sport/league/id) included so league-scoped rows
+// (soccer_epl, csgo, ...) match even when category is generic.
+function categoryAliasClause(alias) {
+    const a = normalizeMarketCategoryParam(alias);
+    if (a === 'football' || a === 'soccer') {
+        const ors = FOOTBALL_LEAGUE_ALIASES.map(() => `LOWER(category) = LOWER(?)`).join(' OR ');
+        return {
+            clause: `AND (id LIKE 'fb\\_%' ESCAPE '\\' OR LOWER(COALESCE(sport,'')) = 'football' OR ${ors})`,
+            params: [...FOOTBALL_LEAGUE_ALIASES]
+        };
+    }
+    if (a === 'gaming' || a === 'esports' || a === 'esport') {
+        const ors = GAMING_LEAGUE_ALIASES.map(() => `LOWER(category) = LOWER(?)`).join(' OR ');
+        return {
+            clause: `AND (${ors} OR LOWER(COALESCE(sport,'')) IN ('esports','gaming','csgo','dota 2','dota2','valorant','league of legends','leagueoflegends') OR LOWER(COALESCE(league,'')) LIKE '%esport%' OR LOWER(COALESCE(league,'')) LIKE '%gaming%' OR id LIKE 'sp\\_%' ESCAPE '\\')`,
+            params: [...GAMING_LEAGUE_ALIASES]
+        };
+    }
+    if (a && a !== 'all') {
+        return {
+            clause: `AND (LOWER(category) = LOWER(?) OR id LIKE 'sp\\_%' ESCAPE '\\' OR id LIKE 'fb\\_%' ESCAPE '\\')`,
+            params: [a]
+        };
+    }
+    return { clause: '', params: [] };
+}
+
 app.get('/api/markets/preview', async (req, res) => {
     try {
         const rows = await dbAll(
@@ -4073,14 +4124,28 @@ app.get('/api/markets/preview', async (req, res) => {
     }
 });
 
-app.get('/api/markets', async (req, res) => {
+// MARKETS ROUTE HANDLER
+// GET /api/markets?category=<football|gaming|sports|crypto|...>&limit=<n>
+//   - alias-aware filtering (football<->soccer*, gaming<->esports*)
+//   - UTC visibility window: open/upcoming always; live up to LIVE_VISIBILITY_MINUTES after startTime
+const marketsRouteHandler = async (req, res) => {
     try {
+        const categoryParam = normalizeMarketCategoryParam(req.query.category);
+        const alias = (categoryParam && categoryParam !== 'all')
+            ? categoryAliasClause(categoryParam)
+            : { clause: '', params: [] };
         const rows = await dbAll(
             `SELECT *
              FROM markets
              WHERE status IN ('open', 'upcoming', 'live')
+               AND (
+                     startTime IS NULL
+                     OR status IN ('open', 'upcoming')
+                     OR startTime > NOW() - (? * INTERVAL '1 minute')
+                   )
+               ${alias.clause}
                AND NOT (
-                    (category='sports' OR category='football' OR id LIKE 'sp_%' OR id LIKE 'fb_%')
+                    (category='sports' OR category='football' OR id LIKE 'sp\\_%' ESCAPE '\\' OR id LIKE 'fb\\_%' ESCAPE '\\')
                     AND (
                         title IN ('Home vs Away', 'Unknown vs Unknown')
                         OR sideA IN ('Home', 'Away', 'Unknown', '')
@@ -4095,7 +4160,7 @@ app.get('/api/markets', async (req, res) => {
                 COALESCE(home_volume, 0) + COALESCE(away_volume, 0) DESC,
                 startTime ASC,
                 title ASC`,
-            []
+            [...alias.params, LIVE_VISIBILITY_MINUTES]
         );
 
         const markets = (rows || []).map((market) => {
@@ -4110,7 +4175,9 @@ app.get('/api/markets', async (req, res) => {
         console.error("Markets load failed:", e.message);
         res.status(500).json({ success: false, message: "Unable to load markets" });
     }
-});
+};
+
+app.get('/api/markets', marketsRouteHandler);
 
 app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
     const marketId = String(req.params.id || '').trim();
@@ -6059,9 +6126,12 @@ async function resolveFootballMarketResult(marketId) {
 
 async function settleFootballBacklog() {
     const footballToResolve = await dbAll(
-        `SELECT id FROM markets WHERE (id LIKE 'fb_%' OR (category='sports' AND sport='Football') OR country='Football') AND settled=0 AND status='closed' AND (result IS NULL OR TRIM(result)='')`,
-        []
+        `SELECT id FROM markets WHERE (id LIKE 'fb_%' OR (category='sports' AND sport='Football') OR country='Football') AND settled=0 AND status='closed' AND (result IS NULL OR TRIM(result)='') ORDER BY startTime ASC NULLS LAST LIMIT ?`,
+        [SETTLEMENT_BACKLOG_LIMIT]
     );
+    if (footballToResolve.length >= SETTLEMENT_BACKLOG_LIMIT) {
+        console.warn(`[settleFootballBacklog] API cap of ${SETTLEMENT_BACKLOG_LIMIT} reached; remaining closed football fixtures deferred to next run`);
+    }
 
     let resolved = 0;
     for (const row of footballToResolve) {
@@ -6083,6 +6153,72 @@ async function runSettlementEngine() {
     await settleResolvedMarkets();
     await settleWeatherMarkets();
     return settleFootballBacklog();
+}
+
+/*
+ * Rate-limit-safe batch settlement worker over 'suspended' markets.
+ * closeExpiredMarkets promotes stale live matches to 'suspended' every 10 minutes;
+ * this worker (every 30 minutes) resolves football fixtures via api-sports and
+ * settles/refunds them using the existing settleMarket/cancelMarket engine.
+ * At most SETTLEMENT_SUSPENDED_LIMIT api-sports calls per run (default 1 ->
+ * <= ~48 external API requests/day at a 30-minute cadence).
+ * Gaming/esports markets (id sp_*) have no results source wired here; they wait
+ * for the admin Pending Settlements panel (manual settle/void).
+ * 
+ */
+async function runSuspendedMarketSettlement() {
+    const summary = { processed: 0, settled: 0, cancelled: 0, skipped: 0, apiCalls: 0, deferred: 0 };
+    if (!API_SPORTS_KEY) {
+        console.warn("[settlement worker] No sports API key configured; skipping suspended-market settlement.");
+        return summary;
+    }
+    const candidates = await dbAll(
+        `SELECT id FROM markets m
+          WHERE status='suspended' AND settled=0
+            AND EXISTS (SELECT 1 FROM bets b WHERE b.market_id = m.id AND b.status = 'active')
+          ORDER BY startTime ASC NULLS LAST, id ASC
+          LIMIT ?`,
+        [SETTLEMENT_SUSPENDED_LIMIT * 3]
+    );
+    summary.processed = candidates.length;
+    let apiCallsLeft = SETTLEMENT_SUSPENDED_LIMIT;
+    for (const row of candidates || []) {
+        const marketId = String(row.id || '');
+        if (!marketId.startsWith('fb_')) {
+            // No results source for gaming/esports (sp_*) markets in this worker.
+            summary.skipped++;
+            continue;
+        }
+        if (apiCallsLeft <= 0) {
+            summary.deferred++;
+            console.log("[settlement worker] API budget exhausted; deferring", marketId);
+            continue;
+        }
+        apiCallsLeft--;
+        summary.apiCalls++;
+        let result;
+        try {
+            result = await resolveFootballMarketResult(marketId);
+        } catch (e) {
+            console.warn("[settlement worker] result lookup failed for", marketId, e.message);
+            continue;
+        }
+        if (!result) continue; // fixture not finished yet; stays suspended for next run
+        try {
+            if (result === 'DRAW') {
+                const d = await cancelMarket(marketId, 'DRAW');
+                summary.cancelled += (d && d.cancelledBets) || 0;
+            } else {
+                const d = await settleMarket(marketId, result);
+                summary.settled += (d && d.settledBets) || 0;
+            }
+        } catch (e) {
+            console.error("[settlement worker] settlement failed for", marketId, e.message);
+            summary.skipped++;
+        }
+    }
+    console.log("[settlement worker] suspended sweep:", JSON.stringify(summary));
+    return summary;
 }
 
 app.post('/api/admin/settle-backlog', authenticateAdmin, async (req, res) => {
@@ -6253,6 +6389,22 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
     } catch (e) {
         console.error("Ã¢ÂÅ’ Error fetching pending markets:", e);
         res.status(500).json({ success: false, message: "Database error fetching markets" });
+    }
+});
+
+app.get('/api/admin/suspended-markets', authenticateAdmin, async (req, res) => {
+    try {
+        const markets = await dbAll(`
+            SELECT m.*
+            FROM markets m
+            WHERE m.status = 'suspended' AND m.settled = 0
+              AND EXISTS (SELECT 1 FROM bets b WHERE b.market_id = m.id AND b.status = 'active')
+            ORDER BY m.startTime ASC NULLS LAST, m.id ASC
+        `);
+        res.json({ success: true, markets });
+    } catch (e) {
+        console.error("Error fetching suspended markets:", e);
+        res.status(500).json({ success: false, message: "Database error fetching suspended markets" });
     }
 });
 
@@ -6664,22 +6816,93 @@ app.get('/login', (req, res) => {
     res.sendFile(path.join(publicPath, 'login.html'));
 });
 
-// ---- Stay BnB isolated module (public catalog + admin manager) ----
+// ---- Stay & Roam isolated module (public catalog + admin manager) ----
 // Mounted BEFORE the /api 404 so these routes resolve. All other
 // Polysoko routes/sockets are untouched. Table creation is deferred
-// to boot (non-blocking) and uses CREATE TABLE IF NOT EXISTS only.
+// to boot (non-blocking) and uses CREATE TABLE IF NOT EXISTS + idempotent
+// ADD COLUMN only.
+const stayUploadPath = path.join(publicPath, 'uploads', 'stays');
+try {
+    if (!fs.existsSync(stayUploadPath)) fs.mkdirSync(stayUploadPath, { recursive: true });
+} catch (e) { console.warn('[stay] upload dir init failed:', e.message); }
+const stayUpload = multer({
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => {
+            try { fs.mkdirSync(stayUploadPath, { recursive: true }); } catch (e) { /* ignore */ }
+            cb(null, stayUploadPath);
+        },
+        filename: (req, file, cb) => {
+            const unique = Date.now() + '-' + Math.round(Math.random() * 1E9);
+            cb(null, 'stay-' + unique + path.extname(file.originalname || '.jpg'));
+        },
+    }),
+    limits: { fileSize: 5 * 1024 * 1024, files: 15 },
+    fileFilter: (req, file, cb) => {
+        const ext = path.extname(file.originalname || '').toLowerCase();
+        const mime = String(file.mimetype || '').toLowerCase();
+        if (/\.(jpeg|jpg|png|webp|gif)$/.test(ext) && /^image\/(jpeg|png|webp|gif)$/.test(mime)) return cb(null, true);
+        cb(new Error('Only images are allowed'));
+    },
+});
+
+// Multi-channel booking confirmation: SMS (Africa's Talking) + HTML email
+// (Nodemailer) + live socket event. All fire-and-forget; failures only log.
+const notifyStayBooking = async (type, b) => {
+    const firstName = String(b.guest_name || 'Guest').trim().split(/\s+/)[0] || 'Guest';
+    const link = `${PUBLIC_SITE_URL}/stay/booking/${b.reference}`;
+    const isPaid = type === 'booking_paid' || b.payment_status === 'paid';
+    try {
+        const smsMsg = `Hi ${firstName}, your Stay & Roam booking #${b.reference} for ${b.property_title || 'your stay'} is ${isPaid ? 'confirmed & paid' : 'received'}! ${isPaid ? `View location & details: ${link}` : `Total KSh ${Number(b.total_price || 0).toLocaleString()}.`}`;
+        const toPhone = formatPhone(b.guest_phone);
+        if (toPhone) await sendSms({ to: [toPhone], message: smsMsg });
+    } catch (e) { console.warn('[stay] sms failed:', e.message); }
+    try {
+        if (b.guest_email) {
+            const paidNote = isPaid
+                ? `<p style="color:#00c96b;font-weight:bold;">Payment confirmed. Your exact location is unlocked:</p><p><a href="${link}">${link}</a>${b.google_maps_link ? `<br><a href="${b.google_maps_link}">Open in Google Maps</a>` : ''}</p>${b.exact_address ? `<p><b>Address:</b> ${b.exact_address}</p>` : ''}`
+                : `<p>Pay via M-Pesa to unlock the exact location. Your reference: <b>${b.reference}</b></p>`;
+            await sendPolyMail(b.guest_email, `Stay & Roam booking ${b.reference}`,
+                `<div style="font-family:sans-serif;max-width:520px;"><h2>Hi ${firstName},</h2>` +
+                `<p>Your Stay & Roam booking <b>#${b.reference}</b> for <b>${b.property_title || 'your stay'}</b> is ${isPaid ? 'confirmed' : 'received'}.</p>` +
+                `<p><b>Check-in:</b> ${b.check_in}<br><b>Check-out:</b> ${b.check_out}<br><b>Total:</b> KSh ${Number(b.total_price || 0).toLocaleString()}</p>` +
+                paidNote + `<p style="color:#888;font-size:12px;">Host contact: ${process.env.STAY_HOST_CONTACT || process.env.ADMIN_EMAIL || 'via PolySoko support'}.</p></div>`);
+        }
+    } catch (e) { console.warn('[stay] email failed:', e.message); }
+    try {
+        emitAdminEvent('booking_confirmed', { reference: b.reference, property_id: b.property_id, status: b.payment_status || type });
+        if (b.guest_phone) {
+            try { await createNotification(normalizePhone(b.guest_phone), 'Stay & Roam booking', `#${b.reference} ${isPaid ? 'confirmed & paid' : 'received'}.`, isPaid ? 'success' : 'info'); }
+            catch (e) { /* guest may not be a registered user; admin event above already fired */ }
+        }
+    } catch (e) { console.warn('[stay] socket notify failed:', e.message); }
+};
+
 let stayMounted = false;
 try {
     if (stayRoutes && stayRoutes.createStayApiRouter) {
-        app.use('/api', stayRoutes.createStayApiRouter({ dbAll, dbGet, dbRun, authenticateAdmin }));
+        app.use('/api', stayRoutes.createStayApiRouter({ dbAll, dbGet, dbRun, authenticateAdmin, notifyStayBooking }));
         stayMounted = true;
-        console.log('🏠 Stay BnB API mounted: /api/stays, /api/admin/bookings, /api/admin/properties');
+        console.log('🏠 Stay & Roam API mounted: /api/stays, /api/admin/bookings, /api/admin/properties, /api/admin/stays/upload');
+        // Admin multi-image upload (up to 15 photos). Returns web paths for the images JSON column.
+        app.post('/api/admin/stays/upload', authenticateAdmin, (req, res) => {
+            stayUpload.array('photos', 15)(req, res, (err) => {
+                if (err) {
+                    const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Each photo must be 5MB or smaller'
+                        : err.code === 'LIMIT_FILE_COUNT' ? 'Maximum 15 photos per upload'
+                        : (err.message || 'Upload failed');
+                    return res.status(400).json({ success: false, message: msg });
+                }
+                const files = (req.files || []).map((f) => `/uploads/stays/${f.filename}`);
+                res.json({ success: true, files });
+            });
+        });
+        console.log('🏠 Stay & Roam upload mounted: POST /api/admin/stays/upload (15 photos max)');
     }
 } catch (e) {
     console.error('[stay] mount failed (existing routes unaffected):', e.message);
 }
 if (stayRoutes && stayRoutes.ensureStayTables) {
-    stayRoutes.ensureStayTables({ dbRun, dbGet }).catch((e) => {
+    stayRoutes.ensureStayTables({ dbRun, dbGet, dbAll }).catch((e) => {
         console.error('[stay] table init failed (existing routes unaffected):', e.message);
     });
 }
@@ -6851,6 +7074,7 @@ const startServer = async () => {
             runSafely('syncFootballNews', syncFootballNews);
             runSafely('refreshBoostedMarkets', refreshBoostedMarkets);
             runSafely('runSettlementEngine', runSettlementEngine);
+            runSafely('runSuspendedMarketSettlement', runSuspendedMarketSettlement);
             runSafely('syncWeatherMarkets', syncWeatherMarkets);
             setInterval(syncAllMarkets, 3600000);
             setInterval(syncFootballMarkets, 3600000);
@@ -6863,6 +7087,12 @@ const startServer = async () => {
             setInterval(() => {
                 runSettlementEngine().catch(e => console.error("Settlement engine failed:", e.message));
             }, 3600000);
+            // Auto-expire sweep every 10 minutes (SQL-only, no external API calls).
+            setInterval(closeExpiredMarkets, 600000);
+            // Batch settlement worker over 'suspended' markets every 30 minutes.
+            setInterval(() => {
+                runSuspendedMarketSettlement().catch(e => console.error("Suspended-market settlement failed:", e.message));
+            }, 1800000);
         } else {
             console.log('SKIP_STARTUP_SYNC enabled; background market sync is disabled for this run.');
         }

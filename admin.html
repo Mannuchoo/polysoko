@@ -982,9 +982,21 @@ button, input, select {
                     <option value="sports">Sports</option>
                     <option value="crypto">Crypto</option>
                     <option value="news">News</option>
+                    <option value="gaming">Gaming / Esports</option>
+                    <option value="soccer">Soccer</option>
                 </select>
             </div>
             <div id="adminMarketList"></div>
+
+            <!-- ⚖️ PENDING SETTLEMENTS -->
+            <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
+                <h3 style="margin:0 0 10px 0; font-size:0.9rem; display:flex; gap:8px; align-items:center;">
+                    ⚖️ Pending Settlements
+                    <button onclick="loadPendingSettlements()" style="margin-left:auto; padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:#111; color:var(--text); cursor:pointer; font-size:0.8rem;">↻ Refresh</button>
+                </h3>
+                <p style="font-size:0.75rem;color:#888;margin:0 0 10px 0;">Suspended matches awaiting results. Football fixtures settle automatically every 30 minutes via the batch settlement worker; gaming/esports markets settle here manually.</p>
+                <div id="pendingSettlementsList" style="display:flex;flex-direction:column;gap:8px;"></div>
+            </div>
         </div>
     </div>
 
@@ -1140,7 +1152,7 @@ button, input, select {
             </button>
             <button onclick="showSection('staySection'); loadStayAdmin();">
                 <div style="font-size:1.8rem;">🏠</div>
-                <span>Stay BnB Manager</span>
+                <span>Stay & Roam Manager</span>
             </button>
             <button onclick="location.reload()">
                 <div style="font-size:1.8rem;">🔄</div>
@@ -1183,11 +1195,11 @@ button, input, select {
     </div>
 </div>
 
-<!-- 🏠 STAY BNB MANAGER -->
+<!-- 🏠 STAY & ROAM MANAGER -->
 <div id="staySection" class="admin-section">
     <div class="stat-card">
         <div class="card-header" style="margin-bottom:20px;">
-            <h2>🏠 Stay BnB Manager</h2>
+            <h2>🏠 Stay &amp; Roam Manager</h2>
             <p class="sub">Listings CMS + guest bookings (public checkout needs no login)</p>
         </div>
         <div style="display:grid;gap:14px;">
@@ -1195,14 +1207,22 @@ button, input, select {
                 <h3 style="margin:0 0 10px;">Add Listing</h3>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
                     <input id="stayTitle" placeholder="Title e.g. Nyali Beachfront Apartment" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
-                    <input id="stayLocation" placeholder="Location e.g. Nyali, Mombasa" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayLocation" placeholder="Area e.g. Nyali, Mombasa (public)" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
                     <input id="stayPrice" type="number" min="1" placeholder="Price/night KSh" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
                     <input id="stayGuestsN" type="number" min="1" value="2" placeholder="Max guests" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayLat" type="number" step="any" placeholder="Latitude (private, paid only)" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayLng" type="number" step="any" placeholder="Longitude (private, paid only)" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayMaps" placeholder="Google Maps link (private, paid only)" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                    <input id="stayAddr" placeholder="Exact address (private, paid only)" style="padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
                 </div>
                 <textarea id="stayDesc" placeholder="Description" rows="2" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;"></textarea>
                 <div style="margin-top:10px;color:#9fb0c0;font-size:.82rem;">Amenities (tick to include):</div>
                 <div id="stayAmenRow" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;font-size:.82rem;color:#cfe3ff;"></div>
-                <input id="stayImages" placeholder="Image URL(s), comma separated" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                <div style="margin-top:10px;color:#9fb0c0;font-size:.82rem;">Photos (up to 15 — upload files or paste URLs):</div>
+                <input id="stayPhotoFiles" type="file" accept="image/*" multiple style="width:100%;margin-top:8px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
+                <div id="stayUploadBar" style="display:none;margin-top:8px;background:#111;border:1px solid #333;border-radius:8px;overflow:hidden;"><div id="stayUploadFill" style="height:8px;width:0%;background:linear-gradient(135deg,#00ff88,#00c96b);"></div></div>
+                <div id="stayPreviewRow" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;"></div>
+                <input id="stayImages" placeholder="Image URL(s), comma separated (or use upload above)" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
                 <button onclick="createStayProperty()" class="btn-primary" style="margin-top:10px;padding:11px 16px;">Add Property</button>
                 <div id="stayFormMsg" style="margin-top:8px;font-size:.85rem;color:#8b98a5;"></div>
             </div>
@@ -1214,7 +1234,7 @@ button, input, select {
             <div class="table-responsive">
                 <table class="market-table">
                     <thead><tr><th>Guest</th><th>Property</th><th>Dates</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead>
-                    <tbody id="stayBookingsTable"><tr><td colspan="6" style="text-align:center;padding:24px;color:#666;">Open Stay BnB Manager to load bookings...</td></tr></tbody>
+                    <tbody id="stayBookingsTable"><tr><td colspan="6" style="text-align:center;padding:24px;color:#666;">Open Stay & Roam Manager to load bookings...</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -1740,7 +1760,7 @@ window.openWireModal = async function(type) {
     };
 };
 
-/* ================= STAY BNB MANAGER ================= */
+/* ================= STAY & ROAM MANAGER ================= */
 const STAY_AMENITIES = ['WiFi', 'AC', 'Pool', 'Generator', 'Parking', 'Kitchen', 'Smart TV', 'Workspace', 'Chef', 'Beach Access'];
 function renderStayAmenBoxes() {
     const row = document.getElementById('stayAmenRow');
@@ -1785,25 +1805,63 @@ async function createStayProperty() {
     msg.style.color = '#8b98a5'; msg.textContent = 'Saving...';
     try {
         const amenities = [...document.querySelectorAll('#stayAmenRow input:checked')].map((x) => x.value);
-        const images = String(document.getElementById('stayImages').value || '').split(',').map((s) => s.trim()).filter(Boolean);
+        let images = String(document.getElementById('stayImages').value || '').split(',').map((s) => s.trim()).filter(Boolean);
+        const files = [...(document.getElementById('stayPhotoFiles').files || [])].slice(0, 15);
+        if (files.length) {
+            const uploaded = await uploadStayPhotos(files);
+            images = [...uploaded, ...images].slice(0, 15);
+        }
         const body = {
             title: document.getElementById('stayTitle').value.trim(),
             location: document.getElementById('stayLocation').value.trim(),
             price_per_night: Number(document.getElementById('stayPrice').value),
             max_guests: Number(document.getElementById('stayGuestsN').value) || 2,
             description: document.getElementById('stayDesc').value.trim(),
+            latitude: document.getElementById('stayLat').value.trim(),
+            longitude: document.getElementById('stayLng').value.trim(),
+            google_maps_link: document.getElementById('stayMaps').value.trim(),
+            exact_address: document.getElementById('stayAddr').value.trim(),
             amenities, images, is_active: 1
         };
         const res = await API.post('/admin/properties', body);
         if (!res.success) throw new Error(res.message || 'Save failed');
         msg.style.color = '#00ff88'; msg.textContent = 'Property added.';
-        document.getElementById('stayTitle').value = '';
-        document.getElementById('stayLocation').value = '';
-        document.getElementById('stayPrice').value = '';
-        document.getElementById('stayDesc').value = '';
-        document.getElementById('stayImages').value = '';
+        ['stayTitle', 'stayLocation', 'stayPrice', 'stayDesc', 'stayImages', 'stayLat', 'stayLng', 'stayMaps', 'stayAddr'].forEach((id) => { document.getElementById(id).value = ''; });
+        document.getElementById('stayPhotoFiles').value = '';
+        document.getElementById('stayPreviewRow').innerHTML = '';
         document.querySelectorAll('#stayAmenRow input:checked').forEach((x) => { x.checked = false; });
     } catch (e) { msg.style.color = '#ff8080'; msg.textContent = e.message || 'Save failed'; }
+}
+function uploadStayPhotos(files) {
+    return new Promise((resolve, reject) => {
+        const fd = new FormData();
+        files.forEach((f) => fd.append('photos', f));
+        const bar = document.getElementById('stayUploadBar');
+        const fill = document.getElementById('stayUploadFill');
+        const prev = document.getElementById('stayPreviewRow');
+        prev.innerHTML = files.map((f) => `<img src="${URL.createObjectURL(f)}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #333;" />`).join('');
+        bar.style.display = 'block';
+        fill.style.width = '5%';
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${ADMIN_API_BASE}/api/admin/stays/upload`);
+        const token = localStorage.getItem('token');
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) fill.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+        };
+        xhr.onload = () => {
+            try {
+                const r = JSON.parse(xhr.responseText || '{}');
+                if (xhr.status >= 200 && xhr.status < 300 && r.success) {
+                    fill.style.width = '100%';
+                    setTimeout(() => { bar.style.display = 'none'; fill.style.width = '0%'; }, 600);
+                    resolve(r.files || []);
+                } else reject(new Error(r.message || 'Upload failed'));
+            } catch (e) { reject(new Error('Upload failed')); }
+        };
+        xhr.onerror = () => reject(new Error('Upload failed'));
+        xhr.send(fd);
+    });
 }
 
 /* ================= INIT ================= */
@@ -1825,7 +1883,7 @@ async function initAdminAfterLogin() {
     const lastView = localStorage.getItem('admin_last_view') || 'adminAccountSection';
     showSection(lastView, null, { load: false });
     await loadSuperAdminProfile();
-    const startupLoads = [loadAdminTreasury(), loadGlobalActiveBets(), loadTransactions()];
+    const startupLoads = [loadAdminTreasury(), loadGlobalActiveBets(), loadTransactions(), loadPendingSettlements()];
     if (lastView === 'usersSection') startupLoads.push(loadAdminUsers());
     if (lastView === 'marketsSection') startupLoads.push(loadAdminMarkets());
     if (lastView === 'marketApprovalsSection') startupLoads.push(loadPendingMarkets());
@@ -2351,6 +2409,8 @@ async function loadAdminMarkets() {
         console.error("Market load failed:", err);
         container.innerHTML = `<p style="color:#ff7777;text-align:center;">Could not load markets: ${esc(err.message || 'Request failed')}</p>`;
     }
+
+    loadPendingSettlements();
 }
 
 async function deleteMarket(id) {
@@ -2401,6 +2461,80 @@ async function adminSettleMarket(marketId, btn) {
     } catch (err) {
         alert("Settlement failed: " + err.message);
         btn.innerText = "Settle";
+        btn.disabled = false;
+    }
+}
+
+async function loadPendingSettlements() {
+    const container = document.getElementById('pendingSettlementsList');
+    if (!container) return;
+    container.innerHTML = '<div style="padding:10px;color:#71767b;">Loading...</div>';
+    try {
+        const res = await API.get('/admin/suspended-markets');
+        const markets = res.markets || [];
+        if (!markets.length) {
+            container.innerHTML = '<p style="text-align:center;color:#71767b;padding:18px;">No markets pending settlement.</p>';
+            return;
+        }
+        container.innerHTML = markets.map(m => {
+            const bets = Number(m.active_bets || 0);
+            return `
+            <div id="ps-card-${esc(m.id)}" style="background:#000;padding:12px;border-radius:10px;border-left:5px solid #ffa502;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <div>
+                        <div style="font-weight:700;">${esc(m.title || 'Untitled market')}</div>
+                        <div style="font-size:0.7rem;color:#888;">ID: ${esc(m.id)} &bull; ${esc(m.status)} &bull; ${bets} active bet${bets !== 1 ? 's' : ''}</div>
+                    </div>
+                    <div style="font-size:0.7rem;color:#666;white-space:nowrap;">${esc(m.startTime || '-')}</div>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+                    <select id="ps-result-${esc(m.id)}" style="padding:8px; background:#111; border:1px solid #333; color:white; border-radius:6px; font-size:0.85rem;">
+                        <option value="HOME">HOME</option>
+                        <option value="AWAY">AWAY</option>
+                        <option value="DRAW">DRAW</option>
+                        <option value="YES">YES</option>
+                        <option value="NO">NO</option>
+                    </select>
+                    <button onclick="adminSettleMarketPanel('${esc(m.id)}', this)" class="btn-approve" style="padding:8px 14px; font-size:0.85rem;">Settle</button>
+                    <button onclick="adminVoidMarket('${esc(m.id)}', this)" style="padding:8px 14px; font-size:0.85rem; background:#7a1f1f; color:#fff; border:1px solid #5a1515; border-radius:6px; cursor:pointer;">Void (Refund 100%)</button>
+                </div>
+            </div>
+            `;
+        }).join('');
+    } catch (err) {
+        container.innerHTML = `<p style="color:#ff7777;">Failed to load: ${esc(err.message || 'Request failed')}</p>`;
+    }
+}
+
+async function adminSettleMarketPanel(marketId, btn) {
+    const result = document.getElementById(`ps-result-${marketId}`).value;
+    if (!confirm(`Settle market ${marketId} as ${result}? Winners will be paid out.`)) return;
+    btn.innerText = "Settling...";
+    btn.disabled = true;
+    try {
+        await API.post('/admin/settle', { marketId, result });
+        alert("Market settled.");
+        loadPendingSettlements();
+        loadAdminMarkets();
+    } catch (err) {
+        alert("Settlement failed: " + err.message);
+        btn.innerText = "Settle";
+        btn.disabled = false;
+    }
+}
+
+async function adminVoidMarket(marketId, btn) {
+    if (!confirm(`Void market ${marketId} and refund 100% of all active stakes?`)) return;
+    btn.innerText = "Voiding...";
+    btn.disabled = true;
+    try {
+        await API.post('/admin/cancel-market', { marketId, reason: 'VOID' });
+        alert("Market voided; active stakes refunded.");
+        loadPendingSettlements();
+        loadAdminMarkets();
+    } catch (err) {
+        alert("Void failed: " + err.message);
+        btn.innerText = "Void (Refund 100%)";
         btn.disabled = false;
     }
 }

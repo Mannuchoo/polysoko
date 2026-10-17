@@ -73,6 +73,16 @@ function isFootballNewsMarket(m) {
     return cat === "football" && !isFootballFixtureMarket(m);
 }
 
+function isGamingMarket(m) {
+    const cat = normalizeCategory(m?.category);
+    const sport = normalizeCategory(m?.sport || "");
+    const league = normalizeCategory(m?.league || "");
+    const gamingLabels = ['esports','gaming','csgo','dota 2','dota2','valorant','league of legends','leagueoflegends'];
+    return cat === 'gaming' || cat === 'esports' || m?.id?.startsWith('sp_') ||
+        gamingLabels.includes(sport) ||
+        league.includes('esport') || league.includes('gaming');
+}
+
 function isSportsMarket(m) {
     const cat = normalizeCategory(m?.category);
     const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
@@ -85,7 +95,7 @@ window.setCategory = function (category) {
         return;
     }
 
-    const active = normalizeCategory(category || "all") === "football" ? "sports" : normalizeCategory(category || "all");
+    const active = normalizeCategory(category || "all");
     window.state.category = active;
     window.state.sportsType = "";
     localStorage.removeItem("last_sports_type");
@@ -127,7 +137,10 @@ function applyStateAndRender() {
         filtered = filtered.filter(m => {
             const cat = normalizeCategory(m.category);
             if (active === "football") {
-                return isSportsMarket(m);
+                return isSportsMarket(m) || isFootballNewsMarket(m);
+            }
+            if (active === "gaming") {
+                return isGamingMarket(m);
             }
             if (active === "sports") {
                 return isSportsMarket(m);
