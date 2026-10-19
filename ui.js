@@ -1226,10 +1226,21 @@ function applyFilters(source) {
     return filtered;
 }
 const renderMatchCenter = (data) => {
+    const score = data?.score || null;
+    const fixture = data?.fixture || null;
     const stats = data?.stats || data?.response?.[0]?.statistics || null;
     const lineups = data?.lineups || data?.response?.[0]?.lineups || null;
     const events = data?.events || data?.response?.[0]?.events || [];
     const predictions = data?.predictions || data?.response?.[0]?.predictions || [];
+    const sectionErrors = data?.sectionErrors || {};
+    const scoreView = score ? `
+        <div style="display:flex;align-items:center;justify-content:center;gap:16px;padding:14px;margin-bottom:16px;background:#0d1117;border:1px solid #222;border-radius:12px;">
+            <strong style="flex:1;text-align:right;color:#eee;">${escapeHtml(fixture?.teams?.home?.name || 'Home')}</strong>
+            <span style="font-size:1.35rem;font-weight:900;color:#00ff88;white-space:nowrap;">${score.home ?? '–'} : ${score.away ?? '–'}</span>
+            <strong style="flex:1;color:#eee;">${escapeHtml(fixture?.teams?.away?.name || 'Away')}</strong>
+        </div>
+        <div style="text-align:center;color:#84909d;font-size:.72rem;margin:-8px 0 14px;">${escapeHtml(score.status?.long || 'Fixture score')}</div>`
+        : `<div style="padding:10px;margin-bottom:15px;color:#9ca8b5;background:#10151b;border-radius:8px;">${escapeHtml(sectionErrors.fixture || 'Score data is not available for this fixture yet.')}</div>`;
     
     // 1. Live Events (Goals/Cards)
     const safeEvents = Array.isArray(events) ? events : [];
@@ -1261,6 +1272,7 @@ const renderMatchCenter = (data) => {
 
     return `
         <div class="livescore-view" style="margin-top:16px;">
+            ${scoreView}
             ${probHtml}
             ${safeEvents.length ? `
             <div style="margin-bottom:20px;">
@@ -1271,7 +1283,7 @@ const renderMatchCenter = (data) => {
             ${lineups ? `
             <div style="margin-top:20px;">
                 <h4 style="font-size:0.68rem; color:#888; text-transform:uppercase; margin-bottom:10px; letter-spacing:0.5px;">Starting XI</h4>
-                ${renderLineups(lineups)}
+                ${sectionErrors.lineups ? `<p style="color:#a9a077;font-size:.82rem;">${escapeHtml(sectionErrors.lineups)}</p>` : renderLineups(lineups)}
             </div>` : ''}
         </div>
     `;

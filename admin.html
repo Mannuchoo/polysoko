@@ -14,6 +14,8 @@
     <script src="./dialogs.js?v=1"></script>
     <script>
         const ADMIN_DEFAULT_API_BASE = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname) ? window.location.origin : "https://api.polysoko.online";
+        const ADMIN_DEFAULT_CLOUDINARY_CLOUD_NAME = 'dewzojuq';
+        const ADMIN_DEFAULT_CLOUDINARY_UPLOAD_PRESET = 'polysoko_presets';
         const ADMIN_LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
         const adminIsProduction = !ADMIN_LOCAL_HOSTS.includes(window.location.hostname);
         const ADMIN_API_BASE = adminIsProduction ? ADMIN_DEFAULT_API_BASE : window.location.origin;
@@ -1871,8 +1873,10 @@ function uploadStayPhotos(files) {
         const configResponse = await fetch(adminApiUrl('/api/config'));
         if (!configResponse.ok) throw new Error('Could not load image upload configuration.');
         const config = await configResponse.json();
-        const cloudName = String(config.cloudName || '').trim();
+        const cloudName = String(config.cloudName || ADMIN_DEFAULT_CLOUDINARY_CLOUD_NAME).trim();
         if (!/^[a-zA-Z0-9_-]+$/.test(cloudName)) throw new Error('Cloudinary is not configured on the backend.');
+        const uploadPreset = String(config.uploadPreset || ADMIN_DEFAULT_CLOUDINARY_UPLOAD_PRESET).trim();
+        if (!/^[a-zA-Z0-9_-]+$/.test(uploadPreset)) throw new Error('Cloudinary upload preset is not configured on the backend.');
         const uploadedUrls = [];
         const bar = document.getElementById('stayUploadBar');
         const fill = document.getElementById('stayUploadFill');
@@ -1884,7 +1888,7 @@ function uploadStayPhotos(files) {
             for (let i = 0; i < files.length; i += 1) {
                 const formData = new FormData();
                 formData.append('file', files[i]);
-                formData.append('upload_preset', 'Polysoko_presets');
+                formData.append('upload_preset', uploadPreset);
                 const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, { method: 'POST', body: formData });
                 const result = await response.json().catch(() => ({}));
                 if (!response.ok || !result.secure_url || !/^https:\/\/res\.cloudinary\.com\//i.test(result.secure_url)) {

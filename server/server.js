@@ -247,8 +247,13 @@ app.use((req, res, next) => {
 });
 // Cloudinary cloud names are public identifiers required by unsigned browser uploads;
 // never expose upload API secrets here.
+const DEFAULT_CLOUDINARY_CLOUD_NAME = 'dewzojuq';
+const DEFAULT_CLOUDINARY_UPLOAD_PRESET = 'polysoko_presets';
 app.get('/api/config', (_req, res) => {
-    res.json({ cloudName: String(process.env.CLOUDINARY_CLOUD_NAME || '').trim() });
+    res.json({
+        cloudName: String(process.env.CLOUDINARY_CLOUD_NAME || DEFAULT_CLOUDINARY_CLOUD_NAME).trim(),
+        uploadPreset: String(process.env.CLOUDINARY_UPLOAD_PRESET || DEFAULT_CLOUDINARY_UPLOAD_PRESET).trim()
+    });
 });
 // Health probe used by Railway's deployment healthcheck. Registered ahead of the
 // global rate limiter so that platform probes never consume the public API quota.
@@ -7225,23 +7230,36 @@ io.on('connection', (socket) => {
 
 // Backend: server.js
 // server.js
+const footballMatchDetailsCache = new Map();
 app.get('/api/football/details/:id', async (req, res) => {
     try {
-        const fixtureId = req.params.id.replace('fb_', '');
-        const apiKey = API_SPORTS_KEY; 
-        if (!apiKey) return res.status(500).json({ error: "Sports API key is not configured" }); 
-        const config = { headers: { 'x-apisports-key': apiKey } };
-
-        const [stats, lineups, events, predictions] = await Promise.all([
-            axios.get(`https://v3.football.api-sports.io/fixtures/statistics?fixture=${fixtureId}`, config),
-            axios.get(`https://v3.football.api-sports.io/fixtures/lineups?fixture=${fixtureId}`, config).catch(() => ({ data: { response: [] } })),
-            axios.get(`https://v3.football.api-sports.io/fixtures/events?fixture=${fixtureId}`, config),
-            axios.get(`https://v3.football.api-sports.io/predictions?fixture=${fixtureId}`, config)
+        const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
+        if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: 'Invalid fixture ID' });
+        const cached = footballMatchDetailsCache.get(fixtureId);
+        if (cached && cached.expiresAt > Date.now()) return res.json(cached.data);
+        const apiKey = API_SPORTS_KEY;
+        if (!apiKey) return res.status(503).json({ error: 'Sports API key is not configured' });
+        const config = { headers: { 'x-apisports-key': apiKey }, timeout: 12000 };
+        const request = async (label, url) => {
+            try {
+                const response = await axios.get(url, config);
+                return { data: response.data?.response || [], error: hasApiErrors(response.data) ? `${label} data is unavailable from the provider.` : null };
+            } catch (error) {
+                console.warn(`[football details] ${label} request failed for fixture ${fixtureId}:`, error.response?.data || error.message);
+                return { data: [], error: `${label} data is temporarily unavailable.` };
+            }
+        };
+        const [fixtureResult, statsResult, lineupsResult, eventsResult, predictionsResult] = await Promise.all([
+            request('Fixture', `https://v3.football.api-sports.io/fixtures?id=${fixtureId}&timezone=Africa%2FNairobi`),
+            request('Statistics', `https://v3.football.api-sports.io/fixtures/statistics?fixture=${fixtureId}`),
+            request('Lineups', `https://v3.football.api-sports.io/fixtures/lineups?fixture=${fixtureId}`),
+            request('Events', `https://v3.football.api-sports.io/fixtures/events?fixture=${fixtureId}`),
+            request('Predictions', `https://v3.football.api-sports.io/predictions?fixture=${fixtureId}`)
         ]);
-
-        const lineupsData = lineups.data.response || [];
-        const teamA = lineupsData[0]?.team?.name || '';
-        const teamB = lineupsData[1]?.team?.name || '';
+        const fixture = fixtureResult.data[0] || null;
+        const lineupsData = lineupsResult.data;
+        const teamA = fixture?.teams?.home?.name || lineupsData[0]?.team?.name || '';
+        const teamB = fixture?.teams?.away?.name || lineupsData[1]?.team?.name || '';
         const query = createMatchNewsQuery(teamA, teamB);
         let relatedNews = [];
 
@@ -7284,13 +7302,30 @@ app.get('/api/football/details/:id', async (req, res) => {
             }
         }
 
-        res.json({
-            stats: stats.data.response || [],
+        const result = {
+            fixture,
+            score: fixture ? {
+                home: fixture.goals?.home ?? null,
+                away: fixture.goals?.away ?? null,
+                halftime: fixture.score?.halftime || null,
+                fulltime: fixture.score?.fulltime || null,
+                extratime: fixture.score?.extratime || null,
+                penalty: fixture.score?.penalty || null,
+                status: fixture.fixture?.status || null
+            } : null,
+            stats: statsResult.data,
             lineups: lineupsData,
-            events: events.data.response || [],
-            predictions: predictions.data.response || [],
-            relatedNews
-        });
+            events: eventsResult.data,
+            predictions: predictionsResult.data,
+            relatedNews,
+            sectionErrors: { fixture: fixtureResult.error, stats: statsResult.error, lineups: lineupsResult.error, events: eventsResult.error, predictions: predictionsResult.error }
+        };
+        footballMatchDetailsCache.set(fixtureId, { data: result, expiresAt: Date.now() + 45 * 1000 });
+        if (footballMatchDetailsCache.size > 300) {
+            const oldestKey = footballMatchDetailsCache.keys().next().value;
+            footballMatchDetailsCache.delete(oldestKey);
+        }
+        res.json(result);
     } catch (error) {
         console.error("❌ API-Football Error:", error.response?.data || error.message);
         res.status(error.response?.status || 500).json({ error: "Failed to fetch match details" });
