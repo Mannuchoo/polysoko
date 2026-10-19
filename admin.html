@@ -1392,9 +1392,15 @@ function esc(str) {
         <p id="adminLoginGateMessage" style="margin:0 0 16px; color:#aaa; font-size:.9rem;">Enter your 6-digit admin PIN to load users, markets, and transactions.</p>
         <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Admin PIN</label>
         <input id="adminInlinePinInput" type="password" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="off" autofocus required placeholder="6-digit PIN" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1.1rem; letter-spacing:.18em; text-align:center; outline:none;">
+        <button id="adminMasterLoginToggle" type="button" onclick="toggleAdminMasterLogin()" style="display:block; margin:10px auto 0; background:none; border:0; color:#00d1ff; cursor:pointer; font-size:.8rem;">Use server password instead</button>
+        <div id="adminMasterLoginFields" style="display:none; margin-top:12px;">
+            <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Server password</label>
+            <input id="adminInlineMasterInput" type="password" autocomplete="current-password" placeholder="Server admin password" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
+        </div>
         <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:10px 0; color:#ff7777; font-size:.82rem;"></div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
             <button id="adminInlinePinBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Login With PIN</button>
+            <button id="adminInlineMasterBtn" onclick="submitInlineAdminMasterLogin()" style="display:none; flex:1; min-width:150px; padding:13px; border:1px solid #00d1ff; border-radius:10px; background:#101820; color:#00d1ff; font-weight:900; cursor:pointer;">Login With Server Password</button>
         </div>
         <div style="margin-top:14px; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <button onclick="setAdminBackendOverrideFromGate()" style="background:none; border:0; color:#00d1ff; cursor:pointer; padding:0; font-size:.8rem;">Change backend</button>
@@ -1554,6 +1560,21 @@ function hideAdminLoginGate() {
     if (gate) gate.style.display = 'none';
 }
 
+function toggleAdminMasterLogin() {
+    const fields = document.getElementById('adminMasterLoginFields');
+    const toggle = document.getElementById('adminMasterLoginToggle');
+    const masterMode = fields?.style.display !== 'none';
+    if (fields) fields.style.display = masterMode ? 'none' : 'block';
+    const pinInput = document.getElementById('adminInlinePinInput');
+    const pinButton = document.getElementById('adminInlinePinBtn');
+    const masterButton = document.getElementById('adminInlineMasterBtn');
+    if (pinInput) pinInput.style.display = masterMode ? 'block' : 'none';
+    if (pinButton) pinButton.style.display = masterMode ? 'block' : 'none';
+    if (masterButton) masterButton.style.display = masterMode ? 'none' : 'block';
+    if (toggle) toggle.textContent = masterMode ? 'Use admin PIN instead' : 'Use server password instead';
+    (masterMode ? pinInput : document.getElementById('adminInlineMasterInput'))?.focus();
+}
+
 const ADMIN_IDLE_LOCK_MS = 5 * 60 * 1000;
 let adminIdleLockTimer = null;
 
@@ -1610,6 +1631,33 @@ async function submitInlineAdminLogin() {
     }
 }
 
+async function submitInlineAdminMasterLogin() {
+    const passwordInput = document.getElementById('adminInlineMasterInput');
+    const status = document.getElementById('adminInlineLoginStatus');
+    const button = document.getElementById('adminInlineMasterBtn');
+    if (status) {
+        status.style.color = '#aaa';
+        status.textContent = 'Checking server password...';
+    }
+    if (button) button.disabled = true;
+    try {
+        const data = await API.post('/admin/master-login', { password: passwordInput?.value || '' });
+        if (!data.success || !data.token) throw new Error(data.message || 'Server password login failed.');
+        localStorage.setItem('token', data.token);
+        if (status) status.textContent = '';
+        if (passwordInput) passwordInput.value = '';
+        await initAdminAfterLogin();
+    } catch (e) {
+        if (status) {
+            status.style.color = '#ff7777';
+            status.textContent = e.message || 'Server password login failed.';
+        }
+        showAdminLoginGate(e.message || 'Server password login failed.');
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
 function setAdminBackendOverrideFromGate() {
     const raw = prompt('Enter the API backend URL', ADMIN_API_BASE || ADMIN_DEFAULT_API_BASE);
     if (raw === null) return;
@@ -1627,7 +1675,8 @@ document.addEventListener('keydown', (e) => {
     const gate = document.getElementById('adminLoginGate');
     if (!gate || gate.style.display !== 'flex') return;
     const active = document.activeElement;
-    if (active?.id === 'adminInlinePinInput') submitInlineAdminLogin('pin');
+    if (active?.id === 'adminInlinePinInput') submitInlineAdminLogin();
+    if (active?.id === 'adminInlineMasterInput') submitInlineAdminMasterLogin();
 });
 
 window.filterAdminList = function(containerId, query) {

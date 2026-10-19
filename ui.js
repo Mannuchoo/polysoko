@@ -360,6 +360,9 @@ function renderFilteredMarkets() {
         });
     }
 
+    if (!allMarkets.length && ['news', 'politics'].includes(state.category)) {
+        html += `<div class="empty-state" style="padding:24px;">No ${escapeHtml(state.category)} markets are available yet. Try again shortly.</div>`;
+    }
     mainGrid.innerHTML = html || `<div style="padding:20px;">No markets found. Searching for elite aura...</div>`;
 }
 
@@ -1880,16 +1883,19 @@ window.fetchMarkets = async function() {
             }
             supplementalMarkets = [...newsById.values()];
 
-            const merged = [];
-            const seenIds = new Set();
-
-            // Keep the market API's complete list first; news enrichment must not
-            // shadow a real market with the same id or alter its sport metadata.
-            for (const item of [...markets, ...supplementalMarkets]) {
-                if (!item || !item.id || seenIds.has(item.id)) continue;
-                seenIds.add(item.id);
-                merged.push(item);
+            const marketsById = new Map();
+            for (const item of markets) {
+                if (item?.id) marketsById.set(item.id, item);
             }
+            for (const item of supplementalMarkets) {
+                if (!item?.id) continue;
+                const isGeneratedNews = /^(news_|tech_|geo_)/i.test(String(item.id));
+                // News sync can refresh an article's category or title while
+                // /api/markets is loading. Prefer that updated article row so it
+                // appears under the correct News or Politics filter.
+                if (!marketsById.has(item.id) || isGeneratedNews) marketsById.set(item.id, item);
+            }
+            const merged = [...marketsById.values()];
 
             state.allMarkets = merged;
             state.filteredMarkets = merged;
@@ -1914,7 +1920,10 @@ window.fetchMarkets = async function() {
 
         // The main market board should never wait on the external news provider.
         apiFetch('/api/news/everything').then(newsResponse => {
-            const newsMarkets = Array.isArray(newsResponse?.articles) ? newsResponse.articles : [];
+            const responseData = newsResponse?.data || newsResponse;
+            const newsMarkets = Array.isArray(responseData?.articles) ? responseData.articles :
+                (Array.isArray(responseData?.markets) ? responseData.markets :
+                (Array.isArray(responseData?.data) ? responseData.data : []));
             if (newsMarkets.length) mergeAndRender(newsMarkets);
         }).catch(error => console.warn("News sync deferred:", error.message));
 

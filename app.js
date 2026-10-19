@@ -82,17 +82,11 @@ window.onload = async () => {
         const response = await fetchMarkets().catch(e => console.warn("Initial sync limited:", e.message));
 
         if (response && Array.isArray(response.markets)) {
-            const markets = response.markets;
-
-            // IMPORTANT: store master copy
-            window.allMarketsSource = markets;
-            state.allMarkets = markets;
-
-            // default view = all markets
-            state.filteredMarkets = markets;
-
-            console.log("ALL MARKETS:", markets.length);
-
+            // fetchMarkets owns the canonical collection and renders async
+            // supplemental feeds (including NewsAPI) as they arrive. Do not
+            // replace state here with the earlier response snapshot: that can
+            // race the news request and silently remove News/Politics markets.
+            console.log("ALL MARKETS:", (state.allMarkets || response.markets).length);
         } else {
             console.error("Invalid markets response");
         }

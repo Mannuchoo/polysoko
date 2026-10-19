@@ -1685,6 +1685,12 @@ function classifyNewsArticle(title, content = '') {
     if (isFootballNews(title, content)) {
         return { category: 'football', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'news_football' };
     }
+
+    // Keep political and geopolitical stories in Politics even when their
+    // descriptions also mention technology, sports, or other broad topics.
+    if (isGeopoliticalNews(title, content)) {
+        return { category: 'politics', sideA: 'LIKELY', sideB: 'UNLIKELY', expiryHours: 48, prefix: 'geo' };
+    }
     
     const sportsKeywords = [
         'nba', 'nfl', 'mlb', 'nhl',
@@ -1698,9 +1704,6 @@ function classifyNewsArticle(title, content = '') {
     }
     if (isTechNews(title, content)) {
         return { category: 'tech', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'tech' };
-    }
-    if (isGeopoliticalNews(title, content)) {
-        return { category: 'politics', sideA: 'LIKELY', sideB: 'UNLIKELY', expiryHours: 48, prefix: 'geo' };
     }
     return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: 18, prefix: 'news' };
 }
@@ -1770,9 +1773,17 @@ async function syncNewsApiMarkets({ force = false, limit = 500 } = {}) {
     );
     const newestCachedAt = cachedNews.length ? new Date(cachedNews[0].timestamp).getTime() : 0;
     const cacheFresh = Number.isFinite(newestCachedAt) && Date.now() - newestCachedAt < 2 * 60 * 60 * 1000;
-    const cachedArticles = cachedNews.map(article =>
-        extractContentField(article.content, 'Headline') ? buildNewsMarket(article) : article
-    );
+    const cachedArticles = cachedNews.map(article => {
+        const headline = extractContentField(article.content, 'Headline') || article.rawHeadline || article.title;
+        if (!headline) return article;
+        const classification = classifyNewsArticle(headline, article.description || article.content);
+        return buildNewsMarket({
+            ...article,
+            category: classification.category,
+            sideA: classification.sideA,
+            sideB: classification.sideB
+        });
+    });
     if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
 
     // Pull a broad, international set of current headlines plus a general
