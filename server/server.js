@@ -4524,10 +4524,14 @@ app.get('/api/sports/categories', async (req, res) => {
              ORDER BY sport ASC`,
             []
         );
-        const counts = new Map((rows || []).map(row => [String(row.sport || "Other"), Number(row.count || 0)]));
-        const sports = [...counts.entries()]
-            .filter(([, count]) => count > 0)
-            .map(([sport, count]) => ({ sport, count }))
+        const counts = new Map((rows || []).map(row => [String(row.sport || "Other").toLowerCase(), Number(row.count || 0)]));
+        const supportedSports = ['Football', ...SPORTS_SOURCES.map(source => source.label), 'F1', 'Golf'];
+        const labels = new Map(supportedSports.map(sport => [sport.toLowerCase(), sport]));
+        for (const sport of counts.keys()) {
+            if (!labels.has(sport)) labels.set(sport, sport.replace(/\b\w/g, char => char.toUpperCase()));
+        }
+        const sports = [...labels.entries()]
+            .map(([key, sport]) => ({ sport, count: counts.get(key) || 0 }))
             .sort((a, b) => a.sport.localeCompare(b.sport));
         res.json({ success: true, sports });
     } catch (e) {

@@ -1,8 +1,9 @@
+const savedCategory = localStorage.getItem("last_category") || "all";
 window.state = window.state || {
     allMarkets: [],
     filteredMarkets: [],
-    category: localStorage.getItem("last_category") === "football" ? "sports" : (localStorage.getItem("last_category") || "all"),
-    sportsType: localStorage.getItem("last_category") === "sports" ? (localStorage.getItem("last_sports_type") || "") : "",
+    category: savedCategory === "football" ? "sports" : savedCategory,
+    sportsType: savedCategory === "football" ? "football" : (savedCategory === "sports" ? (localStorage.getItem("last_sports_type") || "") : ""),
     sportsCategories: [],
     search: "",
     loading: true,
@@ -97,11 +98,13 @@ window.setCategory = function (category) {
         return;
     }
 
-    const active = normalizeCategory(category || "all");
+    const requested = normalizeCategory(category || "all");
+    const active = requested === "football" ? "sports" : requested;
     window.state.category = active;
-    window.state.sportsType = "";
+    window.state.sportsType = requested === "football" ? "football" : "";
     localStorage.removeItem("last_sports_type");
     localStorage.setItem("last_category", active);
+    if (requested === "football") localStorage.setItem("last_sports_type", "football");
     document.querySelectorAll('.category-filter-row .pill').forEach(pill => {
         pill.classList.remove('active');
         const pillCat = normalizeCategory(pill.dataset.cat || pill.innerText);
@@ -403,8 +406,7 @@ function renderSportsPage(container, sportsMarkets) {
         const apiCount = apiSportCounts.get(normalized) || 0;
         return Math.max(sourceCount, apiCount);
     };
-    const orderedSports = [...new Set([...sportsCatalog.filter(s => sportNames.includes(s)), ...sportNames])]
-        .filter(name => countForSport(name) > 0);
+    const orderedSports = [...new Set([...sportsCatalog, ...sportNames])];
     
     const renderSportsCategoryGrid = () => `
         <div class="main-category-label" style="color:#00ff88;font-weight:800;padding:10px 0;">ALL SPORTS</div>
