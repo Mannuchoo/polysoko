@@ -243,7 +243,28 @@ function initSocket() {
     socket.on("marketsUpdated", (payload) => {
         if (!payload?.markets) return;
 
-        const processed = payload.markets || [];
+        const marketsById = new Map();
+        for (const market of payload.markets) {
+            if (market?.id) marketsById.set(market.id, market);
+        }
+
+        // The NewsAPI endpoint can return a newer article before it is present
+        // in a socket snapshot. Keep those active rows when a sports/market
+        // refresh arrives, otherwise the snapshot erases the news feed.
+        for (const market of window.state?.allMarkets || []) {
+            const id = String(market?.id || '');
+            const category = String(market?.category || '').toLowerCase();
+            const isNews = /^(news_|tech_|geo_)/i.test(id) ||
+                ['news', 'tech', 'politics'].includes(category) ||
+                (typeof isNewsLikeMarket === 'function' && isNewsLikeMarket(market));
+            if (!isNews || !id || marketsById.has(id)) continue;
+            if (['closed', 'settled', 'cancelled'].includes(String(market.status || '').toLowerCase())) continue;
+            const expiresAt = Date.parse(market.event_end_time || market.eventEndTime || '');
+            if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) continue;
+            marketsById.set(id, market);
+        }
+
+        const processed = [...marketsById.values()];
 
         window.state.allMarkets = processed;
         window.allMarketsSource = processed;
