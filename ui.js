@@ -81,20 +81,45 @@ function isFootballNewsMarket(m) {
     return cat === "football" && !isFootballFixtureMarket(m);
 }
 
+const REAL_SPORT_LABELS = new Set([
+    'sports', 'football', 'soccer', 'nba', 'nfl', 'basketball', 'baseball', 'hockey',
+    'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl', 'f1', 'golf'
+]);
+
+function isElectronicGameMarket(m) {
+    const text = `${m?.title || ''} ${m?.sport || ''} ${m?.league || ''} ${m?.id || ''}`.toLowerCase();
+    return /\b(e-?football|ea sports fc|pes|pro evolution soccer|nba 2k\d*|madden nfl|nhl 2\d|mlb the show|valorant|league of legends|dota 2|counter[- ]?strike|cs2|rocket league|fifa\s*(?:online|esports|pro clubs|2\d|20[2-9]\d))\b/i.test(text);
+}
+
+function isRealSportMarket(m) {
+    const cat = normalizeCategory(m?.category);
+    const sport = normalizeCategory(m?.sport);
+    const league = normalizeCategory(m?.league);
+    return /^sp_/i.test(m?.id || '') || /^fb_/i.test(m?.id || '') ||
+        REAL_SPORT_LABELS.has(cat) || REAL_SPORT_LABELS.has(sport) ||
+        /\b(baseball|hockey|mlb|nhl|nba|nfl|basketball|cricket|rugby|tennis|volleyball|handball|formula 1|ufc|afl|pga)\b/i.test(league);
+}
+
 function isGamingMarket(m) {
     const cat = normalizeCategory(m?.category);
     const sport = normalizeCategory(m?.sport || "");
     const league = normalizeCategory(m?.league || "");
-    const gamingLabels = ['esports','gaming','csgo','dota 2','dota2','valorant','league of legends','leagueoflegends'];
-    return cat === 'gaming' || cat === 'esports' || m?.id?.startsWith('sp_') ||
+    const gamingLabels = ['esports','gaming','csgo','cs:go','cs2','counter strike','counter-strike','dota 2','dota2','valorant','league of legends','leagueoflegends','lol','rocket league'];
+    if (isElectronicGameMarket(m)) return true;
+    if (isRealSportMarket(m)) return false;
+    return cat === 'gaming' || cat === 'esports' ||
         gamingLabels.includes(sport) ||
         league.includes('esport') || league.includes('gaming');
 }
 
 function isSportsMarket(m) {
+    if (isElectronicGameMarket(m)) return false;
     const cat = normalizeCategory(m?.category);
+    const sport = normalizeCategory(m?.sport);
     const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
-    return (sportKeys.includes(cat) && !isFootballNewsMarket(m)) || /^sp_/i.test(m?.id || "") || /^fb_/i.test(m?.id || "") || isFootballFixtureMarket(m);
+    const isFootballNews = isFootballNewsMarket(m);
+    return ((sportKeys.includes(cat) || REAL_SPORT_LABELS.has(sport)) && !isFootballNews) ||
+        /^sp_/i.test(m?.id || "") || /^fb_/i.test(m?.id || "") || isFootballFixtureMarket(m);
 }
 
 window.setCategory = function (category) {
@@ -214,6 +239,8 @@ function renderTrending() {
     // Requirement: Constant across categories, Tech & European Football only, No News
     const source = (state.allMarkets || []).filter(m => {
         const cat = normalizeCategory(m.category);
+        if (isGamingMarket(m)) return false;
+        if (isSportsMarket(m) && !isFootballFixtureMarket(m)) return false;
         if (cat === 'tech') return true;
         
         // European Football logic: Check league/country meta for European identifiers
@@ -273,7 +300,8 @@ function openTrendingMarket(id) {
     if (!market) return;
 
     if (market.category) {
-        setCategory(isFootballFixtureMarket(market) ? "sports" : market.category);
+        const category = isSportsMarket(market) ? 'sports' : isGamingMarket(market) ? 'gaming' : market.category;
+        setCategory(category);
     }
 
     openMarket(id);
@@ -520,7 +548,7 @@ function createMarketCard(m) {
         badgeText = (m.league || m.source || "GLOBAL").toUpperCase();
     }
     let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : (isCrypto ? "#f0b90b" : "#888"));
-    const boostBadge = m.is_boosted ? `<span style="background: rgba(255, 214, 0, 0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); padding:4px 10px; border-radius:999px; font-size:0.68rem; font-weight:700;">BOOSTED +10%</span>` : '';
+    const boostBadge = Number(m.is_boosted) === 1 ? `<span style="background: rgba(255, 214, 0, 0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); padding:4px 10px; border-radius:999px; font-size:0.68rem; font-weight:700;">BOOSTED +10%</span>` : '';
 
     // For news items we show a compact card; full content only in modal
     const textSnippet = escapeHtml((m.description || m.content || '').slice(0, 120));
@@ -1452,7 +1480,7 @@ function renderNewsModal(m, media = "") {
 
 function renderDefaultModal(m, info, media) {
     const safeTitle = escapeHtml(m.title || "");
-    const boostLabel = m.is_boosted ? `<div style="margin-top:10px; display:inline-block; padding:8px 12px; border-radius:999px; background: rgba(255,214,0,0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); font-size:0.75rem; font-weight:700;">Elite Boosted Market +10%</div>` : '';
+    const boostLabel = Number(m.is_boosted) === 1 ? `<div style="margin-top:10px; display:inline-block; padding:8px 12px; border-radius:999px; background: rgba(255,214,0,0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); font-size:0.75rem; font-weight:700;">Elite Boosted Market +10%</div>` : '';
     
     return `
         ${media}

@@ -874,7 +874,10 @@ function normalizeMarketRow(market) {
         sideA: market.sideA ?? market.sidea,
         sideB: market.sideB ?? market.sideb,
         oddsA: market.oddsA ?? market.oddsa,
-        oddsB: market.oddsB ?? market.oddsb
+        oddsB: market.oddsB ?? market.oddsb,
+        // PostgreSQL returns BIGINT values as strings (including "0"), which
+        // JavaScript treats as truthy. Normalize this flag for UI consumers.
+        is_boosted: Number(market.is_boosted) === 1 ? 1 : 0
     };
 }
 
@@ -1757,7 +1760,15 @@ async function saveNewsMarket(market) {
     );
 }
 
-async function syncNewsApiMarkets({ force = false, limit = 500 } = {}) {
+let newsSyncInFlight = null;
+function syncNewsApiMarkets(options = {}) {
+    if (newsSyncInFlight) return newsSyncInFlight;
+    newsSyncInFlight = syncNewsApiMarketsImpl(options)
+        .finally(() => { newsSyncInFlight = null; });
+    return newsSyncInFlight;
+}
+
+async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     const apiKey = process.env.NEWS_API_KEY;
     if (!apiKey) throw new Error('NEWS_API_KEY is not configured');
 
@@ -4192,7 +4203,7 @@ const syncAllMarkets = async () => {
 // --- MARKET CATEGORY NORMALIZATION -------------------------------------------
 // Canonical aliases: one user-facing tab may match several stored values / ids.
 // football -> football fixtures (fb_*), league slugs, soccer_* leagues, sport='Football'
-// gaming   -> esports titles (sp_* ids, sport labels, league slugs)
+// gaming   -> electronic-game/esports labels and league slugs
 // Kept in one place so GET /api/markets, preview, and sports/categories agree.
 const FOOTBALL_LEAGUE_ALIASES = ['football', 'soccer', 'soccer_epl', 'soccer_spain_la_liga', 'soccer_uefa_champs_league'];
 const GAMING_LEAGUE_ALIASES = ['gaming', 'esports', 'csgo', 'dota2', 'valorant', 'leagueoflegends', 'league-of-legends', 'lol'];
@@ -4215,14 +4226,24 @@ function categoryAliasClause(alias) {
     }
     if (a === 'gaming' || a === 'esports' || a === 'esport') {
         const ors = GAMING_LEAGUE_ALIASES.map(() => `LOWER(category) = LOWER(?)`).join(' OR ');
+        const gamingMetadata = `(${ors} OR LOWER(COALESCE(sport,'')) IN ('esports','gaming','csgo','dota 2','dota2','valorant','league of legends','leagueoflegends') OR LOWER(COALESCE(league,'')) LIKE '%esport%' OR LOWER(COALESCE(league,'')) LIKE '%gaming%')`;
+        const realSports = `(id LIKE 'sp\\_%' ESCAPE '\\' OR id LIKE 'fb\\_%' ESCAPE '\\' OR LOWER(COALESCE(category,'')) IN ('sports','football','soccer','nba','nfl','basketball','baseball','hockey','volleyball','rugby','handball','cricket','tennis','mma','afl','f1','golf') OR LOWER(COALESCE(sport,'')) IN ('sports','football','soccer','nba','nfl','basketball','baseball','hockey','volleyball','rugby','handball','cricket','tennis','mma','afl','f1','golf') OR LOWER(COALESCE(league,'')) ~ '(^|[^a-z])(baseball|hockey|mlb|nhl|nba|nfl|basketball|cricket|rugby|tennis|volleyball|handball|formula 1|ufc|afl|pga)([^a-z]|$)')`;
+        const electronicGamePattern = `(^|[^a-z0-9])(e-?football|ea sports fc|pes|pro evolution soccer|nba 2k[0-9]*|madden nfl|nhl 2[0-9]|mlb the show|valorant|league of legends|dota 2|counter[- ]?strike|cs2|rocket league|fifa[[:space:]]*(online|esports|pro clubs|20[2-9][0-9]))([^a-z0-9]|$)`;
+        const electronicGame = `(LOWER(COALESCE(title,'')) ~ '${electronicGamePattern}' OR LOWER(COALESCE(league,'')) ~ '${electronicGamePattern}')`;
         return {
-            clause: `AND (${ors} OR LOWER(COALESCE(sport,'')) IN ('esports','gaming','csgo','dota 2','dota2','valorant','league of legends','leagueoflegends') OR LOWER(COALESCE(league,'')) LIKE '%esport%' OR LOWER(COALESCE(league,'')) LIKE '%gaming%' OR id LIKE 'sp\\_%' ESCAPE '\\')`,
+            clause: `AND ((${gamingMetadata} AND NOT ${realSports}) OR ${electronicGame})`,
             params: [...GAMING_LEAGUE_ALIASES]
+        };
+    }
+    if (a === 'sports') {
+        return {
+            clause: `AND (LOWER(COALESCE(category,'')) = 'sports' OR LOWER(COALESCE(sport,'')) IN ('football','soccer','nba','nfl','basketball','baseball','hockey','volleyball','rugby','handball','cricket','tennis','mma','afl','f1','golf') OR id LIKE 'sp\\_%' ESCAPE '\\' OR id LIKE 'fb\\_%' ESCAPE '\\')`,
+            params: []
         };
     }
     if (a && a !== 'all') {
         return {
-            clause: `AND (LOWER(category) = LOWER(?) OR id LIKE 'sp\\_%' ESCAPE '\\' OR id LIKE 'fb\\_%' ESCAPE '\\')`,
+            clause: `AND LOWER(COALESCE(category,'')) = LOWER(?)`,
             params: [a]
         };
     }
@@ -4409,7 +4430,7 @@ app.get('/api/admin/pending-settlements', authenticateAdmin, async (req, res) =>
             if (catParam === 'football' || catParam === 'soccer') {
                 where += ` AND (id LIKE 'fb_%' OR LOWER(sport) = 'football' OR LOWER(category) = 'football' OR LOWER(category) = 'soccer')`;
             } else if (catParam === 'gaming' || catParam === 'esports') {
-                where += ` AND (id LIKE 'sp_%' OR LOWER(sport) = 'gaming' OR LOWER(sport) = 'esports' OR LOWER(category) = 'gaming' OR LOWER(category) = 'esports')`;
+                where += ` AND (LOWER(sport) IN ('gaming','esports') OR LOWER(category) IN ('gaming','esports')) AND id NOT LIKE 'sp_%' AND id NOT LIKE 'fb_%'`;
             }
         }
 
@@ -5974,7 +5995,46 @@ app.post('/api/admin/delete-market', authenticateAdmin, async (req, res) => {
     });
 });
 
-// SuperAdmin PIN Login (6-digit PIN only, no phone required)
+// Admin panel sign-in uses the same phone/password credentials as the account
+// stored in users, then verifies that account is the resolved SuperAdmin.
+app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
+    try {
+        const phone = normalizePhone(req.body?.phone);
+        const password = String(req.body?.password || '');
+        if (!phone || !password) {
+            return res.status(400).json({ success: false, message: 'Phone number and password are required.' });
+        }
+
+        const adminPhone = await resolveAdminPhone();
+        if (!adminPhone) {
+            return res.status(503).json({
+                success: false,
+                code: 'ADMIN_NOT_CONFIGURED',
+                message: 'No SuperAdmin account is configured in the database.'
+            });
+        }
+        if (phone !== adminPhone) {
+            return res.status(401).json({ success: false, message: 'These credentials do not match the SuperAdmin account.' });
+        }
+
+        const user = await dbGet(`SELECT phone, password FROM users WHERE phone = ?`, [adminPhone]);
+        if (!user?.password || !(await bcrypt.compare(password, user.password))) {
+            console.warn(`[ADMIN] Failed database credential login from IP: ${req.ip}`);
+            return res.status(401).json({ success: false, message: 'Incorrect phone number or password.' });
+        }
+
+        const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
+        await dbRun(`UPDATE users SET role = 'admin' WHERE phone = ?`, [adminPhone]).catch(() => {});
+        if (typeof global.addActivityLog === 'function') {
+            global.addActivityLog(adminPhone, 'admin_login', 'Admin logged in with account credentials', req.ip || '', req.headers['user-agent'] || '');
+        }
+        return res.json({ success: true, token, message: 'SuperAdmin access granted.' });
+    } catch (error) {
+        console.error('[ADMIN] Database credential login failed:', error.message || error);
+        return res.status(503).json({ success: false, message: 'Could not verify admin credentials against the database. Please try again.' });
+    }
+});
+
 app.post('/api/admin/pin-login', adminPinLimiter, async (req, res) => {
     const { pin } = req.body;
     // Falls back to the stored/DB admin identity when ADMIN_PHONE is absent on
@@ -6682,7 +6742,7 @@ async function runSettlementEngine() {
  * settles/refunds them using the existing settleMarket/cancelMarket engine.
  * At most SETTLEMENT_SUSPENDED_LIMIT api-sports calls per run (default 1 ->
  * <= ~48 external API requests/day at a 30-minute cadence).
- * Gaming/esports markets (id sp_*) have no results source wired here; they wait
+ * Non-football sports currently have no results source wired here; they wait
  * for the admin Pending Settlements panel (manual settle/void).
  * 
  */
@@ -6705,7 +6765,7 @@ async function runSuspendedMarketSettlement() {
     for (const row of candidates || []) {
         const marketId = String(row.id || '');
         if (!marketId.startsWith('fb_')) {
-            // No results source for gaming/esports (sp_*) markets in this worker.
+            // The automatic result lookup below only handles football fixtures.
             summary.skipped++;
             continue;
         }
@@ -7641,6 +7701,11 @@ const startServer = async () => {
             runSafely('syncFootballMarkets', syncFootballMarkets);
             runSafely('syncSportsMarkets', syncSportsMarkets);
             runSafely('syncFootballNews', syncFootballNews);
+            runSafely('syncNewsApiMarkets', async () => {
+                const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
+                emitMarkets();
+                console.log(`[news] Published ${articles.length} NewsAPI markets.`);
+            });
             runSafely('refreshBoostedMarkets', refreshBoostedMarkets);
             runSafely('runSettlementEngine', runSettlementEngine);
             runSafely('runSuspendedMarketSettlement', runSuspendedMarketSettlement);
@@ -7650,6 +7715,11 @@ const startServer = async () => {
             setInterval(syncFootballMarkets, 3 * 60 * 60 * 1000);
             setInterval(syncSportsMarkets, 6 * 60 * 60 * 1000);
             setInterval(syncFootballNews, 7200000); // every 2 hours
+            setInterval(() => runSafely('syncNewsApiMarkets', async () => {
+                const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
+                emitMarkets();
+                console.log(`[news] Refreshed ${articles.length} NewsAPI markets.`);
+            }), 7200000); // Refresh News and Politics every 2 hours.
             setInterval(refreshBoostedMarkets, 86400000);
             setInterval(syncWeatherMarkets, 86400000);
             setInterval(cleanupOutdatedMarkets, 3600000);

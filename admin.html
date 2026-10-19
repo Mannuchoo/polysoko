@@ -14,74 +14,8 @@
     <script>
         const ADMIN_DEFAULT_API_BASE = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname) ? window.location.origin : "https://api.polysoko.online";
         const ADMIN_LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
-        const ADMIN_FRONTEND_ONLY_HOSTS = ["polysoko.online", "www.polysoko.online", "mannuchoo.github.io"];
         const adminIsProduction = !ADMIN_LOCAL_HOSTS.includes(window.location.hostname);
-        function normalizeAdminBackend(rawUrl) {
-            if (!rawUrl) return "";
-            const trimmed = rawUrl.trim();
-            if (!trimmed) return "";
-            const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-            return withProtocol.replace(/\/+$/, "");
-        }
-        function isAdminFrontendOnlyApiBase(url) {
-            try {
-                const parsed = new URL(url);
-                return ADMIN_FRONTEND_ONLY_HOSTS.includes(parsed.hostname) || parsed.hostname.endsWith(".github.io");
-            } catch {
-                return false;
-            }
-        }
-        function safeAdminBackendUrl(rawUrl, persistBadOverride = false) {
-            const backend = normalizeAdminBackend(rawUrl);
-            if (!backend) return "";
-            if (adminIsProduction && isAdminFrontendOnlyApiBase(backend)) {
-                if (!persistBadOverride) localStorage.removeItem("backend_url_override");
-                console.warn("Ignoring frontend URL as admin API backend:", backend);
-                return "";
-            }
-            return backend;
-        }
-        function getAdminBackendFromQuery() {
-            const params = new URLSearchParams(window.location.search);
-            const backend = safeAdminBackendUrl(params.get("backend") || params.get("api"), true);
-            if (!backend) return "";
-            localStorage.setItem("backend_url_override", backend);
-            params.delete("backend");
-            params.delete("api");
-            const nextQuery = params.toString();
-            window.history.replaceState({}, "", `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`);
-            return backend;
-        }
-        function showAdminBackendSetupPrompt() {
-            if (!adminIsProduction || ADMIN_API_BASE || document.getElementById("adminBackendSetupPrompt")) return;
-            const banner = document.createElement("div");
-            banner.id = "adminBackendSetupPrompt";
-            banner.style = "position:fixed;top:16px;left:50%;transform:translateX(-50%);width:min(100%,540px);z-index:99999;background:#101820;border:1px solid #00ff88;border-radius:14px;padding:16px;color:white;box-shadow:0 18px 45px rgba(0,0,0,.45);font-family:Inter,Arial,sans-serif;";
-            banner.innerHTML = `
-                <strong style="color:#00ff88;">PolySoko backend required</strong>
-                <p style="margin:8px 0 12px;color:#cbd5e1;font-size:.92rem;">Paste your current backend URL to connect this domain to the server.</p>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <input id="adminBackendUrlInput" placeholder="https://api.polysoko.online" value="${localStorage.getItem("backend_url_override") || ""}" style="flex:1;min-width:220px;padding:11px;border-radius:10px;border:1px solid #334155;background:#020617;color:white;">
-                    <button id="adminBackendSaveBtn" style="padding:11px 16px;border:0;border-radius:10px;background:#00ff88;color:#020617;font-weight:800;cursor:pointer;">Save</button>
-                </div>
-                <div id="adminBackendSetupMessage" style="margin-top:10px;color:#cbd5e1;font-size:.85rem;"></div>
-            `;
-            document.body.appendChild(banner);
-            document.getElementById("adminBackendSaveBtn").onclick = () => {
-                const resolved = safeAdminBackendUrl(document.getElementById("adminBackendUrlInput").value, true);
-                const msg = document.getElementById("adminBackendSetupMessage");
-                if (!resolved) {
-                    msg.textContent = "Enter the API backend URL, for example https://api.polysoko.online.";
-                    return;
-                }
-                localStorage.setItem("backend_url_override", resolved);
-                msg.textContent = "Saved. Reloading...";
-                setTimeout(() => location.reload(), 600);
-            };
-        }
-        const ADMIN_API_BASE = adminIsProduction
-            ? (getAdminBackendFromQuery() || safeAdminBackendUrl(localStorage.getItem("backend_url_override")) || ADMIN_DEFAULT_API_BASE)
-            : window.location.origin;
+        const ADMIN_API_BASE = adminIsProduction ? ADMIN_DEFAULT_API_BASE : window.location.origin;
         function adminApiUrl(path) {
             if (/^https?:\/\//i.test(path)) return path;
             const normalized = path.startsWith("/") ? path : `/${path}`;
@@ -93,7 +27,6 @@
             return adminApiUrl(value);
         }
         document.write(`<script src="${adminIsProduction ? 'https://cdn.socket.io/4.7.2/socket.io.min.js' : '/socket.io/socket.io.js'}"><\/script>`);
-        window.addEventListener("DOMContentLoaded", showAdminBackendSetupPrompt);
     </script>
     <title>PolySoko | Admin Panel</title>
     <link rel="shortcut icon" href="favicon.ico">
@@ -1389,21 +1322,16 @@ function esc(str) {
 <div id="adminLoginGate" style="display:flex; position:fixed; inset:0; background:rgba(0,0,0,0.96); z-index:12000; justify-content:center; align-items:center; padding:20px;">
     <div style="width:100%; max-width:420px; background:#101014; border:1px solid #333; border-radius:16px; padding:24px; box-shadow:0 24px 70px rgba(0,0,0,.55);">
         <h2 style="margin:0 0 8px; color:#00ff88;">SuperAdmin Login</h2>
-        <p id="adminLoginGateMessage" style="margin:0 0 16px; color:#aaa; font-size:.9rem;">Enter your 6-digit admin PIN to load users, markets, and transactions.</p>
-        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Admin PIN</label>
-        <input id="adminInlinePinInput" type="password" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="off" autofocus required placeholder="6-digit PIN" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1.1rem; letter-spacing:.18em; text-align:center; outline:none;">
-        <button id="adminMasterLoginToggle" type="button" onclick="toggleAdminMasterLogin()" style="display:block; margin:10px auto 0; background:none; border:0; color:#00d1ff; cursor:pointer; font-size:.8rem;">Use server password instead</button>
-        <div id="adminMasterLoginFields" style="display:none; margin-top:12px;">
-            <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Server password</label>
-            <input id="adminInlineMasterInput" type="password" autocomplete="current-password" placeholder="Server admin password" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
-        </div>
+        <p id="adminLoginGateMessage" style="margin:0 0 16px; color:#aaa; font-size:.9rem;">Sign in with your SuperAdmin account credentials.</p>
+        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Phone number</label>
+        <input id="adminInlinePhoneInput" type="tel" autocomplete="username" autofocus required placeholder="Your account phone number" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
+        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin:12px 0 6px;">Password</label>
+        <input id="adminInlinePasswordInput" type="password" autocomplete="current-password" required placeholder="Your account password" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
         <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:10px 0; color:#ff7777; font-size:.82rem;"></div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            <button id="adminInlinePinBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Login With PIN</button>
-            <button id="adminInlineMasterBtn" onclick="submitInlineAdminMasterLogin()" style="display:none; flex:1; min-width:150px; padding:13px; border:1px solid #00d1ff; border-radius:10px; background:#101820; color:#00d1ff; font-weight:900; cursor:pointer;">Login With Server Password</button>
+            <button id="adminInlineLoginBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Log in</button>
         </div>
         <div style="margin-top:14px; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
-            <button onclick="setAdminBackendOverrideFromGate()" style="background:none; border:0; color:#00d1ff; cursor:pointer; padding:0; font-size:.8rem;">Change backend</button>
             <button onclick="location.href='index.html'" style="background:none; border:0; color:#aaa; cursor:pointer; padding:0; font-size:.8rem;">Back to site</button>
         </div>
     </div>
@@ -1484,12 +1412,12 @@ socket.on('stay_booking', (data) => {
 const API = {
     async request(path, method = 'GET', body = null) {
         if (adminIsProduction && !ADMIN_API_BASE) {
-            throw new Error("Backend URL is not configured. Open this page with ?backend=https://api.polysoko.online or set localStorage.backend_url_override.");
+            throw new Error("Admin API is unavailable. Please try again when the server is online.");
         }
 
         try {
             const token = localStorage.getItem("token");
-            const isLoginRoute = path === '/admin/pin-login' || path === '/admin/master-login';
+            const isLoginRoute = path === '/admin/login';
             if (!token && !isLoginRoute) {
                 showAdminLoginGate("Admin session required. Log in to load this data.");
                 throw new Error("Admin session required.");
@@ -1551,28 +1479,13 @@ function showAdminLoginGate(message = "Enter your admin PIN to continue.") {
     if (msg) msg.textContent = message;
     if (gate) {
         gate.style.display = 'flex';
-        setTimeout(() => document.getElementById('adminInlinePinInput')?.focus(), 50);
+        setTimeout(() => document.getElementById('adminInlinePhoneInput')?.focus(), 50);
     }
 }
 
 function hideAdminLoginGate() {
     const gate = document.getElementById('adminLoginGate');
     if (gate) gate.style.display = 'none';
-}
-
-function toggleAdminMasterLogin() {
-    const fields = document.getElementById('adminMasterLoginFields');
-    const toggle = document.getElementById('adminMasterLoginToggle');
-    const masterMode = fields?.style.display !== 'none';
-    if (fields) fields.style.display = masterMode ? 'none' : 'block';
-    const pinInput = document.getElementById('adminInlinePinInput');
-    const pinButton = document.getElementById('adminInlinePinBtn');
-    const masterButton = document.getElementById('adminInlineMasterBtn');
-    if (pinInput) pinInput.style.display = masterMode ? 'block' : 'none';
-    if (pinButton) pinButton.style.display = masterMode ? 'block' : 'none';
-    if (masterButton) masterButton.style.display = masterMode ? 'none' : 'block';
-    if (toggle) toggle.textContent = masterMode ? 'Use admin PIN instead' : 'Use server password instead';
-    (masterMode ? pinInput : document.getElementById('adminInlineMasterInput'))?.focus();
 }
 
 const ADMIN_IDLE_LOCK_MS = 5 * 60 * 1000;
@@ -1584,8 +1497,8 @@ function resetAdminIdleLock() {
     if (!localStorage.getItem('token') || gate?.style.display !== 'none') return;
     adminIdleLockTimer = setTimeout(() => {
         localStorage.removeItem('token');
-        const pinInput = document.getElementById('adminInlinePinInput');
-        if (pinInput) pinInput.value = '';
+        const passwordInput = document.getElementById('adminInlinePasswordInput');
+        if (passwordInput) passwordInput.value = '';
         showAdminLoginGate('Locked after 5 minutes of inactivity. Enter your admin PIN to continue.');
     }, ADMIN_IDLE_LOCK_MS);
 }
@@ -1595,29 +1508,28 @@ function resetAdminIdleLock() {
 });
 
 async function submitInlineAdminLogin() {
-    const pinInput = document.getElementById('adminInlinePinInput');
+    const phoneInput = document.getElementById('adminInlinePhoneInput');
+    const passwordInput = document.getElementById('adminInlinePasswordInput');
     const status = document.getElementById('adminInlineLoginStatus');
-    const pinBtn = document.getElementById('adminInlinePinBtn');
-    const payload = { pin: pinInput?.value || '' };
-    const endpoint = '/admin/pin-login';
+    const loginBtn = document.getElementById('adminInlineLoginBtn');
+    const payload = { phone: phoneInput?.value || '', password: passwordInput?.value || '' };
 
     if (status) {
         status.style.color = '#aaa';
         status.textContent = 'Checking credentials...';
     }
-    if (pinBtn) pinBtn.disabled = true;
+    if (loginBtn) loginBtn.disabled = true;
 
     try {
-        const data = await API.post(endpoint, payload);
+        const data = await API.post('/admin/login', payload);
         if (!data.success || !data.token) {
-            // A misconfigured server is a deployment problem, not a bad PIN. Say so
-            // explicitly, otherwise the panel just shows a bare "Login failed".
             if (data.code === 'ADMIN_NOT_CONFIGURED') {
-                throw new Error('This server has no admin identity configured. Add ADMIN_PHONE to the API environment variables, then reload.');
+                throw new Error('No SuperAdmin account is configured in the database.');
             }
             throw new Error(data.message || 'Admin login failed.');
         }
         localStorage.setItem('token', data.token);
+        if (passwordInput) passwordInput.value = '';
         if (status) status.textContent = '';
         await initAdminAfterLogin();
     } catch (e) {
@@ -1627,47 +1539,8 @@ async function submitInlineAdminLogin() {
         }
         showAdminLoginGate(e.message || 'Admin login failed.');
     } finally {
-        if (pinBtn) pinBtn.disabled = false;
+        if (loginBtn) loginBtn.disabled = false;
     }
-}
-
-async function submitInlineAdminMasterLogin() {
-    const passwordInput = document.getElementById('adminInlineMasterInput');
-    const status = document.getElementById('adminInlineLoginStatus');
-    const button = document.getElementById('adminInlineMasterBtn');
-    if (status) {
-        status.style.color = '#aaa';
-        status.textContent = 'Checking server password...';
-    }
-    if (button) button.disabled = true;
-    try {
-        const data = await API.post('/admin/master-login', { password: passwordInput?.value || '' });
-        if (!data.success || !data.token) throw new Error(data.message || 'Server password login failed.');
-        localStorage.setItem('token', data.token);
-        if (status) status.textContent = '';
-        if (passwordInput) passwordInput.value = '';
-        await initAdminAfterLogin();
-    } catch (e) {
-        if (status) {
-            status.style.color = '#ff7777';
-            status.textContent = e.message || 'Server password login failed.';
-        }
-        showAdminLoginGate(e.message || 'Server password login failed.');
-    } finally {
-        if (button) button.disabled = false;
-    }
-}
-
-function setAdminBackendOverrideFromGate() {
-    const raw = prompt('Enter the API backend URL', ADMIN_API_BASE || ADMIN_DEFAULT_API_BASE);
-    if (raw === null) return;
-    const resolved = safeAdminBackendUrl(raw, true);
-    if (!resolved) {
-        alert('Use the API backend URL, for example https://api.polysoko.online.');
-        return;
-    }
-    localStorage.setItem('backend_url_override', resolved);
-    location.reload();
 }
 
 document.addEventListener('keydown', (e) => {
@@ -1675,8 +1548,7 @@ document.addEventListener('keydown', (e) => {
     const gate = document.getElementById('adminLoginGate');
     if (!gate || gate.style.display !== 'flex') return;
     const active = document.activeElement;
-    if (active?.id === 'adminInlinePinInput') submitInlineAdminLogin();
-    if (active?.id === 'adminInlineMasterInput') submitInlineAdminMasterLogin();
+    if (active?.id === 'adminInlinePhoneInput' || active?.id === 'adminInlinePasswordInput') submitInlineAdminLogin();
 });
 
 window.filterAdminList = function(containerId, query) {
