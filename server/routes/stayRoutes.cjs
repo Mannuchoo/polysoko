@@ -182,7 +182,14 @@ function createStayApiRouter(deps) {
           ref = null;
         }
         if (!ref) throw Object.assign(new Error('Retry booking'), { status: 500 });
-        return { reference: ref, total_price: total, nights: n, property: prop };
+        const booking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? LIMIT 1`, [ref]);
+        return { reference: ref, total_price: total, nights: n, property: prop, booking };
+      });
+      say('booking_created', {
+        reference: out.reference, property_id: out.property.id, property_title: out.property.title,
+        guest_name: out.booking.guest_name, guest_email: out.booking.guest_email, guest_phone: out.booking.guest_phone,
+        check_in: out.booking.check_in, check_out: out.booking.check_out, nights: out.nights,
+        total_price: out.total_price, payment_status: 'pending'
       });
       res.json({ success: true, reference: out.reference, total_price: out.total_price, payment_status: 'pending' });
     } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message || 'Booking failed' }); }
@@ -299,7 +306,7 @@ function createStayApiRouter(deps) {
       if (!['paid', 'cancelled', 'pending'].includes(st)) return res.status(400).json({ success: false, message: 'Invalid status' });
       const upd = await applyStatus(req.params.id, st);
       const prop = await dbGet(`SELECT * FROM properties WHERE id = ? LIMIT 1`, [upd.property_id]);
-      say(st === 'paid' ? 'booking_paid' : 'booking_status', { reference: upd.booking_reference, property_id: upd.property_id, property_title: prop && prop.title, guest_name: upd.guest_name, guest_email: upd.guest_email, guest_phone: upd.guest_phone, check_in: upd.check_in, check_out: upd.check_out, total_price: upd.total_price, payment_status: upd.payment_status, check_in_pin: upd.check_in_pin, google_maps_link: prop && prop.google_maps_link, exact_address: prop && prop.exact_address });
+      say(st === 'paid' ? 'booking_paid' : 'booking_status', { reference: upd.booking_reference, property_id: upd.property_id, property_title: prop && prop.title, guest_name: upd.guest_name, guest_email: upd.guest_email, guest_phone: upd.guest_phone, check_in: upd.check_in, check_out: upd.check_out, nights: nights(upd.check_in, upd.check_out), total_price: upd.total_price, payment_status: upd.payment_status, check_in_pin: upd.check_in_pin, google_maps_link: prop && prop.google_maps_link, exact_address: prop && prop.exact_address });
       res.json({ success: true, booking: upd });
     } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message || 'Update failed' }); }
   });

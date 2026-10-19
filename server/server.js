@@ -5744,7 +5744,9 @@ app.post('/api/stkcallback', async (req, res) => {
                 notifyStayBooking('booking_paid', {
                     reference, property_id: bookingPaid.property_id, property_title: property?.title,
                     guest_name: bookingPaid.guest_name, guest_email: bookingPaid.guest_email, guest_phone: bookingPaid.guest_phone,
-                    check_in: bookingPaid.check_in, check_out: bookingPaid.check_out, total_price: bookingPaid.total_price,
+                    check_in: bookingPaid.check_in, check_out: bookingPaid.check_out,
+                    nights: Math.max(0, Math.round((new Date(`${bookingPaid.check_out}T00:00:00Z`) - new Date(`${bookingPaid.check_in}T00:00:00Z`)) / 86400000)),
+                    total_price: bookingPaid.total_price,
                     check_in_pin: bookingPaid.check_in_pin, payment_status: 'paid',
                     google_maps_link: property?.google_maps_link, exact_address: property?.exact_address
                 }).catch(e => console.warn('[stay] paid notification failed:', e.message));

@@ -153,7 +153,20 @@ async function openStayBooking(id) {
     document.getElementById('bkTotal').textContent = n > 0 ? (n + ' night(s) = ' + fmtKSh(n * Number(s.price_per_night))) : 'Select valid dates to see total';
     var box = document.getElementById('bkAvail');
     var btn = document.getElementById('bkConfirmBtn');
-    if (!(n > 0)) { box.innerHTML = ''; if (btn) btn.disabled = false; return; }
+    if (!(n > 0)) {
+      box.innerHTML = '';
+      if (btn) { btn.disabled = true; btn.textContent = 'Select valid dates'; }
+      ['bkName', 'bkEmail', 'bkPhone'].forEach(function (fieldId) {
+        var field = document.getElementById(fieldId);
+        if (field) field.disabled = true;
+      });
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking availability...'; }
+    ['bkName', 'bkEmail', 'bkPhone'].forEach(function (fieldId) {
+      var field = document.getElementById(fieldId);
+      if (field) field.disabled = true;
+    });
     box.innerHTML = '<span style="color:#8b98a5;font-size:.8rem;">Checking availability…</span>';
     if (timer) clearTimeout(timer);
     timer = setTimeout(function () { checkStayAvailability(Number(s.id), ci, co); }, 450);
@@ -165,16 +178,23 @@ async function openStayBooking(id) {
 async function checkStayAvailability(id, ci, co) {
   var box = document.getElementById('bkAvail');
   var btn = document.getElementById('bkConfirmBtn');
+  var formFields = ['bkName', 'bkEmail', 'bkPhone'].map(function (fieldId) { return document.getElementById(fieldId); }).filter(Boolean);
   try {
     var r = await window.apiFetch('stays/' + id + '/availability?check_in=' + encodeURIComponent(ci) + '&check_out=' + encodeURIComponent(co));
     if (r.available === false || r.status === 'BOOKED') {
       box.innerHTML = '<span class="sr-booked">Already Booked for Selected Dates</span><div style="color:#ff8080;font-size:.8rem;margin-top:6px;">' + escH(r.message || 'This unit is already booked for the selected dates.') + '</div>';
-      if (btn) btn.disabled = true;
+      if (btn) { btn.disabled = true; btn.textContent = 'Booked for these dates'; }
+      formFields.forEach(function (field) { field.disabled = true; });
     } else {
       box.innerHTML = '<span class="sr-avail">Available for Selected Dates</span>';
-      if (btn) btn.disabled = false;
+      if (btn) { btn.disabled = false; btn.textContent = 'Confirm Booking'; }
+      formFields.forEach(function (field) { field.disabled = false; });
     }
-  } catch (e) { box.innerHTML = ''; if (btn) btn.disabled = false; }
+  } catch (e) {
+    box.innerHTML = '<span style="color:#ffb86b;font-size:.8rem;">Could not confirm availability. Please try again.</span>';
+    if (btn) { btn.disabled = true; btn.textContent = 'Check availability'; }
+    formFields.forEach(function (field) { field.disabled = true; });
+  }
 }
 async function lookupPaidBooking() {
   var out = document.getElementById('bkLookupOut');
@@ -195,6 +215,12 @@ async function lookupPaidBooking() {
 }
 async function submitStayBooking(id) {
   var msg = document.getElementById('bkMsg');
+  var confirmButton = document.getElementById('bkConfirmBtn');
+  if (confirmButton) { confirmButton.disabled = true; confirmButton.textContent = 'Booking...'; }
+  ['bkIn', 'bkOut', 'bkName', 'bkEmail', 'bkPhone'].forEach(function (fieldId) {
+    var field = document.getElementById(fieldId);
+    if (field) field.disabled = true;
+  });
   msg.style.color = '#8b98a5'; msg.textContent = 'Confirming...';
   try {
     var r = await window.apiFetch('stays/book', { method: 'POST', body: {
@@ -206,10 +232,11 @@ async function submitStayBooking(id) {
       check_out: document.getElementById('bkOut').value } });
     if (!r.success) throw new Error(r.message || 'Booking failed');
     var guestPhone = document.getElementById('bkPhone').value.trim();
+    var nights = nightsBetween(document.getElementById('bkIn').value, document.getElementById('bkOut').value);
     document.getElementById('stayModalBody').innerHTML = '<div style="text-align:center;padding:12px 4px;"><div style="font-size:3rem;">🎉</div>' +
-      '<h3 style="color:#ffcc00;">Booking held for 15 minutes</h3><p>Reference</p>' +
+      '<h3 style="color:#ffcc00;">Booked · awaiting checkout</h3><p>Your dates are held for 15 minutes while you complete M-Pesa checkout.</p>' +
       '<div style="font-size:1.6rem;font-weight:900;">' + escH(r.reference) + '</div>' +
-      '<p style="color:#8b98a5;">Total: ' + fmtKSh(r.total_price) + '</p>' +
+      '<p style="color:#8b98a5;">' + nights + ' night(s) · Total: ' + fmtKSh(r.total_price) + '</p>' +
       '<p id="bkPayMsg">Starting M-Pesa payment request…</p><button class="stay-btn" onclick="closeStayModal()">Done</button></div>';
     try {
       var pay = await window.apiFetch('stays/booking/' + encodeURIComponent(r.reference) + '/pay', { method: 'POST', body: { phone: guestPhone } });
@@ -220,7 +247,14 @@ async function submitStayBooking(id) {
       var payMsg = document.getElementById('bkPayMsg');
       if (payMsg) { payMsg.style.color = '#ff8080'; payMsg.textContent = (paymentError.message || 'Payment could not be started') + ' Keep your reference and contact support.'; }
     }
-  } catch (e) { msg.style.color = '#ff8080'; msg.textContent = e.message || 'Booking failed'; }
+  } catch (e) {
+    msg.style.color = '#ff8080'; msg.textContent = e.message || 'Booking failed';
+    if (confirmButton) { confirmButton.disabled = false; confirmButton.textContent = 'Try booking again'; }
+    ['bkIn', 'bkOut', 'bkName', 'bkEmail', 'bkPhone'].forEach(function (fieldId) {
+      var field = document.getElementById(fieldId);
+      if (field) field.disabled = false;
+    });
+  }
 }
 document.getElementById('staySearch').addEventListener('input', renderStays);
 document.getElementById('stayGuests').addEventListener('change', renderStays);
