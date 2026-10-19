@@ -850,10 +850,21 @@ function renderMarketLiveInfo(m) {
     const updatedAt = m.timestamp
         ? new Date(m.timestamp).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
         : "Live";
-
-    const start = m.startTime
-        ? new Date(m.startTime).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
-        : "Not scheduled";
+    const category = normalizeCategory(m.category);
+    const startValue = m.event_start_time || m.startTime || m.timestamp;
+    const startDate = m.startTime ? new Date(m.startTime) : null;
+    const eventDurationHours = ['sports', 'football', 'soccer'].includes(category) ? 2
+        : ['gaming', 'esports'].includes(category) ? 3 : 0;
+    const inferredClose = startDate && Number.isFinite(startDate.getTime())
+        ? new Date(startDate.getTime() + eventDurationHours * 60 * 60 * 1000).toISOString()
+        : m.timestamp ? new Date(new Date(m.timestamp).getTime() + 24 * 60 * 60 * 1000).toISOString() : null;
+    const closeValue = m.event_end_time || m.endTime || m.expiryTime || inferredClose;
+    const formatTime = (value) => {
+        const date = value ? new Date(value) : null;
+        return date && Number.isFinite(date.getTime())
+            ? date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
+            : "Unavailable";
+    };
 
     return `
         <div class="market-live-panel">
@@ -862,8 +873,12 @@ function renderMarketLiveInfo(m) {
                 <strong>${escapeHtml((m.status || "open").toUpperCase())}</strong>
             </div>
             <div>
-                <span>Starts / Closes</span>
-                <strong>${escapeHtml(start)}</strong>
+                <span>Starts</span>
+                <strong>${escapeHtml(formatTime(startValue))}</strong>
+            </div>
+            <div>
+                <span>Closes</span>
+                <strong>${escapeHtml(formatTime(closeValue))}</strong>
             </div>
             <div>
                 <span>Odds</span>

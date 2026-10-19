@@ -490,7 +490,7 @@ window.openAdminPanel = async function() {
                     </div>
                     <div>
                         <label style="color:#888; font-size:0.7rem;">CLOSE BETTING AT</label>
-                        <input id="adminMarketStart" type="datetime-local" style="width:100%; padding:12px; background:#000; border:1px solid #333; color:white; border-radius:8px; margin-top:5px;" />
+                        <input id="adminMarketStart" type="datetime-local" required style="width:100%; padding:12px; background:#000; border:1px solid #333; color:white; border-radius:8px; margin-top:5px;" />
                     </div>
                     <div style="grid-column: 1 / -1;">
                         <label style="color:#888; font-size:0.7rem;">MEDIA URL (Image, Video, YouTube)</label>
@@ -803,10 +803,11 @@ window.submitAdminMarket = async function() {
         const media_type = document.getElementById('adminMarketMediaType')?.value || 'auto';
         const sideA = document.getElementById('adminMarketSideA').value.trim() || 'YES';
         const sideB = document.getElementById('adminMarketSideB').value.trim() || 'NO';
-        const startTime = document.getElementById('adminMarketStart').value.trim() || new Date().toISOString();
+        const startTime = document.getElementById('adminMarketStart').value.trim();
         const description = document.getElementById('adminMarketDesc').value.trim();
 
         if (!title) return alert('Title is required');
+        if (!startTime || !Number.isFinite(new Date(startTime).getTime()) || new Date(startTime) <= new Date()) return alert('Choose a future market close or event time.');
         
         const userData = JSON.parse(localStorage.getItem("user_data") || "{}");
         const endpoint = userData.role === 'admin' ? 'admin/create-market' : 'user/submit-market';

@@ -1702,7 +1702,7 @@ function normalizeNewsArticle(article) {
         id: `${classification.prefix}_${hash}`,
         title: rawHeadline,
         description: content,
-        content,
+        content: `Headline: ${rawHeadline}\nDescription: ${content}`,
         media_url: article.urlToImage || null,
         media_type: 'image',
         category: classification.category,
@@ -1740,7 +1740,7 @@ async function saveNewsMarket(market) {
     );
 }
 
-async function syncNewsApiMarkets({ force = false, limit = 120 } = {}) {
+async function syncNewsApiMarkets({ force = false, limit = 500 } = {}) {
     const apiKey = process.env.NEWS_API_KEY;
     if (!apiKey) throw new Error('NEWS_API_KEY is not configured');
 
@@ -1754,23 +1754,31 @@ async function syncNewsApiMarkets({ force = false, limit = 120 } = {}) {
          LIMIT ?`,
         [limit]
     );
-    if (!force && cachedNews.length >= 12) return cachedNews;
+    const newestCachedAt = cachedNews.length ? new Date(cachedNews[0].timestamp).getTime() : 0;
+    const cacheFresh = Number.isFinite(newestCachedAt) && Date.now() - newestCachedAt < 2 * 60 * 60 * 1000;
+    const cachedArticles = cachedNews.map(article =>
+        extractContentField(article.content, 'Headline') ? buildNewsMarket(article) : article
+    );
+    if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
 
-    const countries = ['us', 'ke'];
-    const topicQueries = [
-        'technology OR artificial intelligence OR geopolitics OR election OR sports'
-    ];
+    // Pull a broad, international set of current headlines plus a general
+    // article search. NewsAPI returns at most 100 articles per request.
+    const countries = ['ke', 'us', 'gb', 'in'];
     const requests = [
         ...countries.map(country =>
             axios.get('https://newsapi.org/v2/top-headlines', {
-                params: { country, pageSize: 10, apiKey }
+                params: { country, pageSize: 100, apiKey }
             }).catch(() => ({ data: { articles: [] } }))
         ),
-        ...topicQueries.map(q =>
-            axios.get('https://newsapi.org/v2/everything', {
-                params: { q, language: 'en', sortBy: 'publishedAt', pageSize: 15, apiKey }
-            }).catch(() => ({ data: { articles: [] } }))
-        )
+        axios.get('https://newsapi.org/v2/everything', {
+            params: {
+                q: 'news OR politics OR election OR economy OR business OR technology OR science OR health OR sports OR entertainment',
+                language: 'en',
+                sortBy: 'publishedAt',
+                pageSize: 100,
+                apiKey
+            }
+        }).catch(() => ({ data: { articles: [] } }))
     ];
 
     const responses = await Promise.all(requests);
@@ -1779,6 +1787,8 @@ async function syncNewsApiMarkets({ force = false, limit = 120 } = {}) {
     const processedMarkets = [];
 
     for (const article of articles) {
+        // normalizeNewsArticle runs the article's own headline through
+        // buildNewsQuestion and retains the source headline for display.
         const market = normalizeNewsArticle(article);
         if (!market || seen.has(market.id)) continue;
         seen.add(market.id);
@@ -1787,7 +1797,7 @@ async function syncNewsApiMarkets({ force = false, limit = 120 } = {}) {
         if (processedMarkets.length >= limit) break;
     }
 
-    return processedMarkets.length ? processedMarkets : cachedNews;
+    return processedMarkets.length ? processedMarkets : cachedArticles;
 }
 
 async function syncTmdbMarkets() {
@@ -2586,16 +2596,16 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     addColumnSafely('markets', 'url', 'TEXT');
     addColumnSafely('markets', 'is_boosted', 'INTEGER DEFAULT 0');
 
-// Additive lifecycle backfill: preserve existing market rows and give legacy
-// fixtures a category-aware end time. Weather/news retain their explicit cutoff.
+// Additive lifecycle backfill: every market gets stable event start/end times.
 addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely('markets', 'event_end_time', 'DATETIME', () => {
     db.run(`UPDATE markets
-               SET event_start_time = COALESCE(event_start_time, startTime, timestamp),
+               SET event_start_time = COALESCE(event_start_time, startTime, timestamp, CURRENT_TIMESTAMP),
                    event_end_time = COALESCE(event_end_time,
                        CASE
                          WHEN lower(COALESCE(category, '')) IN ('football','sports','soccer') AND startTime IS NOT NULL THEN startTime + INTERVAL '120 minutes'
                          WHEN lower(COALESCE(category, '')) IN ('gaming','esports') AND startTime IS NOT NULL THEN startTime + INTERVAL '180 minutes'
-                         ELSE COALESCE(startTime, timestamp)
+                         WHEN startTime IS NOT NULL THEN startTime
+                         ELSE COALESCE(timestamp, CURRENT_TIMESTAMP) + INTERVAL '24 hours'
                        END)
              WHERE event_start_time IS NULL OR event_end_time IS NULL`, [], (err) => {
         if (err) console.warn('[markets] event-time backfill deferred:', err.message);
@@ -2604,13 +2614,13 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
         });
         db.run(`CREATE OR REPLACE FUNCTION polysoko_set_market_event_times() RETURNS trigger AS $$
             BEGIN
-              IF TG_OP = 'INSERT' AND NEW.startTime IS NULL AND NEW.event_start_time IS NULL THEN RETURN NULL; END IF;
-              IF NEW.event_start_time IS NULL THEN NEW.event_start_time := NEW.startTime; END IF;
-              IF NEW.event_end_time IS NULL AND NEW.startTime IS NOT NULL THEN
+              IF NEW.event_start_time IS NULL THEN NEW.event_start_time := COALESCE(NEW.startTime, CURRENT_TIMESTAMP); END IF;
+              IF NEW.event_end_time IS NULL THEN
                 NEW.event_end_time := CASE
-                  WHEN lower(COALESCE(NEW.category, '')) IN ('football','sports','soccer') THEN NEW.startTime + INTERVAL '120 minutes'
-                  WHEN lower(COALESCE(NEW.category, '')) IN ('gaming','esports') THEN NEW.startTime + INTERVAL '180 minutes'
-                  ELSE NEW.startTime
+                  WHEN lower(COALESCE(NEW.category, '')) IN ('football','sports','soccer') THEN COALESCE(NEW.startTime, NEW.event_start_time, CURRENT_TIMESTAMP) + INTERVAL '120 minutes'
+                  WHEN lower(COALESCE(NEW.category, '')) IN ('gaming','esports') THEN COALESCE(NEW.startTime, NEW.event_start_time, CURRENT_TIMESTAMP) + INTERVAL '180 minutes'
+                  WHEN NEW.startTime IS NOT NULL THEN NEW.startTime
+                  ELSE COALESCE(NEW.event_start_time, CURRENT_TIMESTAMP) + INTERVAL '24 hours'
                 END;
               END IF;
               RETURN NEW;
@@ -4541,6 +4551,12 @@ app.get('/api/sports/categories', async (req, res) => {
              FROM markets
              WHERE ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
                AND status IN ('open', 'upcoming', 'live')
+               AND COALESCE(event_end_time, startTime) > NOW()
+               AND (
+                    startTime IS NULL
+                    OR status IN ('open', 'upcoming')
+                    OR startTime > NOW() - (? * INTERVAL '1 minute')
+               )
                AND title NOT IN ('Home vs Away', 'Unknown vs Unknown')
                AND sideA NOT IN ('Home', 'Away', 'Unknown', '')
                AND sideB NOT IN ('Home', 'Away', 'Unknown', '')
@@ -4552,7 +4568,7 @@ app.get('/api/sports/categories', async (req, res) => {
                     ELSE COALESCE(sport, 'Other')
                 END
              ORDER BY sport ASC`,
-            []
+            [LIVE_VISIBILITY_MINUTES]
         );
         const counts = new Map((rows || []).map(row => [String(row.sport || "Other").toLowerCase(), Number(row.count || 0)]));
         const supportedSports = ['Football', ...SPORTS_SOURCES.map(source => source.label), 'F1', 'Golf'];
@@ -5014,6 +5030,10 @@ app.post('/api/user/update-email', authenticate, (req, res) => {
 app.post('/api/user/submit-market', authenticate, async (req, res) => {
     const { title, category, sideA, sideB, startTime, description, media_url, media_type } = req.body;
     try {
+        const marketTime = new Date(startTime);
+        if (!startTime || !Number.isFinite(marketTime.getTime()) || marketTime <= new Date()) {
+            return res.status(400).json({ success: false, message: 'Choose a valid future market close or event time.' });
+        }
         const user = await dbGet(`SELECT is_upgraded, role, phone FROM users WHERE phone = ?`, [req.user.phone]);
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -5051,6 +5071,10 @@ app.post('/api/user/submit-market', authenticate, async (req, res) => {
 app.post('/api/admin/create-market', authenticateAdmin, async (req, res) => {
     const { title, category, sideA, sideB, startTime, description, media_url, media_type } = req.body;
     try {
+        const marketTime = new Date(startTime);
+        if (!startTime || !Number.isFinite(marketTime.getTime()) || marketTime <= new Date()) {
+            return res.status(400).json({ success: false, message: 'Choose a valid future market close or event time.' });
+        }
         const id = `m_${Date.now()}`;
         await dbRun(
             `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, status, media_url, media_type, creator)
@@ -7147,7 +7171,7 @@ app.get('/api/football/details/:id', async (req, res) => {
 app.get('/api/news/everything', async (req, res) => {
     try {
         const force = req.query.refresh === '1' || req.query.refresh === 'true';
-        const processedMarkets = await syncNewsApiMarkets({ force, limit: 120 });
+        const processedMarkets = await syncNewsApiMarkets({ force, limit: 500 });
         emitMarkets();
         res.json({ articles: processedMarkets });
     } catch (error) {
@@ -7159,7 +7183,7 @@ app.get('/api/news/everything', async (req, res) => {
 function buildNewsMarket(market) {
     const processed = { ...market };
     processed.category = (processed.category || 'news').toLowerCase();
-    const rawTitle = String(processed.title || processed.description || '').trim();
+    const rawTitle = String(extractContentField(processed.content, 'Headline') || processed.rawHeadline || processed.title || processed.description || '').trim();
     const cleanHeadline = rawTitle.replace(/\s+-\s+[^-]+$/, '').replace(/\s+/g, ' ').trim();
     const displayHeadline = buildNewsQuestion(cleanHeadline);
     processed.displayHeadline = cleanHeadline;

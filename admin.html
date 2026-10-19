@@ -1578,6 +1578,7 @@ async function submitInlineAdminLogin() {
     const status = document.getElementById('adminInlineLoginStatus');
     const pinBtn = document.getElementById('adminInlinePinBtn');
     const payload = { pin: pinInput?.value || '' };
+    const endpoint = '/admin/pin-login';
 
     if (status) {
         status.style.color = '#aaa';
