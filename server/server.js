@@ -1157,18 +1157,33 @@ const personaConfig = personaRaw.split(/\r?\n/).reduce((acc, line) => {
     return acc;
 }, { keywords: [], instructions: '', tone: 'High-Energy', role: 'Elite Analyst' });
 
+function addNewsMarketDeadline(question, value) {
+    const timestamp = Date.parse(value || '');
+    if (!Number.isFinite(timestamp)) return question;
+    if (/\b(?:by|before|within|until|today|tomorrow|this (?:week|month|year)|next (?:week|month|year)|20\d{2})\b/i.test(question)) return question;
+    const deadline = new Intl.DateTimeFormat('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Africa/Nairobi'
+    }).format(new Date(timestamp));
+    const accuracyFallback = question.match(/^Is this headline accurate:\s*(.+)\?$/i);
+    if (accuracyFallback) return `Will the claim ${accuracyFallback[1]} be verified by ${deadline}?`;
+    return question.replace(/\?$/, ` by ${deadline}?`);
+}
+
 function buildNewsQuestion(headline) {
     const clean = String(headline || '')
         .replace(/\s+-\s+[^-]+$/, '')
         .replace(/\[[^\]]+\]/g, '')
         .replace(/^['"“”]+|['"“”]+$/g, '')
         .replace(/\s+/g, ' ')
-        .replace(/\?+$/g, '')
         .trim();
     if (!clean) return 'Is this report accurate?';
     if (clean.endsWith('?')) return polishMarketTitle(clean);
 
-    const lower = clean.toLowerCase();
+    // Do not prepend another auxiliary to a headline already phrased as a question.
+    if (/^(?:is|are|was|were|has|have|had|will|can|could|may|might|should|do|does|did)\b/i.test(clean)) {
+        return polishMarketTitle(clean);
+    }
+
     const tmdbQuestion = buildTmdbQuestion(clean);
     if (tmdbQuestion) return polishMarketTitle(tmdbQuestion);
 
@@ -1187,37 +1202,37 @@ function buildNewsQuestion(headline) {
     const clauseQuestion = buildClauseQuestion(clean);
     if (clauseQuestion) return polishMarketTitle(clauseQuestion);
 
-    const actionQuestion = buildActionQuestion(clean, lower);
-    if (actionQuestion) return polishMarketTitle(actionQuestion);
-
     return polishMarketTitle(buildFallbackMarketQuestion(clean));
 }
 
 function buildStatementMarketQuestion(headline) {
     const clean = String(headline || '').trim();
-    const normalized = sentenceCase(clean.toLowerCase())
+    const normalized = clean
         .replace(/\bsupplimentary\b/gi, 'supplementary')
         .replace(/\bi\b/g, 'I');
 
-    const noMatch = normalized.match(/^No\s+(.+)$/i);
-    if (noMatch?.[1]) {
-        const subject = cleanMarketSubject(noMatch[1]);
-        const timed = subject.match(/^(.+?)\s+((?:this|next)\s+(?:summer|winter|month|week|year))$/i);
-        if (timed?.[1] && timed?.[2]) return `Are ${timed[1]} unlikely ${timed[2]}?`;
-        return `Are ${subject} unlikely?`;
-    }
-
     const toBeMatch = normalized.match(/^(.+?)\s+to be\s+(.+)$/i);
     if (toBeMatch?.[1] && toBeMatch?.[2]) {
-        return `Is ${cleanMarketSubject(toBeMatch[1])} likely to be ${cleanMarketPredicate(toBeMatch[2])}?`;
+        const subject = cleanQuestionSubject(toBeMatch[1]);
+        const predicate = cleanMarketPredicate(toBeMatch[2]);
+        return subject && predicate ? `Will ${subject} be ${predicate}?` : null;
     }
 
     const likelyMatch = normalized.match(/^(.+?)\s+likely to\s+(.+)$/i);
     if (likelyMatch?.[1] && likelyMatch?.[2]) {
-        return `Is ${cleanMarketSubject(likelyMatch[1])} likely to ${cleanMarketPredicate(likelyMatch[2])}?`;
+        const subject = cleanQuestionSubject(likelyMatch[1]);
+        const action = cleanMarketPredicate(likelyMatch[2]);
+        return subject && action ? `Will ${subject} ${action}?` : null;
     }
 
     return null;
+}
+
+function cleanQuestionSubject(value) {
+    return cleanMarketSubject(value)
+        .replace(/\b(?:is|are|was|were|has|have|had)$/i, '')
+        .trim()
+        .replace(/^(The|A|An)\s+/, (_, article) => `${article.toLowerCase()} `);
 }
 
 function buildContextMarketQuestion(headline) {
@@ -1229,15 +1244,15 @@ function buildContextMarketQuestion(headline) {
     if (/\b(ebola|cholera|mpox|malaria|outbreak|epidemic|pandemic|virus|disease|health emergency)\b/i.test(clean)) {
         const place = countryOrPlace || 'the affected area';
         if (/\b(centre|center|clinic|hospital|isolation|treatment|quarantine)\b/i.test(clean)) {
-            return `Are emergency health centres likely in ${place} within 30 days?`;
+            return `Will emergency health centres open in ${place} within 30 days?`;
         }
-        return `Are new outbreak measures likely in ${place} within 30 days?`;
+        return `Will new outbreak measures be introduced in ${place} within 30 days?`;
     }
 
     if (/\b(protest|protests|demonstration|demonstrations|strike|strikes|riot|unrest|march|rally)\b/i.test(clean)) {
         const place = countryOrPlace ? ` in ${countryOrPlace}` : '';
         const issue = topic ? ` over ${topic}` : '';
-        return `Are protests likely${place}${issue}?`;
+        return `Will protests take place${place}${issue}?`;
     }
 
     if (/\b(group\s+[a-z0-9]+|world cup|champions league|euros|afcon|copa america|tournament|league title|qualify|qualification)\b/i.test(clean) && isFootballNews(clean)) {
@@ -1251,37 +1266,32 @@ function buildContextMarketQuestion(headline) {
 
     if (/\b(poll|polls|election|vote|ballot|candidate|campaign|president|parliament|senate|governor)\b/i.test(clean)) {
         const candidate = extractLikelyCandidate(clean);
-        if (candidate) return `Is ${candidate} likely to win the election?`;
+        if (candidate) return `Will ${candidate} win the election?`;
         const place = countryOrPlace ? ` in ${countryOrPlace}` : '';
-        return `Is the election race tightening${place}?`;
+        return `Will the election race tighten${place}?`;
     }
 
     if (/\b(sanction|sanctions|tariff|ceasefire|peace talks|deal|agreement|border|war|conflict|troops|invasion|missile|strike|airstrike|nato|united nations|security council)\b/i.test(clean)) {
-        const actor = extractActor(clean);
+        const actor = cleanQuestionSubject(extractActor(clean));
         if (/\bceasefire|peace talks|deal|agreement\b/i.test(clean)) {
-            return `Are peace talks likely to produce a deal soon?`;
+            return `Will peace talks produce a deal?`;
         }
         if (/\bsanction|sanctions|tariff\b/i.test(clean) && actor) {
-            return `Is ${actor} likely to face new sanctions or tariffs?`;
+            return `Will ${actor} face new sanctions or tariffs?`;
         }
-        if (actor) return `Are tensions involving ${actor} likely to escalate?`;
-        return `Are geopolitical tensions likely to escalate?`;
-    }
-
-    if (/\b(launch|release|unveil|announce|debut|roll out|rollout|ship|introduce)\b/i.test(clean)) {
-        const actor = extractActor(clean) || extractBetSubject(clean);
-        return `Is ${cleanMarketSubject(actor)} close to a launch?`;
+        if (actor) return `Will tensions involving ${actor} escalate?`;
+        return `Will geopolitical tensions escalate?`;
     }
 
     if (/\b(price|stock|shares|bitcoin|ethereum|crypto|market cap|record high|surge|rally|slump|fall|drop|gain)\b/i.test(clean)) {
-        const asset = extractActor(clean) || extractBetSubject(clean);
-        if (/\b(slump|fall|drop|lower|decline|selloff)\b/i.test(clean)) return `Is ${cleanMarketSubject(asset)} likely to fall further?`;
-        return `Is ${cleanMarketSubject(asset)} likely to keep rising?`;
+        const asset = cleanQuestionSubject(extractActor(clean) || extractBetSubject(clean));
+        if (/\b(slump|fall|drop|lower|decline|selloff)\b/i.test(clean)) return `Will ${asset} fall further?`;
+        return `Will ${asset} keep rising?`;
     }
 
     if (/\b(court|judge|lawsuit|trial|charges|investigation|probe|arrest|indictment)\b/i.test(clean)) {
-        const actor = extractActor(clean) || extractBetSubject(clean);
-        return `Is ${cleanMarketSubject(actor)} likely to face legal consequences?`;
+        const actor = cleanQuestionSubject(extractActor(clean) || extractBetSubject(clean));
+        return `Will ${actor} face legal consequences?`;
     }
 
     return null;
@@ -1300,9 +1310,8 @@ function buildClauseQuestion(headline) {
         const modal = modalMatch[2].toLowerCase();
         const rest = cleanMarketPredicate(modalMatch[3]);
         if (!subject || !rest) return null;
-        if (modal === 'is set to') return `Is ${subject} set to ${rest}?`;
-        if (modal === 'are set to') return `Are ${subject} set to ${rest}?`;
-        if (modal === 'will') return `Is ${subject} likely to ${rest}?`;
+        if (modal === 'is set to' || modal === 'are set to') return `Will ${subject} ${rest}?`;
+        if (modal === 'will') return `Will ${subject} ${rest}?`;
         return `${sentenceCase(modal)} ${subject} ${rest}?`;
     }
 
@@ -1382,18 +1391,6 @@ function polishMarketTitle(value) {
         .replace(/\?+$/g, '?')
         .trim();
     if (!title) return 'Is this report accurate?';
-    title = title.replace(/^Will it rain\b/i, 'Is rain likely');
-    title = title.replace(/^Will we see\b/i, 'Are we likely to see');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) win\b/i, 'Can $1 win');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) face\b/i, 'Is $1 likely to face');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) be\b/i, 'Is $1 likely to be');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) close higher\b/i, 'Can $1 close higher');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) hit\b/i, 'Can $1 hit');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) exceed\b/i, 'Is $1 likely to exceed');
-    title = title.replace(/^Will ([A-Z][^?]{1,80}?) open\b/i, 'Is $1 likely to open');
-    title = title.replace(/^Will (.+?) stay married\b/i, 'Are $1 likely to stay married');
-    title = title.replace(/^Will (.+?) stay\b/i, 'Can $1 stay');
-    title = title.replace(/^Will it be\b/i, 'Is it likely to be');
     title = title.charAt(0).toUpperCase() + title.slice(1);
     if (!/[?.!]$/.test(title)) title += '?';
     return title;
@@ -1462,10 +1459,6 @@ function extractMarketTopic(headline) {
 
 function buildFallbackMarketQuestion(headline) {
     const clean = String(headline || '').trim();
-    const actor = extractActor(clean);
-    const topic = extractMarketTopic(clean);
-    if (actor && topic) return `Is ${actor} likely to face fallout over ${topic}?`;
-    if (actor) return `Is ${actor} likely to stay in the spotlight?`;
     const claim = clean.replace(/[.!?]+$/g, '').slice(0, 105).trim();
     return claim ? `Is this headline accurate: “${claim}”?` : 'Is this report accurate?';
 }
@@ -1515,18 +1508,19 @@ function buildDirectNewsQuestion(headline) {
     const clean = String(headline || '').trim();
     const patterns = [
         {
-            match: /^(.+?)\s+(?:to|set to|will)\s+(launch|release|announce|unveil|debut|roll out)\b(.+)?$/i,
-            format: ([subject]) => `Is ${cleanMarketSubject(subject)} close to a launch?`
+            match: /^(.+?)\s+(?:(?:is|are)\s+)?(?:to|set to|will)\s+(launch|release|announce|unveil|debut|roll out)\b(.+)?$/i,
+            format: ([subject, verb, rest]) => {
+                const cleanSubject = cleanQuestionSubject(subject);
+                return `Will ${cleanSubject} ${verb.toLowerCase()}${rest ? ` ${rest.trim()}` : ''}?`;
+            }
         },
         {
-            match: /^(.+?)\s+(?:to|set to|will)\s+(win|beat|defeat|pass|approve|ban|block|halt|cancel|delay|postpone)\b(.+)?$/i,
+            match: /^(.+?)\s+(?:(?:is|are)\s+)?(?:to|set to|will)\s+(win|beat|defeat|pass|approve|ban|block|halt|cancel|delay|postpone)\b(.+)?$/i,
             format: ([subject, verb, rest]) => {
-                const cleanSubject = cleanMarketSubject(subject);
+                const cleanSubject = cleanQuestionSubject(subject);
                 const action = verb.toLowerCase();
-                if (['win', 'beat', 'defeat'].includes(action)) return `Can ${cleanSubject} ${action}${rest ? ` ${rest.trim()}` : ''}?`;
-                if (['approve', 'pass'].includes(action)) return `Is ${cleanSubject} likely to approve or pass this?`;
-                if (['ban', 'block', 'halt', 'cancel', 'delay', 'postpone'].includes(action)) return `Is ${cleanSubject} likely to block or delay this?`;
-                return `Is ${cleanSubject} likely to act soon?`;
+                if (!cleanSubject) return null;
+                return `Will ${cleanSubject} ${action}${rest ? ` ${rest.trim()}` : ''}?`;
             }
         },
         {
@@ -7288,11 +7282,13 @@ function buildNewsMarket(market) {
     processed.category = (processed.category || 'news').toLowerCase();
     const rawTitle = String(extractContentField(processed.content, 'Headline') || processed.rawHeadline || processed.title || processed.description || '').trim();
     const cleanHeadline = rawTitle.replace(/\s+-\s+[^-]+$/, '').replace(/\s+/g, ' ').trim();
-    const displayHeadline = buildNewsQuestion(cleanHeadline);
+    const deadline = processed.event_end_time || processed.eventEndTime || processed.startTime || processed.starttime;
+    const marketQuestion = addNewsMarketDeadline(buildNewsQuestion(cleanHeadline), deadline);
+    processed.rawHeadline = cleanHeadline;
     processed.displayHeadline = cleanHeadline;
-    processed.title = displayHeadline;
-    processed.betQuestion = displayHeadline;
-    processed.persona_script = processed.persona_script || buildPersonaInsight(displayHeadline);
+    processed.title = marketQuestion;
+    processed.betQuestion = marketQuestion;
+    processed.persona_script = processed.persona_script || buildPersonaInsight(marketQuestion);
     processed.sideA = processed.sideA || 'YES';
     processed.sideB = processed.sideB || 'NO';
     processed.status = processed.status || 'open';

@@ -548,6 +548,7 @@ function createMarketCard(m) {
     const isSports = isSportsMarket(m);
     const isNews = isNewsLikeMarket(m);
     const isCrypto = isCryptoMarket(m);
+    const sourceHeadline = isNews ? String(m.displayHeadline || m.rawHeadline || '').trim() : '';
     const titleFallback = m.sideA && m.sideB ? `${m.sideA} vs ${m.sideB}` : "";
     const rawDisplayTitle = isNews ? (m.betQuestion || m.title) : (m.title || titleFallback);
     const safeTitle = (rawDisplayTitle || "").replace(/'/g, "\\'");
@@ -611,7 +612,7 @@ function createMarketCard(m) {
         : `
         <div style="margin:10px 0;">
             <h3 style="font-size:0.95rem; color:white; line-height:1.3;">${displayTitle}</h3>
-            ${isNews ? `<div style="color:#9ca3af; font-size:0.78rem; margin-top:6px;">Open for story context</div>` : ''}
+            ${isNews ? `<div style="color:#9ca3af; font-size:0.78rem; margin-top:6px; line-height:1.35;"><span style="color:#7c8796; font-size:0.65rem; text-transform:uppercase; letter-spacing:.04em;">Source headline</span><br>${sourceHeadline ? escapeHtml(sourceHeadline) : 'Open for story context'}</div>` : ''}
         </div>
         `
     }
