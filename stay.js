@@ -5,7 +5,8 @@ function stayImgs(s) {
   var arr = Array.isArray(s.images) ? s.images.slice(0, 15) : [];
   return arr.length ? arr : ['./logo-mark.png'];
 }
-function stayImg(s) { return stayImgs(s)[0]; }
+function stayAsset(path) { return window.assetUrl ? window.assetUrl(path) : path; }
+function stayImg(s) { return stayAsset(stayImgs(s)[0]); }
 function nightsBetween(a, b) { return Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000); }
 function closeStayModal() { document.getElementById('stayModal').classList.remove('open'); }
 function openSrLightbox(src) {
@@ -16,7 +17,8 @@ function openSrLightbox(src) {
 function closeSrLightbox() { document.getElementById('srLightbox').classList.remove('open'); }
 function srCarouselHTML(imgs, cid) {
   var slides = imgs.map(function (src, i) {
-    return '<div class="sr-slide"><img src="' + escH(src) + '" alt="Photo ' + (i + 1) + '" loading="lazy" onclick="openSrLightbox(\'' + escH(src).replace(/'/g, '%27') + '\')" style="cursor:zoom-in;" /></div>';
+    var imageUrl = stayAsset(src);
+    return '<div class="sr-slide"><img src="' + escH(imageUrl) + '" alt="Photo ' + (i + 1) + '" loading="lazy" onclick="openSrLightbox(\'' + escH(imageUrl).replace(/'/g, '%27') + '\')" style="cursor:zoom-in;" /></div>';
   }).join('');
   var dots = imgs.map(function (_, i) {
     return '<button class="sr-dot' + (i === 0 ? ' on' : '') + '" data-i="' + i + '" onclick="srGo(\'' + cid + '\',' + i + ')" aria-label="Photo ' + (i + 1) + '"></button>';
@@ -136,7 +138,10 @@ async function lookupPaidBooking() {
     var r = await window.apiFetch('stays/booking/' + encodeURIComponent(ref));
     if (!r.success) throw new Error(r.message || 'Not found');
     var p = r.property || {};
-    out.innerHTML = '<b>Exact address:</b> ' + escH(p.exact_address || p.location || '') +
+    var b = r.booking || {};
+    out.innerHTML = '<b>Booking:</b> ' + escH(b.payment_status || 'pending') +
+      (b.check_in_pin ? '<br><b>Check-in PIN:</b> ' + escH(b.check_in_pin) : '') +
+      '<br><b>Exact address:</b> ' + escH(p.exact_address || p.location || '') +
       (p.google_maps_link ? '<br><a href="' + escH(p.google_maps_link) + '" target="_blank" rel="noopener">Open in Google Maps</a>' : '') +
       ((p.latitude != null && p.longitude != null) ? '<br><span style="color:#8b98a5;">' + escH(p.latitude) + ', ' + escH(p.longitude) + '</span>' : '');
   } catch (e) { out.style.color = '#ff8080'; out.textContent = e.message || 'Location unlocks after payment is confirmed.'; }
@@ -153,15 +158,33 @@ async function submitStayBooking(id) {
       check_in: document.getElementById('bkIn').value,
       check_out: document.getElementById('bkOut').value } });
     if (!r.success) throw new Error(r.message || 'Booking failed');
+    var guestPhone = document.getElementById('bkPhone').value.trim();
     document.getElementById('stayModalBody').innerHTML = '<div style="text-align:center;padding:12px 4px;"><div style="font-size:3rem;">🎉</div>' +
-      '<h3 style="color:#00ff88;">Booking Confirmed</h3><p>Reference</p>' +
+      '<h3 style="color:#ffcc00;">Booking held for 15 minutes</h3><p>Reference</p>' +
       '<div style="font-size:1.6rem;font-weight:900;">' + escH(r.reference) + '</div>' +
       '<p style="color:#8b98a5;">Total: ' + fmtKSh(r.total_price) + '</p>' +
-      '<button class="stay-btn" onclick="closeStayModal()">Done</button></div>';
+      '<p id="bkPayMsg">Starting M-Pesa payment request…</p><button class="stay-btn" onclick="closeStayModal()">Done</button></div>';
+    try {
+      var pay = await window.apiFetch('stays/booking/' + encodeURIComponent(r.reference) + '/pay', { method: 'POST', body: { phone: guestPhone } });
+      if (!pay.success) throw new Error(pay.message || 'Payment could not be started');
+      var payMsg = document.getElementById('bkPayMsg');
+      if (payMsg) { payMsg.style.color = '#00ff88'; payMsg.textContent = pay.message || 'Check your phone and enter your M-Pesa PIN. Your booking confirms after payment verification.'; }
+    } catch (paymentError) {
+      var payMsg = document.getElementById('bkPayMsg');
+      if (payMsg) { payMsg.style.color = '#ff8080'; payMsg.textContent = (paymentError.message || 'Payment could not be started') + ' Keep your reference and contact support.'; }
+    }
   } catch (e) { msg.style.color = '#ff8080'; msg.textContent = e.message || 'Booking failed'; }
 }
 document.getElementById('staySearch').addEventListener('input', renderStays);
 document.getElementById('stayGuests').addEventListener('change', renderStays);
 document.getElementById('staySort').addEventListener('change', renderStays);
 document.getElementById('stayModal').addEventListener('click', function (e) { if (e.target.id === 'stayModal') closeStayModal(); });
-loadStays();
+loadStays().then(function () {
+  var ref = new URLSearchParams(location.search).get('booking');
+  if (ref && STAYS.length) {
+    openStayBooking(STAYS[0].id).then(function () {
+      var lookup = document.getElementById('bkLookup');
+      if (lookup) { lookup.value = ref; lookupPaidBooking(); }
+    });
+  }
+});

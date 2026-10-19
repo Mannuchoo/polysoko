@@ -11,8 +11,10 @@
     "start:server": "node server/server.js"
   },
   "dependencies": {
+    "node-cron": "^4.6.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",

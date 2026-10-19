@@ -24,6 +24,7 @@ import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
+import cron from 'node-cron';
 import AfricasTalking from 'africastalking';
 import fs from 'fs';
 import helmet from 'helmet';
@@ -223,7 +224,7 @@ app.use(
                 "script-src": ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://cdn.socket.io"], // Allow common CDNs as needed
         "script-src-attr": ["'unsafe-inline'"],
         "style-src": ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
-                "connect-src": ["'self'", configuredPublicSiteUrl, configuredPublicApiBase, "https://cdn.socket.io", "https://ipapi.co", "https://*.ipapi.co", "https://api.weatherapi.com", "https://nominatim.openstreetmap.org", "ws:", "wss:"],
+                "connect-src": ["'self'", configuredPublicSiteUrl, configuredPublicApiBase, "https://api.cloudinary.com", "https://cdn.socket.io", "https://ipapi.co", "https://*.ipapi.co", "https://api.weatherapi.com", "https://nominatim.openstreetmap.org", "ws:", "wss:"],
         "frame-src": ["'self'", "https://www.youtube.com", "https://www.youtube-nocookie.com"],
         "media-src": ["'self'", "data:", "blob:", "https:"],
         "img-src": ["'self'", "data:", "https:"],
@@ -243,6 +244,11 @@ app.use((req, res, next) => {
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self), payment=(self)');
     if (req.method === 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) setNoStoreHeaders(res);
     next();
+});
+// Cloudinary cloud names are public identifiers required by unsigned browser uploads;
+// never expose upload API secrets here.
+app.get('/api/config', (_req, res) => {
+    res.json({ cloudName: String(process.env.CLOUDINARY_CLOUD_NAME || '').trim() });
 });
 // Health probe used by Railway's deployment healthcheck. Registered ahead of the
 // global rate limiter so that platform probes never consume the public API quota.
@@ -1129,7 +1135,7 @@ function buildNewsQuestion(headline) {
     const clean = String(headline || '')
         .replace(/\s+-\s+[^-]+$/, '')
         .replace(/\[[^\]]+\]/g, '')
-        .replace(/^['"Ã¢â‚¬Å“Ã¢â‚¬Â]+|['"Ã¢â‚¬Å“Ã¢â‚¬Â]+$/g, '')
+        .replace(/^['"“”]+|['"“”]+$/g, '')
         .replace(/\s+/g, ' ')
         .replace(/\?+$/g, '')
         .trim();
@@ -1256,7 +1262,7 @@ function buildContextMarketQuestion(headline) {
 
 function buildClauseQuestion(headline) {
     const clean = String(headline || '').trim();
-    const quotedClaim = clean.match(/^(.+?)\s+(?:says?|claims?|reports?|announces?)\s+['"Ã¢â‚¬Å“](.+?)['"Ã¢â‚¬Â]?$/i);
+    const quotedClaim = clean.match(/^(.+?)\s+(?:says?|claims?|reports?|announces?)\s+['"“](.+?)['"”]?$/i);
     if (quotedClaim?.[1] && quotedClaim?.[2]) {
         return `Is ${cleanMarketSubject(quotedClaim[1])}'s claim accurate?`;
     }
@@ -1325,7 +1331,7 @@ function cleanMarketSubject(value) {
         .replace(/^(breaking|update|exclusive|analysis|live):\s*/i, '')
         .replace(/\b(favorites?|favourites?|favored|favoured|backed|tipped|likely|odds-on|front[- ]?runners?)\b/ig, '')
         .replace(/\b(to|for)\s*$/i, '')
-        .replace(/["Ã¢â‚¬Å“Ã¢â‚¬Â]/g, '')
+        .replace(/["“”]/g, '')
         .replace(/\s+/g, ' ')
         .replace(/^(that|whether)\s+/i, '')
         .replace(/[,;:.!?]+$/g, '')
@@ -1336,7 +1342,7 @@ function cleanMarketPredicate(value) {
     return String(value || '')
         .replace(/^that\s+/i, '')
         .replace(/\s+-\s+[^-]+$/, '')
-        .replace(/["Ã¢â‚¬Å“Ã¢â‚¬Â]/g, '')
+        .replace(/["“”]/g, '')
         .replace(/\s+/g, ' ')
         .replace(/[,;:.!?]+$/g, '')
         .trim();
@@ -1980,7 +1986,7 @@ async function callAI({ engine = 'gpt', messages = null, promptText = '', suppre
             if (resp) return { engine: 'openai', text: resp };
         } catch (err) {
             if (suppressErrors) return { engine: 'none', text: null };
-            console.error("Ã¢ÂÅ’ OpenAI Error:", err.response?.status || err.message);
+            console.error("❌ OpenAI Error:", err.response?.status || err.message);
             if (suppressErrors) return { engine: 'none', text: null };
             if (!useGemini) throw err; // Only throw if we can't fall back to Gemini
         }
@@ -1992,7 +1998,7 @@ async function callAI({ engine = 'gpt', messages = null, promptText = '', suppre
             if (resp) return { engine: 'gemini', text: resp };
         } catch (err) {
             if (suppressErrors) return { engine: 'none', text: null };
-            console.error("Ã¢ÂÅ’ Gemini Error:", err.response?.status || err.message);
+            console.error("❌ Gemini Error:", err.response?.status || err.message);
             if (suppressErrors) return { engine: 'none', text: null };
             throw err;
         }
@@ -2246,7 +2252,7 @@ foldersToCreate.forEach(dir => {
     if (!fs.existsSync(dir)) {
         // recursive: true allows it to create /public AND /uploads at once
         fs.mkdirSync(dir, { recursive: true });
-        console.log(`Ã°Å¸â€œÂ Created directory: ${dir}`);
+        console.log(`📁 Created directory: ${dir}`);
     }
 });
 const emitAdminEvent = (event, data = {}) => {
@@ -2255,7 +2261,7 @@ const emitAdminEvent = (event, data = {}) => {
 const mapStatus = (short) => {
     if (["1H","2H","HT"].includes(short)) return "live";
     if (short === "FT") return "ended";
-    return "open"; // Ã°Å¸â€˜Ë† CRITICAL
+    return "open"; // 👈 CRITICAL
 };
 const MARKET_STATUS = {
   UPCOMING: "upcoming",
@@ -2441,7 +2447,7 @@ db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS markets (
         id TEXT PRIMARY KEY, title TEXT, description TEXT, category TEXT, sideA TEXT, sideB TEXT, 
         oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0,
-        league TEXT, country TEXT, sport TEXT, startTime DATETIME, result TEXT, settled INTEGER DEFAULT 0,
+        league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
         media_url TEXT, media_type TEXT, content TEXT,
         creator TEXT,
         url TEXT,
@@ -2503,10 +2509,10 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
             const cleanDef = definition.replace(/,$/, '');
             const sql = `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${cleanDef}`;
 
-            console.log("Ã°Å¸Â§Âª Running:", sql);
+            console.log("🧪 Running:", sql);
 
             db.run(sql, (err) => {
-                if (err) console.error("Ã¢ÂÅ’ ALTER ERROR:", err.message);
+                if (err) console.error("❌ ALTER ERROR:", err.message);
                 if (callback) callback();
             });
         } else {
@@ -2571,6 +2577,61 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     addColumnSafely('markets', 'creator', 'TEXT');
     addColumnSafely('markets', 'url', 'TEXT');
     addColumnSafely('markets', 'is_boosted', 'INTEGER DEFAULT 0');
+
+// Additive lifecycle backfill: preserve existing market rows and give legacy
+// fixtures a category-aware end time. Weather/news retain their explicit cutoff.
+addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely('markets', 'event_end_time', 'DATETIME', () => {
+    db.run(`UPDATE markets
+               SET event_start_time = COALESCE(event_start_time, startTime, timestamp),
+                   event_end_time = COALESCE(event_end_time,
+                       CASE
+                         WHEN lower(COALESCE(category, '')) IN ('football','sports','soccer') AND startTime IS NOT NULL THEN startTime + INTERVAL '120 minutes'
+                         WHEN lower(COALESCE(category, '')) IN ('gaming','esports') AND startTime IS NOT NULL THEN startTime + INTERVAL '180 minutes'
+                         ELSE COALESCE(startTime, timestamp)
+                       END)
+             WHERE event_start_time IS NULL OR event_end_time IS NULL`, [], (err) => {
+        if (err) console.warn('[markets] event-time backfill deferred:', err.message);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_markets_event_end_status ON markets(event_end_time, status)`, (indexErr) => {
+            if (indexErr) console.warn('[markets] event-time index unavailable:', indexErr.message);
+        });
+        db.run(`CREATE OR REPLACE FUNCTION polysoko_set_market_event_times() RETURNS trigger AS $$
+            BEGIN
+              IF TG_OP = 'INSERT' AND NEW.startTime IS NULL AND NEW.event_start_time IS NULL THEN RETURN NULL; END IF;
+              IF NEW.event_start_time IS NULL THEN NEW.event_start_time := NEW.startTime; END IF;
+              IF NEW.event_end_time IS NULL AND NEW.startTime IS NOT NULL THEN
+                NEW.event_end_time := CASE
+                  WHEN lower(COALESCE(NEW.category, '')) IN ('football','sports','soccer') THEN NEW.startTime + INTERVAL '120 minutes'
+                  WHEN lower(COALESCE(NEW.category, '')) IN ('gaming','esports') THEN NEW.startTime + INTERVAL '180 minutes'
+                  ELSE NEW.startTime
+                END;
+              END IF;
+              RETURN NEW;
+            END;
+          $$ LANGUAGE plpgsql`, [], (fnErr) => {
+            if (fnErr) return console.warn('[markets] event-time trigger function unavailable:', fnErr.message);
+            db.run(`DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_polysoko_market_event_times') THEN
+                  CREATE TRIGGER trg_polysoko_market_event_times BEFORE INSERT OR UPDATE ON markets
+                  FOR EACH ROW EXECUTE FUNCTION polysoko_set_market_event_times();
+                END IF;
+              END $$`, [], (triggerErr) => {
+                if (triggerErr) return console.warn('[markets] event-time trigger unavailable:', triggerErr.message);
+                db.get(`SELECT COUNT(*) AS missing FROM markets WHERE event_start_time IS NULL OR event_end_time IS NULL`, [], (countErr, row) => {
+                    if (countErr || Number(row?.missing || 0) !== 0) {
+                        console.warn('[markets] retaining nullable event times until legacy rows can be backfilled safely.');
+                        return;
+                    }
+                    db.run(`ALTER TABLE markets ALTER COLUMN event_start_time SET NOT NULL`, (startErr) => {
+                        if (startErr) console.warn('[markets] event_start_time NOT NULL migration deferred:', startErr.message);
+                        db.run(`ALTER TABLE markets ALTER COLUMN event_end_time SET NOT NULL`, (endErr) => {
+                            if (endErr) console.warn('[markets] event_end_time NOT NULL migration deferred:', endErr.message);
+                        });
+                    });
+                });
+            });
+          });
+    });
+}));
     addColumnSafely('transactions', 'is_boosted', 'INTEGER DEFAULT 0');
     addColumnSafely('bets', 'is_boosted', 'INTEGER DEFAULT 0');
     addColumnSafely('bets', 'transaction_id', 'INTEGER');
@@ -2598,8 +2659,8 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
         if (process.env.ADMIN_PHONE) {
             const adminPhone = normalizePhone(process.env.ADMIN_PHONE);
             db.run(`UPDATE users SET role='admin' WHERE phone=?`, [adminPhone], (err) => {
-                if (err) console.error("Ã¢ÂÅ’ Admin Assignment Failed:", err.message);
-                else console.log(`Ã°Å¸â€˜â€˜ SuperAdmin verified: ${adminPhone}`);
+                if (err) console.error("❌ Admin Assignment Failed:", err.message);
+                else console.log(`👑 SuperAdmin verified: ${adminPhone}`);
             });
             return;
         }
@@ -2608,7 +2669,7 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
         // remember it so later restarts resolve the same identity.
         resolveAdminPhone()
             .then((resolved) => {
-                if (resolved) console.log(`Ã°Å¸â€˜â€˜ SuperAdmin identity resolved: ${resolved}`);
+                if (resolved) console.log(`👑 SuperAdmin identity resolved: ${resolved}`);
                 else console.warn('⚠️  No admin identity available. Set ADMIN_PHONE to enable the admin panel.');
             })
             .catch((err) => console.error('Admin identity resolution failed:', err.message));
@@ -2683,7 +2744,7 @@ const authenticateAdmin = (req, res, next) => {
         const userPhone = normalizePhone(decoded.phone);
 
         if (!adminPhone || userPhone !== adminPhone) {
-            console.warn(`Ã°Å¸Å¡Â« Unauthorized admin access attempt from: ${userPhone}`);
+            console.warn(`🚫 Unauthorized admin access attempt from: ${userPhone}`);
             return res.status(403).json({ success: false, message: "Access denied: Not an administrator" });
         }
 
@@ -2705,7 +2766,7 @@ const createNotification = async (phone, title, message, type = 'info') => {
 const emitBalance = (phone) => {
     const normalized = normalizePhone(phone);
     db.get(`SELECT balance FROM users WHERE phone=?`, [normalized], (err, user) => {
-        if (err) return console.error("Ã¢ÂÅ’ Database error in emitBalance:", err);
+        if (err) return console.error("❌ Database error in emitBalance:", err);
         if (user) {
             io.to(normalized).emit("balanceUpdate", { balance: user.balance });
         }
@@ -2715,7 +2776,7 @@ const emitBalance = (phone) => {
 const emitMarkets = () => {
     const sql = `SELECT * FROM markets WHERE status IN ('open','live','upcoming','pending') ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
-        if (err) return console.error("Ã¢ÂÅ’ DB Error:", err.message);
+        if (err) return console.error("❌ DB Error:", err.message);
         io.emit('marketsUpdated', {
             status: 'success',
             count: rows?.length || 0,
@@ -2772,7 +2833,7 @@ const syncFootballMarkets = async () => {
             return;
         }
 
-        console.log("Ã¢Å¡Â½ Syncing football fixtures via API-Football...");
+        console.log("⚽ Syncing football fixtures via API-Football...");
 
         // Dates for Today and Tomorrow in YYYY-MM-DD
         const dates = [0, 1].map((daysAhead) => formatNairobiDate(daysAhead));
@@ -2794,19 +2855,19 @@ const syncFootballMarkets = async () => {
         const apiErrors = responses.map((res) => res.data?.errors).filter(e => e && Object.keys(e).length > 0);
 
         if (apiErrors.length > 0) {
-            console.error("Ã¢Å¡Â Ã¯Â¸Â API-Football Errors:", JSON.stringify(apiErrors));
+            console.error("⚠️ API-Football Errors:", JSON.stringify(apiErrors));
         }
 
         if (matches.length === 0) {
-            console.log("Ã¢Å¡Â Ã¯Â¸Â No fixtures returned from API-Football.");
+            console.log("⚠️ No fixtures returned from API-Football.");
             return;
         }
 
-        console.log(`Ã¢Å¡Â½ Syncing ${matches.length} matches...`);
+        console.log(`⚽ Syncing ${matches.length} matches...`);
         await processMatches(matches);
 
     } catch (e) {
-        console.error("Ã¢Å¡Â½ API-Football Sync Error:", e.response?.data || e.message);
+        console.error("⚽ API-Football Sync Error:", e.response?.data || e.message);
     }
 };
 const processMatches = async (matches) => {
@@ -3034,21 +3095,34 @@ function getSportsGameId(game, sportKey) {
 
 function getSportsTeamName(game, side) {
     const index = side === 'home' ? 0 : 1;
-    const teamValue = game?.teams?.[side] || game?.team?.[side] || game?.[side] || game?.competitors?.[index] || game?.participants?.[index];
+    const titleCase = side === 'home' ? 'Home' : 'Away';
+    const teamValue = game?.teams?.[side] || game?.team?.[side] || game?.[side] ||
+        game?.[`${side}Team`] || game?.[`${side}_team`] || game?.competitors?.[index] ||
+        game?.participants?.[index] || game?.fighters?.[index] || game?.corners?.[side];
     if (typeof teamValue === 'string') return teamValue;
     return game?.teams?.[side]?.name ||
         game?.team?.[side]?.name ||
         game?.[side]?.name ||
+        game?.[`${side}Team`]?.name ||
+        game?.[`${side}_team`]?.name ||
+        game?.[`${side}Name`] ||
         game?.competitors?.[index]?.name ||
         game?.participants?.[index]?.name ||
         game?.participants?.[index]?.team?.name ||
         game?.teams?.[side]?.team?.name ||
-        "";
+        game?.fighters?.[index]?.name ||
+        game?.corners?.[side]?.name ||
+        game?.[titleCase]?.name || "";
 }
 
 function getSportsStartTime(game) {
     return game?.game?.date ||
+        game?.game?.datetime ||
         game?.date ||
+        game?.datetime ||
+        game?.scheduled ||
+        game?.startTime ||
+        game?.start_time ||
         game?.fixture?.date ||
         game?.time ||
         new Date().toISOString();
@@ -3058,9 +3132,15 @@ function getSportsStatus(game, startTime) {
     const raw = game?.game?.status?.short ||
         game?.status?.short ||
         game?.fixture?.status?.short ||
-        game?.status ||
+        (typeof game?.status === 'string' ? game.status : null) ||
         null;
     return computeMarketStatus(startTime, raw);
+}
+
+function sportsResponseRecords(data) {
+    const response = data?.response ?? data?.data?.response ?? data?.data ?? data?.games ?? data?.matches ?? data?.fights;
+    if (Array.isArray(response)) return response;
+    return response && typeof response === 'object' ? [response] : [];
 }
 
 const syncSportsMarkets = async () => {
@@ -3084,7 +3164,9 @@ const syncSportsMarkets = async () => {
     let synced = 0;
     const sourceCounts = {};
 
+    const enabledSources = new Set(parseEnabledSports());
     for (const sport of SPORTS_SOURCES) {
+        if (enabledSources.size && !enabledSources.has(sport.key)) continue;
         try {
             const responses = await Promise.all(dates.map((date) => (
                 axios.get(sportsUrl(sport), {
@@ -3096,7 +3178,12 @@ const syncSportsMarkets = async () => {
                 })
             )));
 
-            const games = responses.flatMap((res) => res.data?.response || []);
+            const games = responses.flatMap((res) => sportsResponseRecords(res.data));
+            for (const response of responses) {
+                if (hasApiErrors(response.data)) {
+                    console.warn(`${sport.label} API returned errors:`, response.data.errors);
+                }
+            }
             sourceCounts[sport.label] = games.length;
             sportsStatusCache.set(sport.key, {
                 available: games.length > 0,
@@ -3250,8 +3337,8 @@ const syncSportsMarkets = async () => {
                     },
                     {
                         id: `${baseId}_temp`,
-                        title: `Is ${town.name} likely to exceed 35Ã‚Â°C tomorrow?`,
-                        desc: `Expected Max Temp: ${forecast.maxTemp}Ã‚Â°C. This market resolves YES if the daily high reaches 35.0Ã‚Â°C or more.`,
+                        title: `Is ${town.name} likely to exceed 35°C tomorrow?`,
+                        desc: `Expected Max Temp: ${forecast.maxTemp}°C. This market resolves YES if the daily high reaches 35.0°C or more.`,
                     },
                     {
                         id: `${baseId}_wind`,
@@ -3352,7 +3439,7 @@ const cleanupOutdatedMarkets = async () => {
     // 4. Remove redundant markets with no startTime that are old (orphaned)
     await dbRun(`DELETE FROM markets WHERE startTime IS NULL AND timestamp < NOW() - INTERVAL '1 day'`);
     
-    console.log("Ã°Å¸Â§Â¹ Database cleanup complete: Redundant markets cleared.");
+    console.log("🧹 Database cleanup complete: Redundant markets cleared.");
 };
 
 // Helper to ensure all active markets have a closure time
@@ -3396,7 +3483,7 @@ let oddsB = (total + minLiquidity) / ((market.away_volume || 1) + minLiquidity);
 };
 // --- SETTLEMENT ENGINE ---
 const cancelMarket = async (marketId, reason = 'CANCELLED') => {
-    console.log(`Ã°Å¸â€ºâ€˜ Cancelling market ${marketId} Ã¢â€ â€™ ${reason}`);
+    console.log(`🛑 Cancelling market ${marketId} → ${reason}`);
     try {
         const market = await dbGet(`SELECT settled FROM markets WHERE id=?`, [marketId]);
         if (!market) return { success: false, message: "Market not found" };
@@ -3440,10 +3527,10 @@ const cancelMarket = async (marketId, reason = 'CANCELLED') => {
         });
 
         emitMarkets();
-        console.log(`Ã¢Å“â€¦ Market ${marketId} cancelled/refunded`);
+        console.log(`✅ Market ${marketId} cancelled/refunded`);
         return { success: true, cancelledBets: bets.length };
     } catch (e) {
-        console.error("Ã¢ÂÅ’ Market cancel failed:", e.message);
+        console.error("❌ Market cancel failed:", e.message);
     }
 };
 
@@ -3470,10 +3557,10 @@ function isWinningBetSide(betSide, winningSide, market = {}) {
 }
 
 const settleMarket = async (marketId, winningSide) => {
-    console.log(`Ã¢Å¡â€“Ã¯Â¸Â Settling market ${marketId} Ã¢â€ â€™ ${winningSide}`);
+    console.log(`⚖️ Settling market ${marketId} → ${winningSide}`);
 
     try {
-        // Ã¢Å“â€¦ CHECK FIRST
+        // ✅ CHECK FIRST
         const market = await dbGet(
             `SELECT settled, sideA, sideB FROM markets WHERE id=?`,
             [marketId]
@@ -3485,7 +3572,7 @@ const settleMarket = async (marketId, winningSide) => {
         }
 
         if (market?.settled) {
-            console.log("Ã¢Å¡Â Ã¯Â¸Â Market already settled.");
+            console.log("⚠️ Market already settled.");
             return { success: true, alreadySettled: true };
         }
 
@@ -3502,7 +3589,7 @@ const settleMarket = async (marketId, winningSide) => {
         `, [marketId]);
 
         if (!bets.length) {
-            console.log("Ã¢Å¡Â Ã¯Â¸Â No active bets found.");
+            console.log("⚠️ No active bets found.");
             await dbRun(
                 `UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`,
                 [normalizeSettlementSide(winningSide), marketId]
@@ -3584,7 +3671,7 @@ const settleMarket = async (marketId, winningSide) => {
             }
         }
 
-        console.log(`Ã°Å¸â€œÅ  Market P&L Ã¢â€ â€™ Stake: ${totalStake}, Paid: ${totalPayout}, Profit: ${totalStake - totalPayout}`);
+        console.log(`📊 Market P&L → Stake: ${totalStake}, Paid: ${totalPayout}, Profit: ${totalStake - totalPayout}`);
 
         await dbRun(`
             UPDATE markets 
@@ -3593,7 +3680,7 @@ const settleMarket = async (marketId, winningSide) => {
         `, [normalizeSettlementSide(winningSide), marketId]);
         });
 
-        console.log(`Ã¢Å“â€¦ Market ${marketId} fully settled`);
+        console.log(`✅ Market ${marketId} fully settled`);
 
         emitMarkets();
 
@@ -3604,7 +3691,7 @@ const settleMarket = async (marketId, winningSide) => {
                     // 1. App Notification
                     await createNotification(
                         w.user_phone,
-                        "Prediction Won! Ã°Å¸Å½â€°",
+                        "Prediction Won! 🎉",
                         `Congratulations! Your prediction on "${w.event}" won sKES ${w.payout}.`,
                         'win'
                     );
@@ -3630,10 +3717,10 @@ const settleMarket = async (marketId, winningSide) => {
                             to: [formattedPhone],
                             message: smsMessage
                         });
-                        console.log(`Ã¢Å“â€¦ Win SMS Sent to ${w.user_phone}`);
+                        console.log(`✅ Win SMS Sent to ${w.user_phone}`);
                     }
                 } catch (err) {
-                    console.error(`Ã¢ÂÅ’ Notification failed for ${w.user_phone}:`, err.message || err);
+                    console.error(`❌ Notification failed for ${w.user_phone}:`, err.message || err);
                 }
             })();
         }
@@ -3641,7 +3728,7 @@ const settleMarket = async (marketId, winningSide) => {
         return { success: true, settledBets: bets.length, totalStake, totalPayout };
 
     } catch (e) {
-        console.error("Ã¢ÂÅ’ Settlement failed:", e.message);
+        console.error("❌ Settlement failed:", e.message);
         throw e;
     }
 };
@@ -3730,7 +3817,7 @@ const settleBetById = async (betId, winningSide) => {
                     // 1. App Notification
                     await createNotification(
                         bet.user_phone,
-                        "Prediction Won! Ã°Å¸Å½â€°",
+                        "Prediction Won! 🎉",
                         `Congratulations! Your prediction on "${bet.event}" won sKES ${payout}.`,
                         'win'
                     );
@@ -3756,10 +3843,10 @@ const settleBetById = async (betId, winningSide) => {
                             to: [formattedPhone],
                             message: smsMessage
                         });
-                        console.log(`Ã¢Å“â€¦ Win SMS Sent to ${bet.user_phone}`);
+                        console.log(`✅ Win SMS Sent to ${bet.user_phone}`);
                     }
                 } catch (err) {
-                    console.error(`Ã¢ÂÅ’ Notification failed for ${bet.user_phone}:`, err.message || err);
+                    console.error(`❌ Notification failed for ${bet.user_phone}:`, err.message || err);
                 }
             })();
         }
@@ -3808,7 +3895,7 @@ const settleWeatherMarkets = async () => {
             await settleMarket(m.id, result);
 
         } catch (e) {
-            console.error("Ã°Å¸Å’Â§Ã¯Â¸Â Weather settlement error:", e.message);
+            console.error("🌧️ Weather settlement error:", e.message);
         }
     }
 };
@@ -3821,15 +3908,15 @@ const closeExpiredMarkets = async () => {
         const closed = await dbRun(
             `UPDATE markets SET status='closed'
               WHERE status IN ('upcoming', 'open')
-                AND startTime IS NOT NULL
-                AND startTime <= NOW()`,
+                AND COALESCE(event_end_time, startTime) IS NOT NULL
+                AND COALESCE(event_end_time, startTime) <= NOW()`,
             []
         );
         const suspended = await dbRun(
             `UPDATE markets SET status='suspended'
               WHERE status = 'live'
-                AND startTime IS NOT NULL
-                AND startTime < NOW() - (${LIVE_VISIBILITY_MINUTES} * INTERVAL '1 minute')`,
+                AND COALESCE(event_end_time, startTime) IS NOT NULL
+                AND COALESCE(event_end_time, startTime) <= NOW()`,
             []
         );
         if (Number(closed?.changes || 0) + Number(suspended?.changes || 0) > 0) {
@@ -3871,11 +3958,11 @@ const refreshBoostedMarkets = async () => {
         });
 
         if (selectedIds.length) {
-            console.log(`Ã°Å¸Å¸Â© Refreshed boosted markets: ${selectedIds.join(', ')}`);
+            console.log(`🟩 Refreshed boosted markets: ${selectedIds.join(', ')}`);
             emitMarkets();
         }
     } catch (e) {
-        console.error("Ã¢ÂÅ’ Boosted markets refresh failed:", e.message);
+        console.error("❌ Boosted markets refresh failed:", e.message);
     }
 };
 
@@ -3891,7 +3978,7 @@ const settleResolvedMarkets = async () => {
             await settleMarket(market.id, market.result);
         }
     } catch (e) {
-        console.error("Ã¢ÂÅ’ Resolved market settlement failed:", e.message);
+        console.error("❌ Resolved market settlement failed:", e.message);
     }
 };
 
@@ -3901,7 +3988,7 @@ const sendDailyMarkets = () => {
             if (!markets || markets.length === 0) return;
             const marketList = markets.map(m => `${m.title} (Yes: ${m.oddsA} | No: ${m.oddsB})`).join('\n');
             users.forEach(u => {
-                sendPolyMail(u.email, "Today's Hot Markets Ã°Å¸â€Â¥", `Check out these live odds:\n\n${marketList}`);
+                sendPolyMail(u.email, "Today's Hot Markets 🔥", `Check out these live odds:\n\n${marketList}`);
             });
         });
     });
@@ -3949,7 +4036,7 @@ const syncFootballNews = async () => {
         }
 
         if (saved > 0) {
-            console.log(`Ã¢Å¡Â½ Football news sync: saved ${saved} new markets`);
+            console.log(`⚽ Football news sync: saved ${saved} new markets`);
             emitMarkets();
         }
     } catch (e) {
@@ -3969,7 +4056,7 @@ const NON_PREDICTABLE_COINS = new Set([
 ]);
 
 const syncAllMarkets = async () => {
-    console.log(`[${new Date().toLocaleTimeString()}] Ã°Å¸â€â€ž STARTING GLOBAL SYNC...`);
+    console.log(`[${new Date().toLocaleTimeString()}] 🔄 STARTING GLOBAL SYNC...`);
     // --- 2. CRYPTO MARKETS (Using CoinGecko + AI Enhancements) ---
     try {
         // Widen the slice (previously top-10) so the crypto tab and the guest
@@ -4138,6 +4225,7 @@ const marketsRouteHandler = async (req, res) => {
             `SELECT *
              FROM markets
              WHERE status IN ('open', 'upcoming', 'live')
+               AND COALESCE(event_end_time, startTime) > NOW()
                AND (
                      startTime IS NULL
                      OR status IN ('open', 'upcoming')
@@ -4178,6 +4266,173 @@ const marketsRouteHandler = async (req, res) => {
 };
 
 app.get('/api/markets', marketsRouteHandler);
+
+// ADMIN ROUTE for manual settlement
+app.post('/api/admin/manual-settle', requireAdmin, async (req, res) => {
+    try {
+        const { market_id, outcome } = req.body || {};
+        if (!market_id || !outcome) {
+            return res.status(400).json({ success: false, message: 'Missing market_id or outcome' });
+        }
+
+        const validOutcomes = ['HOME', 'AWAY', 'DRAW', 'YES', 'NO'];
+        if (!validOutcomes.includes(String(outcome).toUpperCase())) {
+            return res.status(400).json({ success: false, message: 'Invalid outcome' });
+        }
+
+        const outcomeUpper = String(outcome).toUpperCase();
+        const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [market_id]);
+        if (!market) {
+            return res.status(404).json({ success: false, message: 'Market not found' });
+        }
+        if (String(market.status).toUpperCase() !== 'SUSPENDED') {
+            return res.status(400).json({ success: false, message: `Market is not suspended (current: ${market.status})` });
+        }
+
+        const bets = await dbAll(
+            `SELECT * FROM transactions WHERE market_id=? AND type='bet' AND status='active'`,
+            [market_id]
+        );
+        if (bets.length === 0) {
+            return res.status(400).json({ success: false, message: 'No active bets to settle' });
+        }
+
+        await run('BEGIN');
+        try {
+            for (const bet of bets) {
+                const isWinner = String(bet.side || '').toUpperCase() === outcomeUpper;
+                if (isWinner) {
+                    const payout = Number((Number(bet.amount || 0) * Number(bet.odds || 0)).toFixed(2));
+                    await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [payout, bet.user_phone]);
+                    await run(`UPDATE transactions SET status='won', settled_amount=? WHERE id=?`, [payout, bet.id]);
+                    await run(`UPDATE bets SET status='won' WHERE market_id=? AND user_phone=? AND status='active'`, [market_id, bet.user_phone]);
+                } else {
+                    await run(`UPDATE transactions SET status='lost', settled_amount=0 WHERE id=?`, [bet.id]);
+                    await run(`UPDATE bets SET status='lost' WHERE market_id=? AND user_phone=? AND status='active'`, [market_id, bet.user_phone]);
+                }
+            }
+            await run(`UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`, [outcomeUpper, market_id]);
+            await run('COMMIT');
+
+            res.json({
+                success: true,
+                message: `Settlement complete for ${market_id}: ${outcomeUpper}`,
+                settled_count: bets.length,
+                outcome: outcomeUpper,
+            });
+        } catch (e) {
+            await run('ROLLBACK');
+            console.error('[admin] Manual settle transaction failed:', e.message);
+            res.status(500).json({ success: false, message: 'Transaction failed: ' + e.message });
+        }
+    } catch (e) {
+        console.error('[admin] Manual settle error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+// ADMIN ROUTE for pending settlements list
+app.get('/api/admin/pending-settlements', requireAdmin, async (req, res) => {
+    try {
+        const { category } = req.query;
+        let where = 'WHERE status = \'SUSPENDED\' AND result IS NULL';
+
+        if (category && ['football', 'gaming', 'esports', 'soccer'].includes(category.toLowerCase())) {
+            const catParam = category.toLowerCase();
+            if (catParam === 'football' || catParam === 'soccer') {
+                where += ` AND (id LIKE 'fb_%' OR LOWER(sport) = 'football' OR LOWER(category) = 'football' OR LOWER(category) = 'soccer')`;
+            } else if (catParam === 'gaming' || catParam === 'esports') {
+                where += ` AND (id LIKE 'sp_%' OR LOWER(sport) = 'gaming' OR LOWER(sport) = 'esports' OR LOWER(category) = 'gaming' OR LOWER(category) = 'esports')`;
+            }
+        }
+
+        const rows = await dbAll(
+            `SELECT id, category, title, sport, home_team, away_team, api_event_id, status, result, createdAt, updatedAt
+             FROM markets ${where}
+             ORDER BY createdAt ASC`,
+            []
+        );
+
+        res.json({ success: true, markets: rows || [] });
+    } catch (e) {
+        console.error('[admin] Pending settlements fetch error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// ADMIN ROUTE for single market details
+app.get('/api/admin/market/:id', requireAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [id]);
+        if (!market) {
+            return res.status(404).json({ success: false, message: 'Market not found' });
+        }
+        res.json({ success: true, market });
+    } catch (e) {
+        console.error('[admin] Market fetch error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// ADMIN ROUTE for manual void
+app.post('/api/admin/void-market', requireAdmin, async (req, res) => {
+    try {
+        const { market_id } = req.body || {};
+        if (!market_id) {
+            return res.status(400).json({ success: false, message: 'Missing market_id' });
+        }
+
+        const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [market_id]);
+        if (!market) {
+            return res.status(404).json({ success: false, message: 'Market not found' });
+        }
+        if (!['SUSPENDED', 'CLOSED'].includes(String(market.status).toUpperCase())) {
+            return res.status(400).json({ success: false, message: `Cannot void market in ${market.status} status` });
+        }
+
+        const stakes = await dbAll(
+            `SELECT * FROM transactions WHERE market_id=? AND type='bet' AND status='active'`,
+            [market_id]
+        );
+        if (stakes.length === 0) {
+            return res.status(400).json({ success: false, message: 'No active stakes to refund' });
+        }
+
+        await run('BEGIN');
+        try {
+            let totalRefunded = 0;
+            for (const stake of stakes) {
+                const refund = Number(Number(stake.amount || 0).toFixed(2));
+                if (refund > 0) {
+                    await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [refund, stake.user_phone]);
+                    await run(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE id=?`, [refund, stake.id]);
+                    await run(`UPDATE bets SET status='cancelled' WHERE market_id=? AND user_phone=? AND status='active'`, [market_id, stake.user_phone]);
+                    totalRefunded += refund;
+                }
+            }
+
+            await run(
+                `UPDATE markets SET status='voided', result=?, settled=1, void_reason=?, void_timestamp=NOW() WHERE id=?`,
+                [String(req.body.reason || 'MANUAL_VOID').toUpperCase(), market_id]
+            );
+
+            await run('COMMIT');
+
+            res.json({
+                success: true,
+                message: `Market ${market_id} voided. Total refunded: ${totalRefunded.toFixed(2)} sKES`,
+                refunded: totalRefunded,
+            });
+        } catch (e) {
+            await run('ROLLBACK');
+            console.error('[admin] Void transaction failed:', e.message);
+            res.status(500).json({ success: false, message: 'Transaction failed: ' + e.message });
+        }
+    } catch (e) {
+        console.error('[admin] Void error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
 
 app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
     const marketId = String(req.params.id || '').trim();
@@ -5069,7 +5324,7 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         });
 
     } catch (e) {
-        console.error("Ã¢ÂÅ’ Place Bet Error:", e.message);
+        console.error("❌ Place Bet Error:", e.message);
         if (e.message === 'INSUFFICIENT_BALANCE') {
             return res.status(400).json({ success: false, message: "Insufficient balance" });
         }
@@ -5143,7 +5398,7 @@ app.post('/api/withdraw', authenticate, async (req, res) => {
 
         emitBalance(userPhone);
         try {
-            await sendPolyMail(process.env.ADMIN_EMAIL, "Ã°Å¸â€™Â° Withdrawal Request", `User ${userPhone} requested withdrawal of sKES ${withdrawAmt}`);
+            await sendPolyMail(process.env.ADMIN_EMAIL, "💰 Withdrawal Request", `User ${userPhone} requested withdrawal of sKES ${withdrawAmt}`);
         } catch (e) { /* ignore mail errors */ }
 
         return res.json({ success: true, message: "Withdrawal request received and is pending approval." });
@@ -5196,13 +5451,18 @@ app.post('/api/mpesa/timeout', async (req, res) => {
 
     try {
         if (ConversationID) {
-            const tx = await dbGet(`SELECT id, user_phone, amount, status FROM transactions WHERE reference = ?`, [ConversationID]);
+            const tx = await dbGet(`SELECT id, user_phone, amount, status, type, internal_id FROM transactions WHERE reference = ?`, [ConversationID]);
             if (tx && tx.status !== 'failed' && tx.status !== 'completed') {
-                const refund = Math.abs(tx.amount || 0);
                 await dbRun(`UPDATE transactions SET status = 'failed' WHERE id = ?`, [tx.id]);
-                await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
-                emitBalance(tx.user_phone);
-                emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: refund, status: 'failed', reference: ConversationID });
+                if (tx.type === 'stay_stk_request' && String(tx.internal_id || '').startsWith('STAY:')) {
+                    const reference = String(tx.internal_id).slice(5);
+                    await dbRun(`UPDATE bookings SET payment_status = 'cancelled' WHERE booking_reference = ? AND payment_status = 'pending'`, [reference]);
+                } else {
+                    const refund = Math.abs(tx.amount || 0);
+                    await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
+                    emitBalance(tx.user_phone);
+                    emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: refund, status: 'failed', reference: ConversationID });
+                }
             }
         }
     } catch (e) {
@@ -5268,7 +5528,7 @@ app.post('/api/stkcallback', async (req, res) => {
     const checkoutID = stk.CheckoutRequestID;
 
     try {
-        const tx = await dbGet(`SELECT id, user_phone, amount, status FROM transactions WHERE reference = ?`, [checkoutID]);
+        const tx = await dbGet(`SELECT id, user_phone, amount, status, type, internal_id FROM transactions WHERE reference = ?`, [checkoutID]);
         if (!tx) {
             console.warn(`M-Pesa STK callback had no matching transaction: ${checkoutID}`);
             return;
@@ -5290,6 +5550,48 @@ app.post('/api/stkcallback', async (req, res) => {
         const creditedAmount = Number.isFinite(paidAmount) && paidAmount > 0 ? paidAmount : Number(tx.amount || 0);
         const mpesaId = metadata.find(i => i.Name === 'MpesaReceiptNumber')?.Value || null;
         const internalTxnId = "PS-" + Math.random().toString(36).substr(2, 7).toUpperCase();
+
+        if (tx.type === 'stay_stk_request' && String(tx.internal_id || '').startsWith('STAY:')) {
+            const reference = String(tx.internal_id).slice(5);
+            let bookingPaid = null;
+            let alreadyPaid = false;
+            await withTransaction(async () => {
+                const booking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? FOR UPDATE`, [reference]);
+                await dbRun(`UPDATE transactions SET status = 'completed', mpesa_receipt = ?, internal_id = ? WHERE id = ? AND status = 'pending'`, [mpesaId, `STAY:${reference}:${internalTxnId}`, tx.id]);
+                if (booking && booking.payment_status === 'paid') { alreadyPaid = true; return; }
+                if (!booking || !Number.isFinite(paidAmount) || !mpesaId || Math.round(Number(booking.total_price)) !== creditedAmount || booking.payment_status === 'cancelled') {
+                    await dbRun(`UPDATE transactions SET status = 'needs_review' WHERE id = ?`, [tx.id]);
+                    return;
+                }
+                const conflict = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND id <> ? AND payment_status = 'paid' AND check_in < ? AND check_out > ? LIMIT 1`, [booking.property_id, booking.id, booking.check_out, booking.check_in]);
+                if (conflict) {
+                    await dbRun(`UPDATE transactions SET status = 'needs_review' WHERE id = ?`, [tx.id]);
+                    return;
+                }
+                const pin = crypto.randomInt(1000, 10000).toString();
+                bookingPaid = await dbGet(`UPDATE bookings SET payment_status = 'paid', check_in_pin = ? WHERE id = ? AND payment_status = 'pending' RETURNING *`, [pin, booking.id]);
+                if (!bookingPaid) {
+                    await dbRun(`UPDATE bookings SET payment_status = 'paid', check_in_pin = ? WHERE id = ? AND payment_status = 'pending'`, [pin, booking.id]);
+                    bookingPaid = await dbGet(`SELECT * FROM bookings WHERE id = ?`, [booking.id]);
+                }
+            });
+            if (bookingPaid) {
+                const property = await dbGet(`SELECT * FROM properties WHERE id = ?`, [bookingPaid.property_id]);
+                notifyStayBooking('booking_paid', {
+                    reference, property_id: bookingPaid.property_id, property_title: property?.title,
+                    guest_name: bookingPaid.guest_name, guest_email: bookingPaid.guest_email, guest_phone: bookingPaid.guest_phone,
+                    check_in: bookingPaid.check_in, check_out: bookingPaid.check_out, total_price: bookingPaid.total_price,
+                    check_in_pin: bookingPaid.check_in_pin, payment_status: 'paid',
+                    google_maps_link: property?.google_maps_link, exact_address: property?.exact_address
+                }).catch(e => console.warn('[stay] paid notification failed:', e.message));
+            } else if (!alreadyPaid) {
+                emitAdminEvent('stayPaymentNeedsReview', { reference, phone: tx.user_phone, amount: creditedAmount, receipt: mpesaId });
+                if (process.env.ADMIN_EMAIL || process.env.EMAIL_USER) await sendPolyMail(process.env.ADMIN_EMAIL || process.env.EMAIL_USER,
+                    `[Stay & Roam] Payment needs review: ${reference}`,
+                    `<p>M-Pesa received KSh ${creditedAmount} (receipt ${mpesaId || 'unknown'}) for booking ${reference}, but the booking could not be safely confirmed. Please review and refund or resolve manually.</p>`);
+            }
+            return;
+        }
 
         await withTransaction(async () => {
             const update = await dbRun(
@@ -5620,7 +5922,7 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
     }
     
     if (!pinValid) {
-        console.warn(`Ã°Å¸Å¡Â« Failed admin PIN attempt from IP: ${req.ip}`);
+        console.warn(`🚫 Failed admin PIN attempt from IP: ${req.ip}`);
         return res.json({ success: false, message: "Invalid PIN. Access denied." });
     }
     
@@ -5655,7 +5957,7 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
     }
     
     if (!password || String(password) !== String(adminPassword)) {
-        console.warn(`Ã°Å¸Å¡Â« Failed admin master login from IP: ${req.ip}`);
+        console.warn(`🚫 Failed admin master login from IP: ${req.ip}`);
         return res.json({ success: false, message: "Invalid server password." });
     }
     
@@ -5773,8 +6075,8 @@ app.post('/api/admin/wire-funds', authenticateAdmin, async (req, res) => {
                 `INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, ?, ?, 'completed', ?)`,
                 [adminPhone, 'admin_wire', -wireAmount, reference]
             );
-             console.log(`Ã°Å¸â€™Â° [WIRE TO TILL] sKES ${wireAmount} by admin ${adminPhone}. Ref: ${reference}`);
-            console.log(`Ã¢Å¡Â Ã¯Â¸Â [MANUAL SETTLEMENT REQUIRED] Logged sKES ${wireAmount} wire to Till 4447028 by admin ${adminPhone}. Ref: ${reference}`);
+             console.log(`💰 [WIRE TO TILL] sKES ${wireAmount} by admin ${adminPhone}. Ref: ${reference}`);
+            console.log(`⚠️ [MANUAL SETTLEMENT REQUIRED] Logged sKES ${wireAmount} wire to Till 4447028 by admin ${adminPhone}. Ref: ${reference}`);
             return res.json({ success: true, message: 'Wire to Till recorded. Please perform the manual transfer via your Merchant Portal.', reference });
         }
 
@@ -5889,7 +6191,7 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
   } catch (err) {
     // FORCE the terminal to show the error
     console.log("------------------------------------");
-    console.error("Ã¢ÂÅ’ APPROVAL CRASHED AT:");
+    console.error("❌ APPROVAL CRASHED AT:");
     console.error(err); 
     console.log("------------------------------------");
 
@@ -5900,7 +6202,7 @@ app.post('/api/admin/approve-withdraw', authenticateAdmin, async (req, res) => {
          await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, tx.user_phone]);
          emitBalance(tx.user_phone);
          emitAdminEvent('mpesaLogUpdate', { phone: tx.user_phone, amount: refund, status: 'failed', reference: tx.reference });
-         console.log(`Ã°Å¸â€™Â° Automatic refund issued for failed withdrawal: sKES ${refund} to ${tx.user_phone}`);
+         console.log(`💰 Automatic refund issued for failed withdrawal: sKES ${refund} to ${tx.user_phone}`);
     }
     
     return res.status(500).json({ 
@@ -5958,11 +6260,11 @@ app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
 
         // Send Email to Creator
         if (market.creator) {
-            createNotification(market.creator, "Ã°Å¸Å¡â‚¬ Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
+            createNotification(market.creator, "🚀 Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
             
             const creator = await dbGet(`SELECT email, name FROM users WHERE phone=?`, [market.creator]);
             if (creator && creator.email) {
-                const subject = `Ã°Å¸Å¡â‚¬ Your Market is LIVE: ${market.title}`;
+                const subject = `🚀 Your Market is LIVE: ${market.title}`;
                 const html = `
                     <div style="font-family: sans-serif; padding: 20px; color: #333;">
                         <h2>Congratulations ${creator.name}!</h2>
@@ -6012,9 +6314,9 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
         });
 
         for (const market of notifyCreators) {
-            createNotification(market.creator, "Ã°Å¸Å¡â‚¬ Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
+            createNotification(market.creator, "🚀 Market Approved!", `Your market "${market.title}" is now LIVE.`, "success");
             if (market.creator_email) {
-                const subject = `Ã°Å¸Å¡â‚¬ Your Market is LIVE: ${market.title}`;
+                const subject = `🚀 Your Market is LIVE: ${market.title}`;
                 const html = `
                     <div style="font-family: sans-serif; padding: 20px; color: #333;">
                         <h2>Congratulations ${market.creator_name || ''}!</h2>
@@ -6074,6 +6376,129 @@ app.post('/api/admin/cancel-market', authenticateAdmin, async (req, res) => {
         res.json({ success: true, ...details });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message || "Cancel failed" });
+    }
+});
+// ADMIN ROUTE for manual settlement with SUSPENDED status check
+app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
+    try {
+        const { marketId, outcome } = req.body || {};
+        if (!marketId || !outcome) {
+            return res.status(400).json({ success: false, message: 'Missing market_id or outcome' });
+        }
+
+        const validOutcomes = ['HOME', 'AWAY', 'DRAW', 'YES', 'NO'];
+        if (!validOutcomes.includes(String(outcome).toUpperCase())) {
+            return res.status(400).json({ success: false, message: 'Invalid outcome' });
+        }
+
+        const outcomeUpper = String(outcome).toUpperCase();
+        const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [marketId]);
+        if (!market) {
+            return res.status(404).json({ success: false, message: 'Market not found' });
+        }
+        if (market.status !== 'SUSPENDED') {
+            return res.status(400).json({ success: false, message: `Market is not suspended (current: ${market.status})` });
+        }
+
+        const bets = await dbAll(
+            `SELECT * FROM transactions WHERE market_id=? AND type='bet' AND status='active'`,
+            [marketId]
+        );
+        if (bets.length === 0) {
+            return res.status(400).json({ success: false, message: 'No active bets to settle' });
+        }
+
+        await run('BEGIN');
+        try {
+            for (const bet of bets) {
+                const isWinner = String(bet.side || '').toUpperCase() === outcomeUpper;
+                if (isWinner) {
+                    const payout = Number((Number(bet.amount || 0) * Number(bet.odds || 0)).toFixed(2));
+                    await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [payout, bet.user_phone]);
+                    await run(`UPDATE transactions SET status='won', settled_amount=? WHERE id=?`, [payout, bet.id]);
+                    await run(`UPDATE bets SET status='won' WHERE market_id=? AND user_phone=? AND status='active'`, [marketId, bet.user_phone]);
+                } else {
+                    await run(`UPDATE transactions SET status='lost', settled_amount=0 WHERE id=?`, [bet.id]);
+                    await run(`UPDATE bets SET status='lost' WHERE market_id=? AND user_phone=? AND status='active'`, [marketId, bet.user_phone]);
+                }
+            }
+            await run(`UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`, [outcomeUpper, marketId]);
+            await run('COMMIT');
+
+            res.json({
+                success: true,
+                message: `Settlement complete for ${marketId}: ${outcomeUpper}`,
+                settled_count: bets.length,
+                outcome: outcomeUpper,
+            });
+        } catch (e) {
+            await run('ROLLBACK');
+            console.error('[admin] Manual settle transaction failed:', e.message);
+            res.status(500).json({ success: false, message: 'Transaction failed: ' + e.message });
+        }
+    } catch (e) {
+        console.error('[admin] Manual settle error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// ADMIN ROUTE for manual void — refunds 100% of all stakes
+app.post('/api/admin/void-market', authenticateAdmin, async (req, res) => {
+    try {
+        const { marketId } = req.body || {};
+        if (!marketId) {
+            return res.status(400).json({ success: false, message: 'Missing market_id' });
+        }
+
+        const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [marketId]);
+        if (!market) {
+            return res.status(404).json({ success: false, message: 'Market not found' });
+        }
+        if (!['SUSPENDED', 'CLOSED'].includes(String(market.status).toUpperCase())) {
+            return res.status(400).json({ success: false, message: `Cannot void market in ${market.status} status` });
+        }
+
+        const stakes = await dbAll(
+            `SELECT * FROM transactions WHERE market_id=? AND type='bet' AND status='active'`,
+            [marketId]
+        );
+        if (stakes.length === 0) {
+            return res.status(400).json({ success: false, message: 'No active stakes to refund' });
+        }
+
+        await run('BEGIN');
+        try {
+            let totalRefunded = 0;
+            for (const stake of stakes) {
+                const refund = Number(Number(stake.amount || 0).toFixed(2));
+                if (refund > 0) {
+                    await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [refund, stake.user_phone]);
+                    await run(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE id=?`, [refund, stake.id]);
+                    await run(`UPDATE bets SET status='cancelled' WHERE market_id=? AND user_phone=? AND status='active'`, [marketId, stake.user_phone]);
+                    totalRefunded += refund;
+                }
+            }
+
+            await run(
+                `UPDATE markets SET status='voided', result=?, settled=1, void_reason=?, void_timestamp=NOW() WHERE id=?`,
+                [String(req.body.reason || 'MANUAL_VOID').toUpperCase(), marketId]
+            );
+
+            await run('COMMIT');
+
+            res.json({
+                success: true,
+                message: `Market ${marketId} voided. Total refunded: ${totalRefunded.toFixed(2)} sKES`,
+                refunded: totalRefunded,
+            });
+        } catch (e) {
+            await run('ROLLBACK');
+            console.error('[admin] Void transaction failed:', e.message);
+            res.status(500).json({ success: false, message: 'Transaction failed: ' + e.message });
+        }
+    } catch (e) {
+        console.error('[admin] Void error:', e);
+        res.status(500).json({ success: false, message: e.message });
     }
 });
 
@@ -6289,7 +6714,7 @@ app.post('/api/admin/settle-backlog', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Clean avatar upload Ã¢â‚¬â€ uses disk storage for reliability
+// Clean avatar upload — uses disk storage for reliability
 const avatarStorage = multer.diskStorage({
     destination: (req, file, cb) => {
         fs.mkdirSync(uploadPath, { recursive: true });
@@ -6387,7 +6812,7 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
         `);
         res.json({ success: true, markets });
     } catch (e) {
-        console.error("Ã¢ÂÅ’ Error fetching pending markets:", e);
+        console.error("❌ Error fetching pending markets:", e);
         res.status(500).json({ success: false, message: "Database error fetching markets" });
     }
 });
@@ -6467,7 +6892,7 @@ app.post('/api/admin/users/manage', authenticateAdmin, async (req, res) => {
         } else if (action === 'upgrade') {
             const expiry = new Date(Date.now() + (60 * 24 * 60 * 60 * 1000));
             await dbRun("UPDATE users SET is_upgraded = 1, upgrade_expiry = ? WHERE phone = ?", [expiry.toISOString(), norm]);
-            subject = "Ã°Å¸Å¡â‚¬ Congratulations: You are now ELITE!";
+            subject = "🚀 Congratulations: You are now ELITE!";
             emailBody = `Your account has been upgraded to the Elite Package for 60 days! Enjoy 10% boosted odds, priority withdrawals, and exclusive admin access. <br><br><b>Your Invite Code:</b> ${user.referral_code}`;
         } else if (action === 'revoke') {
             await dbRun("UPDATE users SET is_upgraded = 0, upgrade_expiry = NULL WHERE phone = ?", [norm]);
@@ -6564,7 +6989,7 @@ io.use((socket, next) => {
             socket.user = { phone: normalizePhone(decoded.phone) };
             next();
         } catch (err) {
-            console.error("Ã¢ÂÅ’ Socket Auth Failed:", err.message);
+            console.error("❌ Socket Auth Failed:", err.message);
             next(new Error("Auth Error"));
         }
     }).catch(() => next(new Error("Auth Error")));
@@ -6630,7 +7055,7 @@ app.get('/api/football/details/:id', async (req, res) => {
                     image: article.urlToImage
                 }));
             } catch (newsError) {
-                console.warn('Ã¢Å¡Â Ã¯Â¸Â Match news fetch failed:', newsError.response?.data || newsError.message);
+                console.warn('⚠️ Match news fetch failed:', newsError.response?.data || newsError.message);
             }
         }
 
@@ -6672,7 +7097,7 @@ app.get('/api/football/details/:id', async (req, res) => {
             relatedNews
         });
     } catch (error) {
-        console.error("Ã¢ÂÅ’ API-Football Error:", error.response?.data || error.message);
+        console.error("❌ API-Football Error:", error.response?.data || error.message);
         res.status(error.response?.status || 500).json({ error: "Failed to fetch match details" });
     }
 });
@@ -6683,7 +7108,7 @@ app.get('/api/news/everything', async (req, res) => {
         emitMarkets();
         res.json({ articles: processedMarkets });
     } catch (error) {
-        console.error("Ã¢ÂÅ’ Aggregator Error:", error.response?.data || error.message);
+        console.error("❌ Aggregator Error:", error.response?.data || error.message);
         res.status(500).json({ error: "Failed to scrape the global grid." });
     }
 });
@@ -6826,16 +7251,7 @@ try {
     if (!fs.existsSync(stayUploadPath)) fs.mkdirSync(stayUploadPath, { recursive: true });
 } catch (e) { console.warn('[stay] upload dir init failed:', e.message); }
 const stayUpload = multer({
-    storage: multer.diskStorage({
-        destination: (req, file, cb) => {
-            try { fs.mkdirSync(stayUploadPath, { recursive: true }); } catch (e) { /* ignore */ }
-            cb(null, stayUploadPath);
-        },
-        filename: (req, file, cb) => {
-            const unique = Date.now() + '-' + Math.round(Math.random() * 1E9);
-            cb(null, 'stay-' + unique + path.extname(file.originalname || '.jpg'));
-        },
-    }),
+    storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024, files: 15 },
     fileFilter: (req, file, cb) => {
         const ext = path.extname(file.originalname || '').toLowerCase();
@@ -6846,29 +7262,50 @@ const stayUpload = multer({
 });
 
 // Multi-channel booking confirmation: SMS (Africa's Talking) + HTML email
-// (Nodemailer) + live socket event. All fire-and-forget; failures only log.
+// (Nodemailer, guest receipt + admin alert) + live socket toast. Fire-and-forget.
 const notifyStayBooking = async (type, b) => {
     const firstName = String(b.guest_name || 'Guest').trim().split(/\s+/)[0] || 'Guest';
-    const link = `${PUBLIC_SITE_URL}/stay/booking/${b.reference}`;
+    const link = `${PUBLIC_SITE_URL}/stay.html?booking=${encodeURIComponent(b.reference)}`;
     const isPaid = type === 'booking_paid' || b.payment_status === 'paid';
+    const isCancelled = type === 'booking_status' && b.payment_status === 'cancelled';
+    const pinLine = b.check_in_pin ? `Check-in PIN: ${b.check_in_pin}` : '';
     try {
-        const smsMsg = `Hi ${firstName}, your Stay & Roam booking #${b.reference} for ${b.property_title || 'your stay'} is ${isPaid ? 'confirmed & paid' : 'received'}! ${isPaid ? `View location & details: ${link}` : `Total KSh ${Number(b.total_price || 0).toLocaleString()}.`}`;
+        const smsMsg = isCancelled
+            ? `Hi ${firstName}, Stay & Roam booking ${b.reference} was cancelled. Contact PolySoko support about any payment refund.`
+            : isPaid
+            ? `Hi ${firstName}, Stay & Roam #${b.reference} CONFIRMED for ${b.property_title || 'your stay'}. ${pinLine}. Location: ${link}`
+            : `Hi ${firstName}, Stay & Roam #${b.reference} for ${b.property_title || 'your stay'} received. Total KSh ${Number(b.total_price || 0).toLocaleString()}. Pay via M-Pesa to confirm.`;
         const toPhone = formatPhone(b.guest_phone);
         if (toPhone) await sendSms({ to: [toPhone], message: smsMsg });
     } catch (e) { console.warn('[stay] sms failed:', e.message); }
     try {
         if (b.guest_email) {
-            const paidNote = isPaid
-                ? `<p style="color:#00c96b;font-weight:bold;">Payment confirmed. Your exact location is unlocked:</p><p><a href="${link}">${link}</a>${b.google_maps_link ? `<br><a href="${b.google_maps_link}">Open in Google Maps</a>` : ''}</p>${b.exact_address ? `<p><b>Address:</b> ${b.exact_address}</p>` : ''}`
+            const paidNote = isCancelled
+                ? `<p>Your booking was cancelled. If you already paid, contact PolySoko support to arrange a refund.</p>`
+                : isPaid
+                ? `<p style="color:#00c96b;font-weight:bold;">Payment confirmed. Your exact location is unlocked:</p><p><a href="${link}">${link}</a>${b.google_maps_link ? `<br><a href="${b.google_maps_link}">Open in Google Maps</a>` : ''}</p>${b.exact_address ? `<p><b>Address:</b> ${b.exact_address}</p>` : ''}${b.check_in_pin ? `<p><b>Check-in PIN:</b> <span style="font-size:1.4rem;letter-spacing:.2em;">${b.check_in_pin}</span><br><small>Show this at check-in.</small></p>` : ''}`
                 : `<p>Pay via M-Pesa to unlock the exact location. Your reference: <b>${b.reference}</b></p>`;
             await sendPolyMail(b.guest_email, `Stay & Roam booking ${b.reference}`,
                 `<div style="font-family:sans-serif;max-width:520px;"><h2>Hi ${firstName},</h2>` +
-                `<p>Your Stay & Roam booking <b>#${b.reference}</b> for <b>${b.property_title || 'your stay'}</b> is ${isPaid ? 'confirmed' : 'received'}.</p>` +
-                `<p><b>Check-in:</b> ${b.check_in}<br><b>Check-out:</b> ${b.check_out}<br><b>Total:</b> KSh ${Number(b.total_price || 0).toLocaleString()}</p>` +
+                `<p>Your Stay & Roam booking <b>#${b.reference}</b> for <b>${b.property_title || 'your stay'}</b> is ${isCancelled ? 'cancelled' : isPaid ? 'confirmed' : 'received'}.</p>` +
+                `<p><b>Check-in:</b> ${b.check_in}<br><b>Check-out:</b> ${b.check_out}<br><b>Nights:</b> ${b.nights || ''}<br><b>Total:</b> KSh ${Number(b.total_price || 0).toLocaleString()}</p>` +
                 paidNote + `<p style="color:#888;font-size:12px;">Host contact: ${process.env.STAY_HOST_CONTACT || process.env.ADMIN_EMAIL || 'via PolySoko support'}.</p></div>`);
         }
     } catch (e) { console.warn('[stay] email failed:', e.message); }
     try {
+        const adminTo = process.env.ADMIN_EMAIL || process.env.EMAIL_USER;
+        if (adminTo && (type === 'booking_paid' || type === 'booking_created')) {
+            await sendPolyMail(adminTo, `[Stay&Roam] ${isPaid ? 'PAID' : 'New'} booking ${b.reference} — KSh ${Number(b.total_price || 0).toLocaleString()}`,
+                `<div style="font-family:sans-serif;"><h3>Stay & Roam ${isPaid ? 'payment confirmed' : 'new booking'}</h3>` +
+                `<p><b>Guest:</b> ${b.guest_name} | ${b.guest_phone} | ${b.guest_email}<br>` +
+                `<b>Property:</b> ${b.property_title} (#${b.property_id})<br>` +
+                `<b>Dates:</b> ${b.check_in} → ${b.check_out}<br>` +
+                `<b>Amount:</b> KSh ${Number(b.total_price || 0).toLocaleString()}<br>` +
+                `<b>Reference:</b> ${b.reference}</p></div>`);
+        }
+    } catch (e) { console.warn('[stay] admin email failed:', e.message); }
+    try {
+        io.emit('stay_booking', { reference: b.reference, property_id: b.property_id, status: b.payment_status || type });
         emitAdminEvent('booking_confirmed', { reference: b.reference, property_id: b.property_id, status: b.payment_status || type });
         if (b.guest_phone) {
             try { await createNotification(normalizePhone(b.guest_phone), 'Stay & Roam booking', `#${b.reference} ${isPaid ? 'confirmed & paid' : 'received'}.`, isPaid ? 'success' : 'info'); }
@@ -6877,23 +7314,60 @@ const notifyStayBooking = async (type, b) => {
     } catch (e) { console.warn('[stay] socket notify failed:', e.message); }
 };
 
+async function startStayPayment({ booking }) {
+    if (!MPESA_STK_SHORTCODE || !MPESA_STK_PASSKEY || !MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET || !MPESA_STK_PARTY_B) {
+        throw Object.assign(new Error('M-Pesa STK is not configured'), { status: 503 });
+    }
+    const phone = normalizePhone(booking.guest_phone);
+    if (!phone) throw Object.assign(new Error('Enter a valid M-Pesa phone number'), { status: 400 });
+    const accessToken = await getMpesaAccessToken();
+    const timestamp = mpesaTimestamp();
+    const password = Buffer.from(`${MPESA_STK_SHORTCODE}${MPESA_STK_PASSKEY}${timestamp}`).toString('base64');
+    const amount = Math.round(Number(booking.total_price));
+    if (!Number.isFinite(amount) || amount < 1) throw Object.assign(new Error('Invalid booking amount'), { status: 400 });
+    const response = await axios.post(`${MPESA_BASE_URL}/mpesa/stkpush/v1/processrequest`, {
+        BusinessShortCode: MPESA_STK_SHORTCODE, Password: password, Timestamp: timestamp,
+        TransactionType: MPESA_STK_TRANSACTION_TYPE, Amount: amount, PartyA: phone,
+        PartyB: MPESA_STK_PARTY_B, PhoneNumber: phone, CallBackURL: STK_CALLBACK_URL,
+        AccountReference: booking.booking_reference, TransactionDesc: 'Stay booking'
+    }, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!response.data?.CheckoutRequestID) throw new Error(response.data?.ResponseDescription || 'M-Pesa did not return a checkout request');
+    await dbRun(`INSERT INTO transactions (user_phone, type, amount, reference, internal_id, status) VALUES (?, 'stay_stk_request', ?, ?, ?, 'pending')`,
+        [phone, amount, response.data.CheckoutRequestID, `STAY:${booking.booking_reference}`]);
+    return { checkoutRequestId: response.data.CheckoutRequestID, message: response.data.CustomerMessage || 'Check your phone to complete payment' };
+}
+
 let stayMounted = false;
 try {
     if (stayRoutes && stayRoutes.createStayApiRouter) {
-        app.use('/api', stayRoutes.createStayApiRouter({ dbAll, dbGet, dbRun, authenticateAdmin, notifyStayBooking }));
+        app.use('/api', stayRoutes.createStayApiRouter({ dbAll, dbGet, dbRun, withTransaction, authenticateAdmin, notifyStayBooking, startStayPayment }));
         stayMounted = true;
         console.log('🏠 Stay & Roam API mounted: /api/stays, /api/admin/bookings, /api/admin/properties, /api/admin/stays/upload');
-        // Admin multi-image upload (up to 15 photos). Returns web paths for the images JSON column.
+        // Admin multi-image upload (up to 15 photos, sharp-compressed server-side).
+        // Returns web paths for the images JSON column.
         app.post('/api/admin/stays/upload', authenticateAdmin, (req, res) => {
-            stayUpload.array('photos', 15)(req, res, (err) => {
+            stayUpload.array('photos', 15)(req, res, async (err) => {
                 if (err) {
                     const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Each photo must be 5MB or smaller'
                         : err.code === 'LIMIT_FILE_COUNT' ? 'Maximum 15 photos per upload'
                         : (err.message || 'Upload failed');
                     return res.status(400).json({ success: false, message: msg });
                 }
-                const files = (req.files || []).map((f) => `/uploads/stays/${f.filename}`);
-                res.json({ success: true, files });
+                try {
+                    const { default: sharp } = await import('sharp');
+                    const files = [];
+                    for (const f of (req.files || []).slice(0, 15)) {
+                        const name = 'stay-' + Date.now() + '-' + Math.round(Math.random() * 1E9) + '.webp';
+                        const out = path.join(stayUploadPath, name);
+                        await sharp(f.buffer).rotate().resize({ width: 1280, withoutEnlargement: true }).webp({ quality: 72 }).toFile(out);
+                        files.push(`/uploads/stays/${name}`);
+                    }
+                    if (!files.length) return res.status(400).json({ success: false, message: 'No photos received' });
+                    res.json({ success: true, files });
+                } catch (e) {
+                    console.error('[stay] compress failed:', e.message);
+                    res.status(500).json({ success: false, message: 'Image compression failed' });
+                }
             });
         });
         console.log('🏠 Stay & Roam upload mounted: POST /api/admin/stays/upload (15 photos max)');
@@ -6936,9 +7410,9 @@ async function sendPolysokoPush(phoneNumber, amount, mpesaId, txnId) {
             // from: "POLYSOKO" 
         });
 
-        console.log(`Ã¢Å“â€¦ Real SMS Sent to ${phoneNumber}:`, result.SMSMessageData.Recipients[0].status);
+        console.log(`✅ Real SMS Sent to ${phoneNumber}:`, result.SMSMessageData.Recipients[0].status);
     } catch (error) {
-        console.error("Ã¢ÂÅ’ Africa's Talking Error:", error);
+        console.error("❌ Africa's Talking Error:", error);
     }
 }
 // --- STARTUP ---
@@ -6955,7 +7429,7 @@ const forceVerifyLegacyUsers = async () => {
     const legacyUsers = await dbAll("SELECT id, name, email FROM users WHERE status = 'unverified' AND verification_token IS NULL");
     if (legacyUsers.length === 0) return;
     
-    console.log(`Ã°Å¸â€œÂ§ Sending legacy verification to ${legacyUsers.length} users...`);
+    console.log(`📧 Sending legacy verification to ${legacyUsers.length} users...`);
     for (const user of legacyUsers) {
         const token = crypto.randomBytes(32).toString('hex');
         await dbRun("UPDATE users SET verification_token = ? WHERE id = ?", [token, user.id]);
@@ -7055,7 +7529,7 @@ const startServer = async () => {
     };
 
     server.listen(PORT, '0.0.0.0', async () => {
-        console.log(`Ã°Å¸Å¡â‚¬ Terminal Online on Port ${PORT}`);
+        console.log(`🚀 Terminal Online on Port ${PORT}`);
         // Socket is already accepting connections; safe to touch the DB now.
         runStartupRepairs();
         // Proves every deploy reads the SAME database and surfaces the two
@@ -7090,15 +7564,15 @@ const startServer = async () => {
             // Auto-expire sweep every 10 minutes (SQL-only, no external API calls).
             setInterval(closeExpiredMarkets, 600000);
             // Batch settlement worker over 'suspended' markets every 30 minutes.
-            setInterval(() => {
+            cron.schedule('*/30 * * * *', () => {
                 runSuspendedMarketSettlement().catch(e => console.error("Suspended-market settlement failed:", e.message));
-            }, 1800000);
+            });
         } else {
             console.log('SKIP_STARTUP_SYNC enabled; background market sync is disabled for this run.');
         }
         runSafely('forceVerifyLegacyUsers', forceVerifyLegacyUsers);
         if (process.env.EXIT_AFTER_STARTUP === '1' || process.env.EXIT_AFTER_STARTUP === 'true') {
-            console.log('EXIT_AFTER_STARTUP set Ã¢â‚¬â€ exiting process so you can run in VS Code.');
+            console.log('EXIT_AFTER_STARTUP set — exiting process so you can run in VS Code.');
             setTimeout(() => process.exit(0), 250);
         }
     });

@@ -1,297 +1,290 @@
 const express = require('express');
+const crypto = require('crypto');
+const cron = require('node-cron');
 
-/* Stay & Roam isolated module. Safe migrations only: CREATE TABLE IF NOT EXISTS
-   plus idempotent ADD COLUMN backfills. No DROP/ALTER-DROP/DELETE anywhere. */
-const STAY_TABLE_DDL = [
-  'CREATE TABLE IF NOT EXISTS properties (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT, location TEXT NOT NULL, price_per_night REAL NOT NULL, max_guests INTEGER DEFAULT 2, amenities TEXT, images TEXT, is_active INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
-  'CREATE TABLE IF NOT EXISTS bookings (id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, user_id INTEGER NULL, guest_name TEXT NOT NULL, guest_email TEXT NOT NULL, guest_phone TEXT NOT NULL, check_in DATE NOT NULL, check_out DATE NOT NULL, total_price REAL NOT NULL, booking_reference TEXT UNIQUE NOT NULL, payment_status TEXT DEFAULT \'pending\', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)',
-];
+/* Stay & Roam router (PostgreSQL-safe). Mounted at /api by server.js.
+ * SAFE migrations only: CREATE TABLE IF NOT EXISTS + ADD COLUMN. No drops. */
 
-/* Privacy/location extension columns. Applied idempotently via ensureStayTables. */
-const STAY_PROPERTY_GEO_COLUMNS = [
-  { name: 'latitude', ddl: 'REAL' },
-  { name: 'longitude', ddl: 'REAL' },
-  { name: 'google_maps_link', ddl: 'TEXT' },
-  { name: 'exact_address', ddl: 'TEXT' },
-];
-
-const GEO_COLS = ['latitude', 'longitude', 'google_maps_link', 'exact_address'];
-
-const SEED_PROPERTIES = [
-  { title: 'Nyali Beachfront Apartment', description: '2BR ocean-view apartment, 3 min walk to City Mall Nyali. Fast WiFi, backup generator.', location: 'Nyali, Mombasa', price_per_night: 6500, max_guests: 5, amenities: '["WiFi","AC","Pool","Generator","Parking","Kitchen","Smart TV"]', images: '["https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=800&q=80"]', is_active: 1 },
-  { title: 'Kilimani Executive Studio', description: 'Modern studio in Kilimani with high-speed WiFi and 24/7 security.', location: 'Kilimani, Nairobi', price_per_night: 4500, max_guests: 2, amenities: '["WiFi","AC","Generator","Parking","Kitchen","Workspace"]', images: '["https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?w=800&q=80"]', is_active: 1 },
-  { title: 'Diani Palm Villa', description: 'Private 3BR villa with plunge pool, 5 min to Diani Beach.', location: 'Diani, Kwale', price_per_night: 12000, max_guests: 8, amenities: '["WiFi","Pool","Parking","Kitchen","Chef","Garden","Beach Access"]', images: '["https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=800&q=80"]', is_active: 1 },
-];
+function parseArr(v, cap) {
+  let a = [];
+  try {
+    if (Array.isArray(v)) a = v;
+    else if (typeof v === 'string' && v.trim()) a = JSON.parse(v);
+  } catch (e) { a = []; }
+  if (!Array.isArray(a)) a = [];
+  return cap ? a.slice(0, cap) : a;
+}
+function pubProp(r) {
+  if (!r) return null;
+  const o = { ...r };
+  delete o.latitude; delete o.longitude;
+  delete o.google_maps_link; delete o.exact_address;
+  o.amenities = parseArr(r.amenities, 50);
+  o.images = parseArr(r.images, 15);
+  return o;
+}
+function fullProp(r) {
+  if (!r) return null;
+  const o = { ...r };
+  o.amenities = parseArr(r.amenities, 50);
+  o.images = parseArr(r.images, 15);
+  return o;
+}
+function pubBook(b) {
+  if (!b) return null;
+  const o = {
+    booking_reference: b.booking_reference,
+    payment_status: b.payment_status,
+    check_in: b.check_in,
+    check_out: b.check_out,
+    total_price: b.total_price
+  };
+  if (String(b.payment_status) === 'paid') o.check_in_pin = b.check_in_pin;
+  return o;
+}
+function genRef() { return 'STAY-' + crypto.randomBytes(3).toString('hex').toUpperCase(); }
+function genPin() {
+  try { return String(crypto.randomInt(1000, 10000)); }
+  catch (e) { return String(1000 + Math.floor(Math.random() * 9000)); }
+}
+function validDate(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ''))) return false;
+  const d = new Date(String(s) + 'T00:00:00Z');
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === String(s);
+}
+function nights(ci, co) {
+  return Math.round((new Date(co + 'T00:00:00Z') - new Date(ci + 'T00:00:00Z')) / 86400000);
+}
 
 async function ensureStayTables(deps) {
-  const dbRun = deps.dbRun;
-  const dbGet = deps.dbGet;
-  const dbAll = deps.dbAll;
-  for (const ddl of STAY_TABLE_DDL) { await dbRun(ddl); }
-  // Safe additive migration: privacy/location columns. Idempotent on both
-  // SQLite (PRAGMA check) and Postgres (duplicate-column tolerant catch).
-  for (const col of STAY_PROPERTY_GEO_COLUMNS) {
-    try {
-      let exists = false;
-      if (typeof dbAll === 'function') {
-        try {
-          const info = await dbAll('PRAGMA table_info(properties)');
-          if (Array.isArray(info)) exists = info.some(function (c) { return c && c.name === col.name; });
-        } catch (e) { exists = false; }
-      }
-      if (!exists) await dbRun('ALTER TABLE properties ADD COLUMN ' + col.name + ' ' + col.ddl);
-    } catch (e) {
-      const msg = String((e && e.message) || '');
-      if (!/duplicate|already exists/i.test(msg)) console.warn('[stay] geo column skipped:', col.name, msg);
+  const { dbRun, dbAll } = deps;
+  await dbRun(`CREATE TABLE IF NOT EXISTS properties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL, description TEXT DEFAULT '', location TEXT NOT NULL,
+    price_per_night REAL NOT NULL DEFAULT 0, max_guests INTEGER DEFAULT 2,
+    amenities TEXT DEFAULT '[]', images TEXT DEFAULT '[]',
+    latitude REAL, longitude REAL, google_maps_link TEXT, exact_address TEXT,
+    is_active INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await dbRun(`CREATE TABLE IF NOT EXISTS bookings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL, user_id INTEGER,
+    guest_name TEXT NOT NULL, guest_email TEXT NOT NULL, guest_phone TEXT NOT NULL,
+    check_in TEXT NOT NULL, check_out TEXT NOT NULL, total_price REAL NOT NULL DEFAULT 0,
+    booking_reference TEXT UNIQUE NOT NULL, payment_status TEXT DEFAULT 'pending',
+    check_in_pin TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+  const cols = async (t) => { try { return await dbAll(`PRAGMA table_info(${t})`); } catch (e) { return []; } };
+  const addCol = async (t, n, d) => {
+    const c = await cols(t);
+    if (!c.some((x) => String(x.name).toLowerCase() === n)) {
+      try { await dbRun(`ALTER TABLE ${t} ADD COLUMN ${n} ${d}`); }
+      catch (e) { if (!/duplicate|already exists|42701/i.test(e.message || '')) throw e; }
     }
-  }
-  try {
-    const row = await dbGet('SELECT COUNT(*) AS count FROM properties');
-    const count = Number((row && row.count) || 0);
-    if (count === 0) {
-      for (const p of SEED_PROPERTIES) {
-        await dbRun('INSERT INTO properties (title, description, location, price_per_night, max_guests, amenities, images, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [p.title, p.description, p.location, p.price_per_night, p.max_guests, p.amenities, p.images, p.is_active]);
-      }
-      console.log('Stay & Roam: seeded 3 sample properties (table was empty).');
-    }
-  } catch (e) { console.warn('[stay] seed check skipped:', e.message); }
-  console.log('Stay & Roam tables ready (properties, bookings).');
+  };
+  const pcols = [['description',`TEXT DEFAULT ''`],['location','TEXT'],['price_per_night','REAL DEFAULT 0'],['max_guests','INTEGER DEFAULT 2'],['amenities',`TEXT DEFAULT '[]'`],['images',`TEXT DEFAULT '[]'`],['latitude','REAL'],['longitude','REAL'],['google_maps_link','TEXT'],['exact_address','TEXT'],['is_active','INTEGER DEFAULT 1']];
+  for (const [n, d] of pcols) await addCol('properties', n, d);
+  const bcols = [['user_id','INTEGER'],['guest_name','TEXT'],['guest_email','TEXT'],['guest_phone','TEXT'],['check_in','TEXT'],['check_out','TEXT'],['total_price','REAL DEFAULT 0'],['booking_reference','TEXT'],['payment_status',`TEXT DEFAULT 'pending'`],['check_in_pin','TEXT']];
+  for (const [n, d] of bcols) await addCol('bookings', n, d);
+  // Keep legacy markets readable. The market lifecycle migration is deliberately
+  // additive; it must not invent closing times or constrain old rows at boot.
+  const idx = ['CREATE INDEX IF NOT EXISTS idx_bk_prop ON bookings(property_id, check_in, check_out)','CREATE INDEX IF NOT EXISTS idx_bk_ref ON bookings(booking_reference)','CREATE INDEX IF NOT EXISTS idx_bk_st ON bookings(payment_status)','CREATE INDEX IF NOT EXISTS idx_pr_act ON properties(is_active)','CREATE INDEX IF NOT EXISTS idx_mk_end ON markets(event_end_time)'];
+  for (const q of idx) { try { await dbRun(q); } catch (e) {} }
 }
 
-function safeJsonArray(raw, fallback) {
-  const fb = fallback || [];
-  if (Array.isArray(raw)) return raw;
-  if (!raw) return fb;
-  try { const v = JSON.parse(raw); return Array.isArray(v) ? v : fb; }
-  catch (e) { return String(raw).split(',').map(function (s) { return s.trim(); }).filter(Boolean); }
+let expiryOn = false;
+function startExpiry(deps) {
+  if (expiryOn) return;
+  expiryOn = true;
+  const sweep = async () => {
+    try { await deps.dbRun(`UPDATE bookings SET payment_status='cancelled' WHERE payment_status='pending' AND created_at < NOW() - INTERVAL '15 minutes'`); }
+    catch (e) { console.warn('[stay] expiry sweep failed:', e.message); }
+  };
+  sweep();
+  cron.schedule('*/5 * * * *', sweep);
 }
 
-function serializeProperty(row) {
-  if (!row) return null;
-  const imgs = safeJsonArray(row.images).slice(0, 15);
-  const out = { id: row.id, title: row.title, description: row.description, location: row.location, price_per_night: Number(row.price_per_night || 0), max_guests: Number(row.max_guests || 2), amenities: safeJsonArray(row.amenities), images: imgs, is_active: Number(row.is_active) === 1 ? 1 : 0, created_at: row.created_at };
-  if (row.latitude != null && row.latitude !== '') out.latitude = Number(row.latitude);
-  if (row.longitude != null && row.longitude !== '') out.longitude = Number(row.longitude);
-  if (row.google_maps_link) out.google_maps_link = row.google_maps_link;
-  if (row.exact_address) out.exact_address = row.exact_address;
-  return out;
-}
-
-function genReference() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  return 'STAY-' + code;
-}
-
-function nightsBetween(checkIn, checkOut) {
-  const a = new Date(checkIn + 'T00:00:00Z');
-  const b = new Date(checkOut + 'T00:00:00Z');
-  return Math.round((b - a) / 86400000);
-}
-
-function publicProperty(row) {
-  const base = serializeProperty(row);
-  if (!base) return null;
-  for (const k of GEO_COLS) delete base[k];
-  return base;
-}
-
-function paidBookingView(booking, property) {
-  const prop = serializeProperty(property);
-  return { booking: booking, property: prop };
-}
-
-function stayNotify(deps, type, payload) {
-  try {
-    if (deps && typeof deps.notifyStayBooking === 'function') {
-      Promise.resolve(deps.notifyStayBooking(type, payload)).catch(function (e) {
-        console.warn('[stay] notify failed:', e.message);
-      });
-    }
-  } catch (e) { console.warn('[stay] notify hook error:', e.message); }
-}
-
-function stayAdminFallback(req, res) { return res.status(500).json({ success: false, message: 'Admin auth missing' }); }
-
-module.exports.STAY_TABLE_DDL = STAY_TABLE_DDL;
-module.exports.STAY_PROPERTY_GEO_COLUMNS = STAY_PROPERTY_GEO_COLUMNS;
-module.exports.ensureStayTables = ensureStayTables;
-module.exports.safeJsonArray = safeJsonArray;
-module.exports.serializeProperty = serializeProperty;
-module.exports.genReference = genReference;
-module.exports.nightsBetween = nightsBetween;
 
 function createStayApiRouter(deps) {
   const router = express.Router();
-  const dbAll = deps.dbAll;
-  const dbGet = deps.dbGet;
-  const dbRun = deps.dbRun;
-  const requireAdmin = deps.authenticateAdmin || stayAdminFallback;
-
-  router.get('/stays', async function (req, res) {
+  const { dbAll, dbGet, dbRun, authenticateAdmin, notifyStayBooking } = deps;
+  const say = (type, payload) => {
     try {
-      const rows = await dbAll('SELECT * FROM properties WHERE is_active = 1 ORDER BY created_at DESC, id DESC');
-      res.json({ success: true, stays: (rows || []).map(publicProperty) });
+      if (typeof notifyStayBooking === 'function')
+        Promise.resolve(notifyStayBooking(type, payload)).catch((e) => console.warn('[stay] notify:', e.message));
+    } catch (e) { console.warn('[stay] notify:', e.message); }
+  };
+  startExpiry(deps);
+
+  router.get('/stays', async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 60, 120);
+      const rows = await dbAll(`SELECT * FROM properties WHERE is_active = 1 ORDER BY created_at DESC LIMIT ?`, [limit]);
+      res.json({ success: true, stays: (rows || []).map(pubProp) });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not load stays' }); }
   });
-
-  // Paid-only reveal: exact address/coords/map link ONLY when booking is paid.
-  // NOTE: this + availability are declared BEFORE /stays/:id so Express
-  // never treats "booking"/"availability" as a property id.
-  router.get('/stays/booking/:reference', async function (req, res) {
+  router.get('/stays/count', async (_req, res) => {
     try {
-      const ref = String(req.params.reference || '').trim();
-      if (!ref) return res.status(400).json({ success: false, message: 'reference required' });
-      const booking = await dbGet('SELECT * FROM bookings WHERE booking_reference = ? LIMIT 1', [ref]);
-      if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-      if (String(booking.payment_status || '').toLowerCase() !== 'paid') {
-        return res.status(403).json({ success: false, message: 'Location unlocks after payment is confirmed.' });
-      }
-      const property = await dbGet('SELECT * FROM properties WHERE id = ? LIMIT 1', [booking.property_id]);
-      res.json({ success: true, booking: booking, property: serializeProperty(property) });
-    } catch (e) { res.status(500).json({ success: false, message: 'Could not load booking' }); }
+      const r = await dbGet(`SELECT COUNT(*) AS c FROM properties WHERE is_active = 1`);
+      res.json({ success: true, count: Number(r && r.c) || 0 });
+    } catch (e) { res.status(500).json({ success: false, message: 'Count failed' }); }
   });
-
-  // Availability probe: PAID bookings only block a range.
-  router.get('/stays/:id/availability', async function (req, res) {
+  router.get('/stays/booking/:reference', async (req, res) => {
+    try {
+      const b = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? LIMIT 1`, [String(req.params.reference || '').trim()]);
+      if (!b) return res.status(404).json({ success: false, message: 'Booking not found' });
+      const prop = await dbGet(`SELECT * FROM properties WHERE id = ? LIMIT 1`, [b.property_id]);
+      if (String(b.payment_status) === 'paid')
+        return res.json({ success: true, booking: pubBook(b), property: fullProp(prop) });
+      return res.json({ success: true, booking: pubBook(b), property: pubProp(prop) });
+    } catch (e) { res.status(500).json({ success: false, message: 'Lookup failed' }); }
+  });
+  router.get('/stays/:id/availability', async (req, res) => {
     try {
       const ci = String(req.query.check_in || '').slice(0, 10);
       const co = String(req.query.check_out || '').slice(0, 10);
-      if (!ci || !co) return res.status(400).json({ success: false, message: 'check_in and check_out required' });
-      if (!(nightsBetween(ci, co) > 0)) return res.status(400).json({ success: false, message: 'check_out must be after check_in' });
-      const hits = await dbAll(
-        'SELECT * FROM bookings WHERE property_id = ? AND payment_status = \'paid\' AND (check_in < ? AND check_out > ?)',
-        [req.params.id, co, ci]
-      );
-      if (hits && hits.length) {
-        return res.json({ available: false, status: 'BOOKED', message: 'This unit is already booked for the selected dates.' });
-      }
-      res.json({ available: true, status: 'AVAILABLE' });
+      if (!validDate(ci) || !validDate(co) || nights(ci, co) < 1)
+        return res.status(400).json({ success: false, message: 'Invalid dates' });
+      const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND payment_status IN ('paid','pending') AND check_in < ? AND check_out > ? LIMIT 1`, [req.params.id, co, ci]);
+      if (clash) return res.json({ success: true, available: false, status: 'BOOKED', message: 'Already booked for selected dates' });
+      return res.json({ success: true, available: true, status: 'AVAILABLE' });
     } catch (e) { res.status(500).json({ success: false, message: 'Availability check failed' }); }
   });
-
-  router.get('/stays/:id', async function (req, res) {
+  router.get('/stays/:id', async (req, res) => {
     try {
-      const row = await dbGet('SELECT * FROM properties WHERE id = ? LIMIT 1', [req.params.id]);
-      if (!row) return res.status(404).json({ success: false, message: 'Property not found' });
-      res.json({ success: true, stay: publicProperty(row) });
-    } catch (e) { res.status(500).json({ success: false, message: 'Could not load property' }); }
+      const row = await dbGet(`SELECT * FROM properties WHERE id = ? LIMIT 1`, [req.params.id]);
+      if (!row || Number(row.is_active) !== 1) return res.status(404).json({ success: false, message: 'Stay not found' });
+      res.json({ success: true, stay: pubProp(row) });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not load stay' }); }
   });
 
-  router.post('/stays/book', async function (req, res) {
+  router.post('/stays/book', async (req, res) => {
+    const b = req.body || {};
+    const ci = String(b.check_in || '').slice(0, 10);
+    const co = String(b.check_out || '').slice(0, 10);
+    if (!b.property_id || !b.guest_name || !b.guest_email || !b.guest_phone)
+      return res.status(400).json({ success: false, message: 'Name, email, phone and property are required' });
+    if (!validDate(ci) || !validDate(co) || nights(ci, co) < 1)
+      return res.status(400).json({ success: false, message: 'Invalid check-in/check-out dates' });
     try {
-      const b = req.body || {};
-      if (!b.property_id) return res.status(400).json({ success: false, message: 'property_id required' });
-      if (!b.guest_name || !String(b.guest_name).trim()) return res.status(400).json({ success: false, message: 'Full name required' });
-      if (!b.guest_email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.guest_email).trim())) return res.status(400).json({ success: false, message: 'Valid email required' });
-      if (!b.guest_phone || !String(b.guest_phone).trim()) return res.status(400).json({ success: false, message: 'Phone required' });
-      if (!b.check_in || !b.check_out) return res.status(400).json({ success: false, message: 'Dates required' });
-      const ci = String(b.check_in).slice(0, 10);
-      const co = String(b.check_out).slice(0, 10);
-      const nights = nightsBetween(ci, co);
-      if (!nights || nights <= 0) return res.status(400).json({ success: false, message: 'check_out must be after check_in' });
-      const prop = await dbGet('SELECT * FROM properties WHERE id = ? LIMIT 1', [b.property_id]);
-      if (!prop || Number(prop.is_active) !== 1) return res.status(404).json({ success: false, message: 'Property unavailable' });
-      const total = Math.round(nights * Number(prop.price_per_night || 0) * 100) / 100;
-      // Strict collision: only CONFIRMED (paid) bookings block new reservations.
-      const clash = await dbAll('SELECT id FROM bookings WHERE property_id = ? AND payment_status = \'paid\' AND (check_in < ? AND check_out > ?)', [b.property_id, co, ci]);
-      if (clash && clash.length) return res.status(409).json({ success: false, available: false, status: 'BOOKED', message: 'This unit is already booked for the selected dates.' });
-      let ref = null;
-      for (let i = 0; i < 8; i++) {
-        const c = genReference();
-        const ex = await dbGet('SELECT id FROM bookings WHERE booking_reference = ? LIMIT 1', [c]);
-        if (!ex) { ref = c; break; }
-      }
-      if (!ref) return res.status(500).json({ success: false, message: 'Retry booking' });
-      await dbRun('INSERT INTO bookings (property_id, user_id, guest_name, guest_email, guest_phone, check_in, check_out, total_price, booking_reference, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, \'pending\')', [Number(b.property_id), null, String(b.guest_name).trim(), String(b.guest_email).trim().toLowerCase(), String(b.guest_phone).trim(), ci, co, total, ref]);
-      stayNotify(deps, 'booking_created', {
-        reference: ref, property_id: Number(b.property_id), property_title: prop.title,
-        guest_name: String(b.guest_name).trim(), guest_email: String(b.guest_email).trim().toLowerCase(),
-        guest_phone: String(b.guest_phone).trim(), check_in: ci, check_out: co,
-        total_price: total, nights: nights, payment_status: 'pending',
+      const out = await deps.withTransaction(async () => {
+        const prop = await dbGet(`SELECT * FROM properties WHERE id = ? FOR UPDATE`, [Number(b.property_id)]);
+        if (!prop || Number(prop.is_active) !== 1) throw Object.assign(new Error('Property unavailable'), { status: 404 });
+        const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND payment_status IN ('paid','pending') AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [prop.id, co, ci]);
+        if (clash) throw Object.assign(new Error('Already booked for selected dates'), { status: 409 });
+        const n = nights(ci, co);
+        const total = Math.round(n * Number(prop.price_per_night || 0) * 100) / 100;
+        let ref = null;
+        for (let i = 0; i < 5; i++) {
+          ref = genRef();
+          const inserted = await dbGet(`INSERT INTO bookings (property_id, user_id, guest_name, guest_email, guest_phone, check_in, check_out, total_price, booking_reference, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT (booking_reference) DO NOTHING RETURNING id`,
+            [prop.id, null, String(b.guest_name).trim(), String(b.guest_email).trim().toLowerCase(), String(b.guest_phone).trim(), ci, co, total, ref]);
+          if (inserted) break;
+          ref = null;
+        }
+        if (!ref) throw Object.assign(new Error('Retry booking'), { status: 500 });
+        return { reference: ref, total_price: total, nights: n, property: prop };
       });
-      res.json({ success: true, reference: ref, total_price: total });
-    } catch (e) { res.status(500).json({ success: false, message: 'Booking failed' }); }
+      res.json({ success: true, reference: out.reference, total_price: out.total_price, payment_status: 'pending' });
+    } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message || 'Booking failed' }); }
   });
 
-  router.get('/admin/bookings', requireAdmin, async function (req, res) {
+  router.get('/admin/stays', authenticateAdmin, async (_req, res) => {
     try {
-      const rows = await dbAll('SELECT b.*, p.title AS property_title, p.location AS property_location FROM bookings b LEFT JOIN properties p ON p.id = b.property_id ORDER BY b.created_at DESC, b.id DESC LIMIT 500');
+      const rows = await dbAll(`SELECT * FROM properties ORDER BY created_at DESC`);
+      res.json({ success: true, properties: (rows || []).map(fullProp) });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not load properties' }); }
+  });
+  router.post('/stays/booking/:reference/pay', async (req, res) => {
+    try {
+      const booking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? LIMIT 1`, [String(req.params.reference || '').trim()]);
+      if (!booking || booking.payment_status !== 'pending') return res.status(404).json({ success: false, message: 'Pending booking not found' });
+      const phone = String(req.body && req.body.phone || '').replace(/\s+/g, '');
+      if (phone !== String(booking.guest_phone || '').replace(/\s+/g, '')) return res.status(403).json({ success: false, message: 'Use the phone number entered for this booking' });
+      if (typeof deps.startStayPayment !== 'function') return res.status(503).json({ success: false, message: 'M-Pesa booking payments are not configured' });
+      const result = await deps.startStayPayment({ booking });
+      res.json({ success: true, ...result });
+    } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message || 'Could not start payment' }); }
+  });
+  router.post('/admin/properties', authenticateAdmin, async (req, res) => {
+    try {
+      const p = req.body || {};
+      if (!p.title || !p.location || !(Number(p.price_per_night) > 0))
+        return res.status(400).json({ success: false, message: 'Title, location and price/night required' });
+      const na = (v) => (Array.isArray(v) ? v : String(v || '').split(',').map((s) => s.trim()).filter(Boolean));
+      const imgs = na(p.images).slice(0, 15);
+      const nn = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+      const r = await dbRun(`INSERT INTO properties (title, description, location, price_per_night, max_guests, amenities, images, is_active, latitude, longitude, google_maps_link, exact_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [String(p.title).trim(), String(p.description || ''), String(p.location).trim(), Number(p.price_per_night), Math.max(1, Number(p.max_guests) || 2), JSON.stringify(na(p.amenities)), JSON.stringify(imgs), Number(p.is_active) === 0 ? 0 : 1, nn(p.latitude), nn(p.longitude), p.google_maps_link ? String(p.google_maps_link) : null, p.exact_address ? String(p.exact_address) : null]);
+      res.json({ success: true, id: r && r.lastID != null ? Number(r.lastID) : undefined });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not create property' }); }
+  });
+  router.get('/admin/bookings', authenticateAdmin, async (_req, res) => {
+    try {
+      const rows = await dbAll(`SELECT b.*, p.title AS property_title, p.location AS property_location FROM bookings b LEFT JOIN properties p ON p.id = b.property_id ORDER BY b.created_at DESC LIMIT 500`);
       res.json({ success: true, bookings: rows || [] });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not load bookings' }); }
   });
 
-  router.post('/admin/properties', requireAdmin, async function (req, res) {
+  router.patch('/admin/properties/:id', authenticateAdmin, async (req, res) => {
     try {
       const p = req.body || {};
-      const price = Number(p.price_per_night);
-      if (!p.title) return res.status(400).json({ success: false, message: 'Title required' });
-      if (!p.location) return res.status(400).json({ success: false, message: 'Location required' });
-      if (!price || price <= 0) return res.status(400).json({ success: false, message: 'Invalid price' });
-      const na = function (v) { if (Array.isArray(v)) return v; if (typeof v === 'string' && v.trim()) { try { const q = JSON.parse(v); if (Array.isArray(q)) return q; } catch (x) {} return v.split(',').map(function (s) { return s.trim(); }).filter(Boolean); } return []; };
-      const imgs = na(p.images).slice(0, 15);
-      const numOrNull = function (v) { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
-      const r = await dbRun('INSERT INTO properties (title, description, location, price_per_night, max_guests, amenities, images, is_active, latitude, longitude, google_maps_link, exact_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [String(p.title).trim(), String(p.description || ''), String(p.location).trim(), price, Math.max(1, Number(p.max_guests) || 2), JSON.stringify(na(p.amenities)), JSON.stringify(imgs), Number(p.is_active) === 0 ? 0 : 1, numOrNull(p.latitude), numOrNull(p.longitude), p.google_maps_link ? String(p.google_maps_link) : null, p.exact_address ? String(p.exact_address) : null]);
-      res.json({ success: true, id: r && r.lastID != null ? Number(r.lastID) : undefined });
-    } catch (e) { res.status(500).json({ success: false, message: 'Could not create property' }); }
-  });
-
-  const updStatus = async function (req, res) {
-    try {
-      const st = String(((req.body || {}).payment_status) || '').toLowerCase();
-      if (['pending', 'paid', 'cancelled'].indexOf(st) < 0) return res.status(400).json({ success: false, message: 'Bad status' });
-      const ex = await dbGet('SELECT * FROM bookings WHERE id = ? LIMIT 1', [req.params.id]);
-      if (!ex) return res.status(404).json({ success: false, message: 'Not found' });
-      await dbRun('UPDATE bookings SET payment_status = ? WHERE id = ?', [st, req.params.id]);
-      const prop = await dbGet('SELECT * FROM properties WHERE id = ? LIMIT 1', [ex.property_id]);
-      stayNotify(deps, st === 'paid' ? 'booking_paid' : 'booking_status', {
-        reference: ex.booking_reference, property_id: ex.property_id, property_title: prop && prop.title,
-        guest_name: ex.guest_name, guest_email: ex.guest_email, guest_phone: ex.guest_phone,
-        check_in: ex.check_in, check_out: ex.check_out, total_price: ex.total_price, payment_status: st,
-      });
-      res.json({ success: true, id: Number(req.params.id), payment_status: st, reference: ex.booking_reference });
-    } catch (e) { res.status(500).json({ success: false, message: 'Update failed' }); }
-  };
-  router.patch('/admin/bookings/:id', requireAdmin, updStatus);
-  router.put('/admin/bookings/:id', requireAdmin, updStatus);
-
-  // Admin edit: geo fields + 15-image cap without touching other updaters.
-  router.patch('/admin/properties/:id', requireAdmin, async function (req, res) {
-    try {
-      const p = req.body || {};
-      const sets = [];
-      const vals = [];
-      const strCol = function (k) { if (p[k] != null) { sets.push(k + ' = ?'); vals.push(String(p[k])); } };
-      strCol('title'); strCol('description'); strCol('location');
-      strCol('google_maps_link'); strCol('exact_address');
+      const sets = [], vals = [];
+      const set = (c, v) => { sets.push(c + ' = ?'); vals.push(v); };
+      if (p.title != null) set('title', String(p.title));
+      if (p.description != null) set('description', String(p.description));
+      if (p.location != null) set('location', String(p.location));
       if (p.price_per_night != null) {
-        const pr = Number(p.price_per_night);
-        if (!pr || pr <= 0) return res.status(400).json({ success: false, message: 'Invalid price' });
-        sets.push('price_per_night = ?'); vals.push(pr);
+        if (!(Number(p.price_per_night) > 0)) return res.status(400).json({ success: false, message: 'Invalid price' });
+        set('price_per_night', Number(p.price_per_night));
       }
-      if (p.max_guests != null) { sets.push('max_guests = ?'); vals.push(Math.max(1, Number(p.max_guests) || 2)); }
-      if (p.is_active != null) { sets.push('is_active = ?'); vals.push(Number(p.is_active) === 0 ? 0 : 1); }
-      if (p.amenities != null) {
-        const arr = Array.isArray(p.amenities) ? p.amenities : String(p.amenities).split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-        sets.push('amenities = ?'); vals.push(JSON.stringify(arr));
+      if (p.max_guests != null) set('max_guests', Math.max(1, Number(p.max_guests) || 1));
+      if (p.amenities != null) set('amenities', JSON.stringify(Array.isArray(p.amenities) ? p.amenities.slice(0, 50) : []));
+      if (p.images != null) set('images', JSON.stringify((Array.isArray(p.images) ? p.images : []).filter(Boolean).slice(0, 15)));
+      if (p.is_active != null) set('is_active', Number(p.is_active) ? 1 : 0);
+      for (const k of ['latitude', 'longitude', 'google_maps_link', 'exact_address']) {
+        if (p[k] !== undefined) set(k, (p[k] === '' || p[k] == null) ? null : String(p[k]));
       }
-      if (p.images != null) {
-        let arr = Array.isArray(p.images) ? p.images : String(p.images).split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-        arr = arr.slice(0, 15);
-        sets.push('images = ?'); vals.push(JSON.stringify(arr));
-      }
-      if (p.latitude != null) { sets.push('latitude = ?'); vals.push(p.latitude === '' ? null : Number(p.latitude)); }
-      if (p.longitude != null) { sets.push('longitude = ?'); vals.push(p.longitude === '' ? null : Number(p.longitude)); }
       if (!sets.length) return res.status(400).json({ success: false, message: 'Nothing to update' });
       vals.push(req.params.id);
-      await dbRun('UPDATE properties SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+      await dbRun(`UPDATE properties SET ` + sets.join(', ') + ` WHERE id = ?`, vals);
       res.json({ success: true, id: Number(req.params.id) });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not update property' }); }
+  });
+  async function applyStatus(id, st) {
+    return deps.withTransaction(async () => {
+      const ex = await dbGet(`SELECT * FROM bookings WHERE id = ? FOR UPDATE`, [id]);
+      if (!ex) throw Object.assign(new Error('Booking not found'), { status: 404 });
+      if (st === 'paid') {
+        const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND id <> ? AND payment_status = 'paid' AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [ex.property_id, ex.id, ex.check_out, ex.check_in]);
+        if (clash) throw Object.assign(new Error('Overlaps a paid booking'), { status: 409 });
+        const pin = ex.check_in_pin || genPin();
+        try { return await dbGet(`UPDATE bookings SET payment_status='paid', check_in_pin=? WHERE id=? RETURNING *`, [pin, id]); }
+        catch (e) { await dbRun(`UPDATE bookings SET payment_status='paid', check_in_pin=? WHERE id=?`, [pin, id]); return dbGet(`SELECT * FROM bookings WHERE id=?`, [id]); }
+      }
+      try { return await dbGet(`UPDATE bookings SET payment_status=? WHERE id=? RETURNING *`, [st, id]); }
+      catch (e) { await dbRun(`UPDATE bookings SET payment_status=? WHERE id=?`, [st, id]); return dbGet(`SELECT * FROM bookings WHERE id=?`, [id]); }
+    });
+  }
+  router.patch('/admin/bookings/:id', authenticateAdmin, async (req, res) => {
+    try {
+      const st = String((req.body && req.body.payment_status) || '').toLowerCase();
+      if (!['paid', 'cancelled', 'pending'].includes(st)) return res.status(400).json({ success: false, message: 'Invalid status' });
+      const upd = await applyStatus(req.params.id, st);
+      const prop = await dbGet(`SELECT * FROM properties WHERE id = ? LIMIT 1`, [upd.property_id]);
+      say(st === 'paid' ? 'booking_paid' : 'booking_status', { reference: upd.booking_reference, property_id: upd.property_id, property_title: prop && prop.title, guest_name: upd.guest_name, guest_email: upd.guest_email, guest_phone: upd.guest_phone, check_in: upd.check_in, check_out: upd.check_out, total_price: upd.total_price, payment_status: upd.payment_status, check_in_pin: upd.check_in_pin, google_maps_link: prop && prop.google_maps_link, exact_address: prop && prop.exact_address });
+      res.json({ success: true, booking: upd });
+    } catch (e) { res.status(e.status || 500).json({ success: false, message: e.message || 'Update failed' }); }
+  });
+  router.post('/admin/bookings/:id/verify-pin', authenticateAdmin, async (req, res) => {
+    try {
+      const b = await dbGet(`SELECT * FROM bookings WHERE id = ? LIMIT 1`, [req.params.id]);
+      if (!b) return res.status(404).json({ success: false, message: 'Booking not found' });
+      const ok = String((req.body && req.body.pin) || '').trim() === String(b.check_in_pin || '');
+      res.json({ success: true, valid: ok && String(b.payment_status) === 'paid' });
+    } catch (e) { res.status(500).json({ success: false, message: 'Verify failed' }); }
   });
 
   return router;
 }
 
-module.exports.createStayApiRouter = createStayApiRouter;
+module.exports = { createStayApiRouter, ensureStayTables };

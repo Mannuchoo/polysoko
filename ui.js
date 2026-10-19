@@ -33,13 +33,14 @@ function normalizeSportLabel(value) {
     const raw = String(value || '').trim();
     if (!raw) return "";
     const lower = raw.toLowerCase();
+    if (lower === 'soccer') return "Football";
     if (['nba', 'nfl', 'f1', 'afl', 'mma'].includes(lower)) return lower.toUpperCase();
     return titleCase(raw.replace(/[_-]+/g, ' '));
 }
 
 function isInvalidSportsMarket(m) {
     const cat = normalizeCategory(m?.category);
-    const sportKeys = ['sports', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
+    const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
     const isSportsMarket = sportKeys.includes(cat) || m?.id?.startsWith("sp_") || m?.id?.startsWith("fb_");
     if (!isSportsMarket) return false;
     const title = String(m?.title || "").toLowerCase().trim();
@@ -61,11 +62,12 @@ function isCryptoMarket(m) {
 
 function isFootballFixtureMarket(m) {
     const cat = normalizeCategory(m?.category);
-    return m?.id?.startsWith("fb_") || (
-        (cat === "sports" || cat === "football") &&
-        normalizeCategory(m?.sport) === "football" &&
-        /\s+vs\s+/i.test(String(m?.title || ""))
-    );
+    if (/^fb_/i.test(m?.id || "")) return true;
+    if (cat !== "sports" && cat !== "football" && cat !== "soccer") return false;
+    const titleLooksLikeFixture = /\s+vs\s+/i.test(String(m?.title || ""));
+    const sidesLookLikeTeams = !["yes", "no", "likely", "unlikely", "home", "away", "unknown", ""].includes(String(m?.sideA || "").toLowerCase()) &&
+        !["yes", "no", "likely", "unlikely", "home", "away", "unknown", ""].includes(String(m?.sideB || "").toLowerCase());
+    return titleLooksLikeFixture && (normalizeCategory(m?.sport) === "football" || cat === "football" || cat === "soccer" || sidesLookLikeTeams);
 }
 
 function isFootballNewsMarket(m) {
@@ -86,7 +88,7 @@ function isGamingMarket(m) {
 function isSportsMarket(m) {
     const cat = normalizeCategory(m?.category);
     const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
-    return (sportKeys.includes(cat) && !isFootballNewsMarket(m)) || m?.id?.startsWith("sp_") || m?.id?.startsWith("fb_") || isFootballFixtureMarket(m);
+    return (sportKeys.includes(cat) && !isFootballNewsMarket(m)) || /^sp_/i.test(m?.id || "") || /^fb_/i.test(m?.id || "") || isFootballFixtureMarket(m);
 }
 
 window.setCategory = function (category) {
@@ -137,7 +139,7 @@ function applyStateAndRender() {
         filtered = filtered.filter(m => {
             const cat = normalizeCategory(m.category);
             if (active === "football") {
-                return isSportsMarket(m) || isFootballNewsMarket(m);
+                return isFootballFixtureMarket(m) || isFootballNewsMarket(m);
             }
             if (active === "gaming") {
                 return isGamingMarket(m);
@@ -363,9 +365,14 @@ function renderSportsPage(container, sportsMarkets) {
     // Determine sport type from: m.sport field, league hints, or category
     const sportLabelFor = (m) => {
         const sportValue = normalizeSportLabel(m.sport || '');
-        if (sportValue) return sportValue;
+        if (sportValue && normalizeCategory(sportValue) !== 'other') return sportValue;
         const cat = normalizeCategory(m.category);
-        if (cat === "football" || m.id?.startsWith("fb_")) return "Football";
+        const idSport = String(m.id || '').match(/^sp_([a-z0-9-]+)_/i)?.[1];
+        if (cat === "football" || cat === 'soccer' || m.id?.startsWith("fb_")) return "Football";
+        if (idSport) return normalizeSportLabel(idSport);
+        if (["nba", "nfl", "basketball", "baseball", "hockey", "volleyball", "rugby", "handball", "cricket", "tennis", "mma", "afl", "f1", "golf"].includes(cat)) return normalizeSportLabel(cat);
+        // Fallback: detect football fixtures by "Team A vs Team B" title pattern
+        if ((cat === "sports" || cat === "football") && isFootballFixtureMarket(m)) return "Football";
         const league = (m.league || "").toLowerCase();
         if (league.includes("nba") || league.includes("basketball")) return "Basketball";
         if (league.includes("nfl") || league.includes("american football")) return "NFL";
@@ -1836,20 +1843,26 @@ async function loadGreeting() {
 }
 window.fetchMarkets = async function() {
     try {
-        const [marketResponse, newsResponse, sportsResponse] = await Promise.all([
+        const [marketResult, newsResponse, sportsResponse] = await Promise.all([
             apiFetch('/api/markets'),
             apiFetch('/api/news/everything').catch(() => null),
             apiFetch('/api/sports/categories').catch(() => null)
         ]);
 
-        const markets = marketResponse?.markets || [];
+        const marketResponse = marketResult?.data || marketResult;
+        const markets = Array.isArray(marketResponse) ? marketResponse :
+            (Array.isArray(marketResponse?.markets) ? marketResponse.markets :
+            (Array.isArray(marketResponse?.data) ? marketResponse.data : []));
         const newsMarkets = Array.isArray(newsResponse?.articles) ? newsResponse.articles : [];
-        state.sportsCategories = Array.isArray(sportsResponse?.sports) ? sportsResponse.sports : [];
+        const categoryResult = sportsResponse?.data || sportsResponse;
+        state.sportsCategories = Array.isArray(categoryResult?.sports) ? categoryResult.sports : [];
 
         const merged = [];
         const seenIds = new Set();
 
-        for (const item of [...newsMarkets, ...markets]) {
+        // Keep the market API's complete list first; news enrichment must not
+        // shadow a real market with the same id or alter its sport metadata.
+        for (const item of [...markets, ...newsMarkets]) {
             if (!item || !item.id) continue;
             if (seenIds.has(item.id)) continue;
             seenIds.add(item.id);

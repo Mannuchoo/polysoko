@@ -339,12 +339,12 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 
-async function login(payload) {
+async function loginRequest(payload) {
     return apiFetch('login', { method: 'POST', body: payload });
 }
 
 
-async function register(payload) {
+async function registerRequest(payload) {
     return apiFetch('register', { method: 'POST', body: payload });
 }
   
@@ -715,8 +715,8 @@ async function refreshBalance() {
     }
 }
 window.API = {
-    login,
-    register,
+    login: loginRequest,
+    register: registerRequest,
     fetchProfile,
     fetchTransactions,
     updateEmail,
