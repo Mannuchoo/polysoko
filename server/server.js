@@ -4268,7 +4268,7 @@ const marketsRouteHandler = async (req, res) => {
 app.get('/api/markets', marketsRouteHandler);
 
 // ADMIN ROUTE for manual settlement
-app.post('/api/admin/manual-settle', requireAdmin, async (req, res) => {
+app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
     try {
         const { market_id, outcome } = req.body || {};
         if (!market_id || !outcome) {
@@ -4331,7 +4331,7 @@ app.post('/api/admin/manual-settle', requireAdmin, async (req, res) => {
     }
 });
 // ADMIN ROUTE for pending settlements list
-app.get('/api/admin/pending-settlements', requireAdmin, async (req, res) => {
+app.get('/api/admin/pending-settlements', authenticateAdmin, async (req, res) => {
     try {
         const { category } = req.query;
         let where = 'WHERE status = \'SUSPENDED\' AND result IS NULL';
@@ -4360,7 +4360,7 @@ app.get('/api/admin/pending-settlements', requireAdmin, async (req, res) => {
 });
 
 // ADMIN ROUTE for single market details
-app.get('/api/admin/market/:id', requireAdmin, async (req, res) => {
+app.get('/api/admin/market/:id', authenticateAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [id]);
@@ -4375,7 +4375,7 @@ app.get('/api/admin/market/:id', requireAdmin, async (req, res) => {
 });
 
 // ADMIN ROUTE for manual void
-app.post('/api/admin/void-market', requireAdmin, async (req, res) => {
+app.post('/api/admin/void-market', authenticateAdmin, async (req, res) => {
     try {
         const { market_id } = req.body || {};
         if (!market_id) {
