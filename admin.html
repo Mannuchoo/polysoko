@@ -1386,18 +1386,15 @@ function esc(str) {
     </div>
 </div>
 
-<div id="adminLoginGate" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.96); z-index:12000; justify-content:center; align-items:center; padding:20px;">
+<div id="adminLoginGate" style="display:flex; position:fixed; inset:0; background:rgba(0,0,0,0.96); z-index:12000; justify-content:center; align-items:center; padding:20px;">
     <div style="width:100%; max-width:420px; background:#101014; border:1px solid #333; border-radius:16px; padding:24px; box-shadow:0 24px 70px rgba(0,0,0,.55);">
         <h2 style="margin:0 0 8px; color:#00ff88;">SuperAdmin Login</h2>
         <p id="adminLoginGateMessage" style="margin:0 0 16px; color:#aaa; font-size:.9rem;">Enter your 6-digit admin PIN to load users, markets, and transactions.</p>
         <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Admin PIN</label>
-        <input id="adminInlinePinInput" type="password" maxlength="6" inputmode="numeric" autocomplete="current-password" placeholder="6-digit PIN" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1.1rem; letter-spacing:.18em; text-align:center; outline:none;">
-        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin:14px 0 6px;">Master Password</label>
-        <input id="adminInlinePasswordInput" type="password" autocomplete="current-password" placeholder="Use if PIN is not set" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; outline:none;">
+        <input id="adminInlinePinInput" type="password" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="off" autofocus required placeholder="6-digit PIN" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1.1rem; letter-spacing:.18em; text-align:center; outline:none;">
         <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:10px 0; color:#ff7777; font-size:.82rem;"></div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            <button id="adminInlinePinBtn" onclick="submitInlineAdminLogin('pin')" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Login With PIN</button>
-            <button id="adminInlineMasterBtn" onclick="submitInlineAdminLogin('master')" style="flex:1; min-width:150px; padding:13px; border:1px solid #555; border-radius:10px; background:#191919; color:white; font-weight:800; cursor:pointer;">Master Login</button>
+            <button id="adminInlinePinBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Login With PIN</button>
         </div>
         <div style="margin-top:14px; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <button onclick="setAdminBackendOverrideFromGate()" style="background:none; border:0; color:#00d1ff; cursor:pointer; padding:0; font-size:.8rem;">Change backend</button>
@@ -1557,22 +1554,36 @@ function hideAdminLoginGate() {
     if (gate) gate.style.display = 'none';
 }
 
-async function submitInlineAdminLogin(mode = 'pin') {
+const ADMIN_IDLE_LOCK_MS = 5 * 60 * 1000;
+let adminIdleLockTimer = null;
+
+function resetAdminIdleLock() {
+    clearTimeout(adminIdleLockTimer);
+    const gate = document.getElementById('adminLoginGate');
+    if (!localStorage.getItem('token') || gate?.style.display !== 'none') return;
+    adminIdleLockTimer = setTimeout(() => {
+        localStorage.removeItem('token');
+        const pinInput = document.getElementById('adminInlinePinInput');
+        if (pinInput) pinInput.value = '';
+        showAdminLoginGate('Locked after 5 minutes of inactivity. Enter your admin PIN to continue.');
+    }, ADMIN_IDLE_LOCK_MS);
+}
+
+['pointerdown', 'keydown', 'touchstart', 'mousemove', 'scroll'].forEach(eventName => {
+    document.addEventListener(eventName, resetAdminIdleLock, { passive: true });
+});
+
+async function submitInlineAdminLogin() {
     const pinInput = document.getElementById('adminInlinePinInput');
-    const passInput = document.getElementById('adminInlinePasswordInput');
     const status = document.getElementById('adminInlineLoginStatus');
     const pinBtn = document.getElementById('adminInlinePinBtn');
-    const masterBtn = document.getElementById('adminInlineMasterBtn');
-    const endpoint = mode === 'master' ? '/admin/master-login' : '/admin/pin-login';
-    const payload = mode === 'master'
-        ? { password: passInput?.value || '' }
-        : { pin: pinInput?.value || '' };
+    const payload = { pin: pinInput?.value || '' };
 
     if (status) {
         status.style.color = '#aaa';
         status.textContent = 'Checking credentials...';
     }
-    [pinBtn, masterBtn].forEach(btn => { if (btn) btn.disabled = true; });
+    if (pinBtn) pinBtn.disabled = true;
 
     try {
         const data = await API.post(endpoint, payload);
@@ -1585,7 +1596,6 @@ async function submitInlineAdminLogin(mode = 'pin') {
             throw new Error(data.message || 'Admin login failed.');
         }
         localStorage.setItem('token', data.token);
-        hideAdminLoginGate();
         if (status) status.textContent = '';
         await initAdminAfterLogin();
     } catch (e) {
@@ -1595,7 +1605,7 @@ async function submitInlineAdminLogin(mode = 'pin') {
         }
         showAdminLoginGate(e.message || 'Admin login failed.');
     } finally {
-        [pinBtn, masterBtn].forEach(btn => { if (btn) btn.disabled = false; });
+        if (pinBtn) pinBtn.disabled = false;
     }
 }
 
@@ -1616,7 +1626,6 @@ document.addEventListener('keydown', (e) => {
     const gate = document.getElementById('adminLoginGate');
     if (!gate || gate.style.display !== 'flex') return;
     const active = document.activeElement;
-    if (active?.id === 'adminInlinePasswordInput') submitInlineAdminLogin('master');
     if (active?.id === 'adminInlinePinInput') submitInlineAdminLogin('pin');
 });
 
@@ -1970,6 +1979,16 @@ window.onload = () => {
 };
 async function initAdminAfterLogin() {
     const lastView = localStorage.getItem('admin_last_view') || 'adminAccountSection';
+    showAdminLoginGate('Checking your admin session…');
+    try {
+        await API.get('/admin/session');
+    } catch (error) {
+        localStorage.removeItem('token');
+        showAdminLoginGate(error.message || 'Admin session expired. Enter your PIN to continue.');
+        return;
+    }
+    hideAdminLoginGate();
+    resetAdminIdleLock();
     showSection(lastView, null, { load: false });
     await loadSuperAdminProfile();
     const startupLoads = [loadAdminTreasury(), loadGlobalActiveBets(), loadTransactions(), loadPendingSettlements()];

@@ -173,10 +173,10 @@ const MPESA_B2C_INITIATOR = process.env.MPESA_B2C_INITIATOR || process.env.MPESA
 const MPESA_B2C_SECURITY_CREDENTIAL = process.env.MPESA_B2C_SECURITY_CREDENTIAL || process.env.MPESA_SECURITY_CREDENTIAL;
 const MPESA_B2C_COMMAND_ID = process.env.MPESA_B2C_COMMAND_ID || 'BusinessPayment';
 const API_SPORTS_KEY = process.env.SPORTS_API_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY;
-const sportsSyncDaysConfig = Number(process.env.SPORTS_SYNC_DAYS || 14);
+const sportsSyncDaysConfig = Number(process.env.SPORTS_SYNC_DAYS || 2);
 const SPORTS_SYNC_DAYS = Number.isFinite(sportsSyncDaysConfig)
-    ? Math.max(2, Math.min(sportsSyncDaysConfig, 30))
-    : 14;
+    ? Math.max(1, Math.min(sportsSyncDaysConfig, 2))
+    : 2;
 
 // Rate-limit guards for settlement API calls (api-sports free tier ~100 req/day).
 // Settlement runs every 30 minutes (48 runs/day); caps keep us safely under quota.
@@ -419,6 +419,14 @@ const authLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: "Too many attempts. Please wait and try again." }
+});
+
+const adminPinLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: "Too many PIN attempts. Try again in 5 minutes." }
 });
 
 const uploadLimiter = rateLimit({
@@ -3070,10 +3078,13 @@ async function isSportsSourceAvailable(sport) {
             headers: { 'x-apisports-key': API_SPORTS_KEY },
             timeout: 10000
         });
-        const available = response.status === 200 && !hasApiErrors(response.data);
-        const plan = response.data?.response?.subscription?.plan || 'unknown';
         const requests = response.data?.response?.requests;
-        sportsStatusCache.set(sport.key, { available, checkedAt: Date.now(), plan, requests });
+        const requestCount = Number(requests?.current);
+        const requestLimit = Number(requests?.limit_day);
+        const quotaAvailable = !(Number.isFinite(requestCount) && Number.isFinite(requestLimit) && requestLimit > 0 && requestCount >= requestLimit);
+        const available = response.status === 200 && !hasApiErrors(response.data) && quotaAvailable;
+        const plan = response.data?.response?.subscription?.plan || 'unknown';
+        sportsStatusCache.set(sport.key, { available, checkedAt: Date.now(), plan, requests, quotaAvailable });
         if (available) {
             console.log(`${sport.label} API available on ${plan} plan.`);
         } else {
@@ -3116,7 +3127,7 @@ function getSportsTeamName(game, side) {
 }
 
 function getSportsStartTime(game) {
-    return game?.game?.date ||
+    const raw = game?.game?.date ||
         game?.game?.datetime ||
         game?.date ||
         game?.datetime ||
@@ -3124,8 +3135,24 @@ function getSportsStartTime(game) {
         game?.startTime ||
         game?.start_time ||
         game?.fixture?.date ||
-        game?.time ||
-        new Date().toISOString();
+        game?.time;
+    if (typeof raw === 'string') return raw;
+    if (typeof raw === 'number') {
+        return new Date(raw < 1e12 ? raw * 1000 : raw).toISOString();
+    }
+    if (!raw || typeof raw !== 'object') return null;
+
+    const timestamp = Number(raw.timestamp || raw.date?.timestamp || raw.start?.timestamp);
+    if (Number.isFinite(timestamp) && timestamp > 0) {
+        return new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp).toISOString();
+    }
+    const date = raw.date || raw.start || raw.datetime;
+    if (typeof date === 'string' && date) {
+        if (/T\d{2}:\d{2}/.test(date)) return date;
+        const time = typeof raw.time === 'string' && raw.time ? raw.time : '00:00';
+        return `${date}T${time.length === 5 ? `${time}:00` : time}Z`;
+    }
+    return null;
 }
 
 function getSportsStatus(game, startTime) {
@@ -3167,10 +3194,14 @@ const syncSportsMarkets = async () => {
     const enabledSources = new Set(parseEnabledSports());
     for (const sport of SPORTS_SOURCES) {
         if (enabledSources.size && !enabledSources.has(sport.key)) continue;
+        if (!await isSportsSourceAvailable(sport)) {
+            sourceCounts[sport.label] = 0;
+            continue;
+        }
         try {
             const responses = await Promise.all(dates.map((date) => (
                 axios.get(sportsUrl(sport), {
-                    params: { date, timezone: 'Africa/Nairobi' },
+                    params: { date },
                     headers: { 'x-apisports-key': API_SPORTS_KEY }
                 }).catch((e) => {
                     console.warn(`${sport.label} sync skipped for ${date}:`, e.response?.data || e.message);
@@ -3185,11 +3216,6 @@ const syncSportsMarkets = async () => {
                 }
             }
             sourceCounts[sport.label] = games.length;
-            sportsStatusCache.set(sport.key, {
-                available: games.length > 0,
-                checkedAt: Date.now(),
-                plan: games.length > 0 ? 'games endpoint' : 'no games returned'
-            });
             for (const game of games) {
                 const rawId = getSportsGameId(game, sport.key);
                 const marketId = `sp_${sport.key}_${rawId}`;
@@ -3200,6 +3226,10 @@ const syncSportsMarkets = async () => {
                     continue;
                 }
                 const startTime = getSportsStartTime(game);
+                if (!startTime || !Number.isFinite(new Date(startTime).getTime())) {
+                    console.warn(`${sport.label} game skipped because its start time was invalid: ${rawId}`);
+                    continue;
+                }
                 const status = getSportsStatus(game, startTime);
                 const league = game?.league?.name || game?.league || sport.label;
                 const location = game?.country?.name || game?.league?.country || 'International';
@@ -5893,7 +5923,7 @@ app.post('/api/admin/delete-market', authenticateAdmin, async (req, res) => {
 });
 
 // SuperAdmin PIN Login (6-digit PIN only, no phone required)
-app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
+app.post('/api/admin/pin-login', adminPinLimiter, async (req, res) => {
     const { pin } = req.body;
     // Falls back to the stored/DB admin identity when ADMIN_PHONE is absent on
     // the host, which previously made this route unusable in production.
@@ -5907,7 +5937,7 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
         });
     }
     
-    if (!pin || String(pin).length !== 6) {
+    if (!pin || !/^\d{6}$/.test(String(pin))) {
         return res.json({ success: false, message: "Please enter a valid 6-digit PIN." });
     }
     
@@ -5916,7 +5946,12 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
     
     let pinValid = false;
     
-    if (adminSettings && adminSettings.pin_hash) {
+    const configuredAdminPin = String(process.env.ADMIN_PIN || '');
+    if (configuredAdminPin) {
+        const supplied = Buffer.from(String(pin));
+        const configured = Buffer.from(configuredAdminPin);
+        pinValid = supplied.length === configured.length && crypto.timingSafeEqual(supplied, configured);
+    } else if (adminSettings && adminSettings.pin_hash) {
         // Use bcrypt to compare against stored hash
         pinValid = await bcrypt.compare(String(pin), adminSettings.pin_hash);
     } else {
@@ -5944,6 +5979,10 @@ app.post('/api/admin/pin-login', authLimiter, async (req, res) => {
     }
     
     res.json({ success: true, token, message: "SuperAdmin access granted." });
+});
+
+app.get('/api/admin/session', authenticateAdmin, (_req, res) => {
+    res.json({ success: true });
 });
 
 // Master password login (for first-time PIN setup, accepts full ADMIN_PASSWORD)
@@ -7555,8 +7594,9 @@ const startServer = async () => {
             runSafely('runSuspendedMarketSettlement', runSuspendedMarketSettlement);
             runSafely('syncWeatherMarkets', syncWeatherMarkets);
             setInterval(syncAllMarkets, 3600000);
-            setInterval(syncFootballMarkets, 3600000);
-            setInterval(syncSportsMarkets, 3600000);
+            // Keep API-Sports free-tier usage below its daily request limit.
+            setInterval(syncFootballMarkets, 3 * 60 * 60 * 1000);
+            setInterval(syncSportsMarkets, 6 * 60 * 60 * 1000);
             setInterval(syncFootballNews, 7200000); // every 2 hours
             setInterval(refreshBoostedMarkets, 86400000);
             setInterval(syncWeatherMarkets, 86400000);
