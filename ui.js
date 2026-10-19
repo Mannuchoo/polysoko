@@ -249,12 +249,14 @@ function renderTrending() {
     const container = document.getElementById('ongoing');
     if (!container) return;
 
-    // Requirement: Constant across categories, Tech & European Football only, No News
+    // Keep CHECK OUT populated across category changes with current news markets
+    // and European football fixtures. News cards use the same market card links
+    // and bet modal as the main list.
     const source = (state.allMarkets || []).filter(m => {
-        const cat = normalizeCategory(m.category);
+        const cat = getMarketDisplayCategory(m);
         if (isGamingMarket(m)) return false;
+        if (isNewsLikeMarket(m)) return true;
         if (isSportsMarket(m) && !isFootballFixtureMarket(m)) return false;
-        if (cat === 'tech') return true;
         
         // European Football logic: Check league/country meta for European identifiers
         if (cat === 'football' || m.id?.startsWith('fb_')) {
@@ -272,15 +274,18 @@ function renderTrending() {
     const top = source
         .filter(m => m?.id)
         .sort((a, b) => {
-            // Ranking Algorithm: Priority to Live matches, Tech innovation, High Volume, and High Odds
+            // Rank live, high volume, and current tech/news markets first.
             const score = (m) => {
                 const vol = Number(m.home_volume || m.away_volume || m.volume || m.total_volume || 0);
                 const maxOdds = Math.max(Number(m.oddsA || 0), Number(m.oddsB || 0));
-                const isTech = m.category === 'tech' ? 30000 : 0;
+                const category = getMarketDisplayCategory(m);
+                const isTopical = ['news', 'politics', 'tech'].includes(category) ? 30000 : 0;
                 const isLive = m.status === 'live' ? 100000 : 0;
+                const publishedAt = Date.parse(m.timestamp || m.publishedAt || m.event_start_time || '');
+                const ageHours = Number.isFinite(publishedAt) ? Math.max(0, (Date.now() - publishedAt) / 3600000) : 24;
+                const recency = ['news', 'politics', 'tech'].includes(category) ? Math.max(0, 24 - ageHours) * 300 : 0;
                 
-                // Rank by status + category weight + volume + odds weight
-                return isLive + isTech + vol + (maxOdds * 500);
+                return isLive + isTopical + recency + vol + (maxOdds * 500);
             };
             return score(b) - score(a);
         }); // Removed .slice() to make it "endless"
@@ -312,10 +317,9 @@ function openTrendingMarket(id) {
     const market = window.marketMap?.[id];
     if (!market) return;
 
-    if (market.category) {
-        const category = isSportsMarket(market) ? 'sports' : isGamingMarket(market) ? 'gaming' : market.category;
-        setCategory(category);
-    }
+    const marketCategory = getMarketDisplayCategory(market);
+    const category = isSportsMarket(market) ? 'sports' : isGamingMarket(market) ? 'gaming' : marketCategory;
+    if (category && category !== 'unknown') setCategory(category);
 
     openMarket(id);
 }
