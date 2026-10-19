@@ -1722,7 +1722,10 @@ async function syncRssNewsMarkets(limit = 500) {
     const feeds = [
         { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC News' },
         { url: 'https://feeds.bbci.co.uk/news/politics/rss.xml', source: 'BBC News' },
-        { url: 'https://feeds.bbci.co.uk/news/technology/rss.xml', source: 'BBC News' }
+        { url: 'https://feeds.bbci.co.uk/news/technology/rss.xml', source: 'BBC News' },
+        { url: 'https://www.theguardian.com/world/rss', source: 'The Guardian' },
+        { url: 'https://www.aljazeera.com/xml/rss/all.xml', source: 'Al Jazeera' },
+        { url: 'https://rss.dw.com/xml/rss-en-all', source: 'DW' }
     ];
     const responses = await Promise.all(feeds.map(async (feed) => {
         try {
@@ -1804,7 +1807,7 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     }
     if (!apiKey) {
         if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
-        console.warn('[news] NEWS_API_KEY is not configured; using BBC RSS feeds as the headline source.');
+        console.warn('[news] NEWS_API_KEY is not configured; using BBC, The Guardian, Al Jazeera, and DW RSS feeds.');
         const rssMarkets = await syncRssNewsMarkets(limit);
         return rssMarkets.length ? rssMarkets : cachedArticles;
     }
@@ -1859,7 +1862,7 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
             console.warn('[news] NewsAPI returned no articles; serving the active database cache.');
             return cachedArticles;
         }
-        console.warn('[news] NewsAPI returned no articles and the active cache is empty; trying BBC RSS feeds.');
+        console.warn('[news] NewsAPI returned no articles and the active cache is empty; trying multi-source RSS feeds.');
         const rssMarkets = await syncRssNewsMarkets(limit);
         return rssMarkets.length ? rssMarkets : cachedArticles;
     }
@@ -2936,13 +2939,19 @@ const syncFootballMarkets = async () => {
                 },
                 headers: {
                     'x-apisports-key': API_SPORTS_KEY
-                }
+                },
+                timeout: 15000
+            }).catch((error) => {
+                console.error(`[football] Fixture request failed for ${date}:`, error.response?.data || error.message);
+                return { data: { response: [], errors: { request: error.message } } };
             })
         )));
 
         // API-Football returns data inside 'response'
         const matches = responses.flatMap((res) => res.data?.response || []);
-        const apiErrors = responses.map((res) => res.data?.errors).filter(e => e && Object.keys(e).length > 0);
+        const apiErrors = responses
+            .map((res, index) => ({ date: dates[index], errors: res.data?.errors }))
+            .filter(item => item.errors && Object.keys(item.errors).length > 0);
 
         if (apiErrors.length > 0) {
             console.error("⚠️ API-Football Errors:", JSON.stringify(apiErrors));
@@ -5760,7 +5769,8 @@ app.get('/api/my-bets', authenticate, (req, res) => {
             odds,
             status,
             category,
-            commence_time
+            commence_time,
+            created_at
         FROM bets 
         WHERE user_phone = ?
     `;

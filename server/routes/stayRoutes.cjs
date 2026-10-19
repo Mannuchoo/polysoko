@@ -250,6 +250,15 @@ function createStayApiRouter(deps) {
       res.json({ success: true, id: Number(req.params.id) });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not update property' }); }
   });
+  // Keep property and booking history intact when an admin removes a listing.
+  router.delete('/admin/properties/:id', authenticateAdmin, async (req, res) => {
+    try {
+      const property = await dbGet(`SELECT id FROM properties WHERE id = ? LIMIT 1`, [req.params.id]);
+      if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
+      await dbRun(`UPDATE properties SET is_active = 0 WHERE id = ?`, [req.params.id]);
+      res.json({ success: true, id: Number(req.params.id), archived: true });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not delete property' }); }
+  });
   async function applyStatus(id, st) {
     return deps.withTransaction(async () => {
       const ex = await dbGet(`SELECT * FROM bookings WHERE id = ? FOR UPDATE`, [id]);

@@ -1147,9 +1147,13 @@ window.renderTransactionItem = function(item) {
  * BET CARD
  */
 window.renderBetCard = function(bet) {
-    const time = bet.commence_time
-        ? new Date(bet.commence_time).toLocaleString()
-        : "Unknown time";
+    // Show when the user placed the bet. commence_time is the event start,
+    // which can be missing and is not the time the bet was submitted.
+    const placedAt = bet.created_at || bet.createdAt || bet.timestamp;
+    const parsedPlacedAt = placedAt ? new Date(placedAt) : null;
+    const time = parsedPlacedAt && !Number.isNaN(parsedPlacedAt.getTime())
+        ? parsedPlacedAt.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+        : "Time unavailable";
 
     const status = (bet.status || "").toLowerCase();
 

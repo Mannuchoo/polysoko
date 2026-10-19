@@ -1469,6 +1469,7 @@ const API = {
     get(path) { return this.request(path, 'GET'); },
     post(path, body) { return this.request(path, 'POST', body); },
     patch(path, body) { return this.request(path, 'PATCH', body); },
+    delete(path) { return this.request(path, 'DELETE'); },
     put(path, body) { return this.request(path, 'PUT', body); }
 };
 
@@ -1752,8 +1753,24 @@ async function loadStayProperties() {
             `<td><button onclick="saveStayProperty(${Number(p.id)})" class="btn-primary" style="padding:6px 9px;font-size:.7rem;">Save price</button> ` +
             `<button onclick="uploadStayPropertyPhotos(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Add photos</button> ` +
             `<button onclick="editStayImages(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Manage photos</button> ` +
-            `<button onclick="editStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Edit details</button></td></tr>`).join('');
+            `<button onclick="editStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Edit details</button> ` +
+            (Number(p.is_active) === 0
+                ? `<button onclick="restoreStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;background:#12301f;color:#8fffc0;border:1px solid #245a3b;border-radius:8px;cursor:pointer;">Restore</button>`
+                : `<button onclick="deleteStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;background:#3a1214;color:#ff8080;border:1px solid #5a1e22;border-radius:8px;cursor:pointer;">Delete</button>`)+`</td></tr>`).join('');
     } catch (e) { tb.innerHTML = `<tr><td colspan="4" style="color:#ff8080;">${esc(e.message || 'Failed to load properties')}</td></tr>`; }
+}
+async function deleteStayProperty(id) {
+    if (!confirm('Remove this property from the public listing? Existing booking history will be kept.')) return;
+    try {
+        await API.delete(`/admin/properties/${id}`);
+        await loadStayProperties();
+    } catch (e) { alert(e.message || 'Could not delete property'); }
+}
+async function restoreStayProperty(id) {
+    try {
+        await API.patch(`/admin/properties/${id}`, { is_active: 1 });
+        await loadStayProperties();
+    } catch (e) { alert(e.message || 'Could not restore property'); }
 }
 async function saveStayProperty(id) {
     try { await API.patch(`/admin/properties/${id}`, { price_per_night: Number(document.getElementById(`stayPrice-${id}`).value) }); await loadStayProperties(); }
