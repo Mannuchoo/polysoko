@@ -864,6 +864,20 @@ const dbRun = (query, params = []) => new Promise((resolve, reject) => {
     db.run(query, params, function(err) { err ? reject(err) : resolve(this); });
 });
 
+// PostgreSQL folds unquoted camelCase identifiers to lowercase. Expose the
+// frontend's established market field names on every HTTP and socket payload.
+function normalizeMarketRow(market) {
+    if (!market) return market;
+    return {
+        ...market,
+        startTime: market.startTime ?? market.starttime,
+        sideA: market.sideA ?? market.sidea,
+        sideB: market.sideB ?? market.sideb,
+        oddsA: market.oddsA ?? market.oddsa,
+        oddsB: market.oddsB ?? market.oddsb
+    };
+}
+
 // --- JWT SECRET RESOLUTION -------------------------------------------------
 // Sessions are stateless JWTs, so the signing secret must stay identical across
 // every process restart. Previously the secret was read straight from
@@ -1767,7 +1781,8 @@ async function syncNewsApiMarkets({ force = false, limit = 500 } = {}) {
     const requests = [
         ...countries.map(country =>
             axios.get('https://newsapi.org/v2/top-headlines', {
-                params: { country, pageSize: 100, apiKey }
+                params: { country, pageSize: 100, apiKey },
+                timeout: 10000
             }).catch(() => ({ data: { articles: [] } }))
         ),
         axios.get('https://newsapi.org/v2/everything', {
@@ -1777,7 +1792,8 @@ async function syncNewsApiMarkets({ force = false, limit = 500 } = {}) {
                 sortBy: 'publishedAt',
                 pageSize: 100,
                 apiKey
-            }
+            },
+            timeout: 10000
         }).catch(() => ({ data: { articles: [] } }))
     ];
 
@@ -2795,14 +2811,15 @@ const emitMarkets = () => {
     const sql = `SELECT * FROM markets WHERE status IN ('open','live','upcoming','pending') ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
         if (err) return console.error("❌ DB Error:", err.message);
+        const markets = (rows || []).map(normalizeMarketRow);
         io.emit('marketsUpdated', {
             status: 'success',
-            count: rows?.length || 0,
+            count: markets.length,
             lastUpdated: new Date().toISOString(),
-            markets: rows || []
+            markets
         });
         // Also notify admin room of pending counts
-        const pending = rows.filter(m => m.status === 'pending').length;
+        const pending = markets.filter(m => m.status === 'pending').length;
         io.to("adminRoom").emit('adminStatsUpdate', { pendingMarkets: pending });
     });
 };
@@ -4288,10 +4305,10 @@ const marketsRouteHandler = async (req, res) => {
                 COALESCE(home_volume, 0) + COALESCE(away_volume, 0) DESC,
                 startTime ASC,
                 title ASC`,
-            [...alias.params, LIVE_VISIBILITY_MINUTES]
+            [LIVE_VISIBILITY_MINUTES, ...alias.params]
         );
 
-        const markets = (rows || []).map((market) => {
+        const markets = (rows || []).map(normalizeMarketRow).map((market) => {
             const category = String(market.category || '').toLowerCase();
             const generatedNews = /^(news_|tech_|geo_)/i.test(String(market.id || '')) ||
                 ['news', 'politics', 'tech'].includes(category);

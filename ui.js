@@ -39,14 +39,19 @@ function normalizeSportLabel(value) {
     return titleCase(raw.replace(/[_-]+/g, ' '));
 }
 
+function getMarketSide(market, side) {
+    const lowerKey = side.toLowerCase();
+    return market?.[side] ?? market?.[lowerKey] ?? '';
+}
+
 function isInvalidSportsMarket(m) {
     const cat = normalizeCategory(m?.category);
     const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
     const isSportsMarket = sportKeys.includes(cat) || m?.id?.startsWith("sp_") || m?.id?.startsWith("fb_");
     if (!isSportsMarket) return false;
     const title = String(m?.title || "").toLowerCase().trim();
-    const sideA = String(m?.sideA || "").toLowerCase().trim();
-    const sideB = String(m?.sideB || "").toLowerCase().trim();
+    const sideA = String(getMarketSide(m, 'sideA')).toLowerCase().trim();
+    const sideB = String(getMarketSide(m, 'sideB')).toLowerCase().trim();
     return !title ||
         ["home vs away", "unknown vs unknown"].includes(title) ||
         ["home", "away", "unknown", ""].includes(sideA) ||
@@ -66,8 +71,8 @@ function isFootballFixtureMarket(m) {
     if (/^fb_/i.test(m?.id || "")) return true;
     if (cat !== "sports" && cat !== "football" && cat !== "soccer") return false;
     const titleLooksLikeFixture = /\s+vs\s+/i.test(String(m?.title || ""));
-    const sidesLookLikeTeams = !["yes", "no", "likely", "unlikely", "home", "away", "unknown", ""].includes(String(m?.sideA || "").toLowerCase()) &&
-        !["yes", "no", "likely", "unlikely", "home", "away", "unknown", ""].includes(String(m?.sideB || "").toLowerCase());
+    const sidesLookLikeTeams = !["yes", "no", "likely", "unlikely", "home", "away", "unknown", ""].includes(String(getMarketSide(m, 'sideA')).toLowerCase()) &&
+        !["yes", "no", "likely", "unlikely", "home", "away", "unknown", ""].includes(String(getMarketSide(m, 'sideB')).toLowerCase());
     return titleLooksLikeFixture && (normalizeCategory(m?.sport) === "football" || cat === "football" || cat === "soccer" || sidesLookLikeTeams);
 }
 
@@ -1860,43 +1865,60 @@ async function loadGreeting() {
 }
 window.fetchMarkets = async function() {
     try {
-        const [marketResult, newsResponse, sportsResponse] = await Promise.all([
-            apiFetch('/api/markets'),
-            apiFetch('/api/news/everything').catch(() => null),
-            apiFetch('/api/sports/categories').catch(() => null)
-        ]);
+        const marketResult = await apiFetch('/api/markets');
 
         const marketResponse = marketResult?.data || marketResult;
         const markets = Array.isArray(marketResponse) ? marketResponse :
             (Array.isArray(marketResponse?.markets) ? marketResponse.markets :
             (Array.isArray(marketResponse?.data) ? marketResponse.data : []));
-        const newsMarkets = Array.isArray(newsResponse?.articles) ? newsResponse.articles : [];
-        const categoryResult = sportsResponse?.data || sportsResponse;
-        state.sportsCategories = Array.isArray(categoryResult?.sports) ? categoryResult.sports : [];
+        let supplementalMarkets = [];
 
-        const merged = [];
-        const seenIds = new Set();
+        const mergeAndRender = (newsMarkets = []) => {
+            const newsById = new Map(supplementalMarkets.filter(item => item?.id).map(item => [item.id, item]));
+            for (const item of newsMarkets) {
+                if (item?.id && !newsById.has(item.id)) newsById.set(item.id, item);
+            }
+            supplementalMarkets = [...newsById.values()];
 
-        // Keep the market API's complete list first; news enrichment must not
-        // shadow a real market with the same id or alter its sport metadata.
-        for (const item of [...markets, ...newsMarkets]) {
-            if (!item || !item.id) continue;
-            if (seenIds.has(item.id)) continue;
-            seenIds.add(item.id);
-            merged.push(item);
-        }
+            const merged = [];
+            const seenIds = new Set();
 
-        state.allMarkets = merged;
-        state.filteredMarkets = merged;
-        window.allMarketsSource = merged;
-        syncMarketMap(merged);
+            // Keep the market API's complete list first; news enrichment must not
+            // shadow a real market with the same id or alter its sport metadata.
+            for (const item of [...markets, ...supplementalMarkets]) {
+                if (!item || !item.id || seenIds.has(item.id)) continue;
+                seenIds.add(item.id);
+                merged.push(item);
+            }
 
-        if (document.getElementById("marketsList") || document.getElementById("ongoing")) {
-            applyStateAndRender();
-            renderTrending();
-            if (document.getElementById("greetingText")) { loadGreeting(); }
-        }
-        return { markets: merged };
+            state.allMarkets = merged;
+            state.filteredMarkets = merged;
+            window.allMarketsSource = merged;
+            syncMarketMap(merged);
+
+            if (document.getElementById("marketsList") || document.getElementById("ongoing")) {
+                applyStateAndRender();
+                renderTrending();
+                if (document.getElementById("greetingText")) { loadGreeting(); }
+            }
+            return merged;
+        };
+
+        const merged = mergeAndRender();
+
+        apiFetch('/api/sports/categories').then(sportsResponse => {
+            const categoryResult = sportsResponse?.data || sportsResponse;
+            state.sportsCategories = Array.isArray(categoryResult?.sports) ? categoryResult.sports : [];
+            mergeAndRender();
+        }).catch(error => console.warn("Sports categories deferred:", error.message));
+
+        // The main market board should never wait on the external news provider.
+        apiFetch('/api/news/everything').then(newsResponse => {
+            const newsMarkets = Array.isArray(newsResponse?.articles) ? newsResponse.articles : [];
+            if (newsMarkets.length) mergeAndRender(newsMarkets);
+        }).catch(error => console.warn("News sync deferred:", error.message));
+
+        return { markets: state.allMarkets || merged };
 
     } catch (err) {
         console.error("❌ Elite Fetch failed:", err);
