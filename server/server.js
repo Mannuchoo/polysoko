@@ -280,6 +280,7 @@ app.get('/api/health', async (req, res) => {
         databasePersistent,
         jwtConfigured: getJwtSecrets().length > 0,
         jwtSecretSource,
+        newsApiConfigured: Boolean(process.env.NEWS_API_KEY),
         mailConfigured,
         publicSiteUrl: PUBLIC_SITE_URL,
         publicApiBase: PUBLIC_API_BASE,
@@ -4166,7 +4167,7 @@ function categoryAliasClause(alias) {
         return { clause: `AND (LOWER(COALESCE(category,'')) = 'news' OR id LIKE 'news\\_%' ESCAPE '\\')`, params: [] };
     }
     if (a === 'tech') {
-        return { clause: `AND (LOWER(COALESCE(category,'')) = 'tech' OR id LIKE 'tech\\_%' ESCAPE '\\')`, params: [] };
+        return { clause: `AND id LIKE 'tech\\_%' ESCAPE '\\'`, params: [] };
     }
     if (a === 'politics') {
         return { clause: `AND (LOWER(COALESCE(category,'')) = 'politics' OR id LIKE 'geo\\_%' ESCAPE '\\')`, params: [] };
@@ -4250,6 +4251,7 @@ const marketsRouteHandler = async (req, res) => {
                      OR status IN ('open', 'upcoming')
                      OR startTime > NOW() - (? * INTERVAL '1 minute')
                    )
+               AND (LOWER(COALESCE(category,'')) <> 'tech' OR id LIKE 'tech\\_%' ESCAPE '\\')
                ${alias.clause}
                AND NOT (
                     (category='sports' OR category='football' OR id LIKE 'sp\\_%' ESCAPE '\\' OR id LIKE 'fb\\_%' ESCAPE '\\')
@@ -4274,7 +4276,7 @@ const marketsRouteHandler = async (req, res) => {
             const category = String(market.category || '').toLowerCase();
             const newsArticle = /^(news_|tech_|geo_)/i.test(String(market.id || '')) ||
                 ['news', 'politics'].includes(category);
-            if (!newsArticle) return category === 'tech' ? buildNewsMarket(market) : market;
+            if (!newsArticle) return market;
             const headline = extractContentField(market.content, 'Headline') || market.rawHeadline || market.title;
             const classification = classifyNewsArticle(headline, market.description || market.content);
             return buildNewsMarket({
