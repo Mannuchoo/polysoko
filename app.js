@@ -572,9 +572,9 @@ window.showUserManagement = async function() {
 };
 
 window.manageUserAction = async function(phone, action) {
-    if (action === 'delete' && !confirm(`⚠️ WARNING: Permanently delete user ${phone}? This cannot be undone.`)) return;
+    if (action === 'delete' && !await window.showAppConfirm(`WARNING: Permanently delete user ${phone}? This cannot be undone.`, { title: 'Delete user', danger: true, confirmLabel: 'Delete user' })) return;
     
-    const reason = prompt(`Enter reason for ${action} (User will see this in the email):`);
+    const reason = await window.showAppPrompt(`Enter reason for ${action} (User will see this in the email):`, '', { title: 'Action reason' });
     if (!reason) return alert("Action cancelled. A reason is required for the audit trail.");
 
     try {
@@ -1171,7 +1171,7 @@ window.openAvatarPreview = function(src) {
 };
 
 window.settleAllBets = async function() {
-    if (!confirm("Settle every closed market with a known result now?")) return;
+    if (!await window.showAppConfirm("Settle every closed market with a known result now?", { title: 'Settle markets', confirmLabel: 'Settle all' })) return;
     try {
         const res = await apiFetch('admin/settle-all-bets', { method: 'POST', body: {} });
         if (res?.success) {

@@ -1968,7 +1968,10 @@ window.fetchMarkets = async function() {
         apiFetch('/api/sports/categories').then(sportsResponse => {
             const categoryResult = sportsResponse?.data || sportsResponse;
             state.sportsCategories = Array.isArray(categoryResult?.sports) ? categoryResult.sports : [];
-            mergeAndRender();
+            // The backend can recover an empty football cache while loading
+            // categories; merge those freshly synced fixtures into this page
+            // even though the initial /api/markets request already completed.
+            mergeAndRender(Array.isArray(categoryResult?.footballMarkets) ? categoryResult.footballMarkets : []);
         }).catch(error => console.warn("Sports categories deferred:", error.message));
 
         // The main market board should never wait on the external news provider.

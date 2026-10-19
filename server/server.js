@@ -4600,8 +4600,48 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
     }
 });
 
+let lastEmptyFootballRecoveryAt = 0;
+let emptyFootballRecoveryPromise = null;
+
 app.get('/api/sports/categories', async (req, res) => {
     try {
+        const activeFootball = await dbGet(
+            `SELECT COUNT(*) AS count FROM markets
+             WHERE left(id, 3) = 'fb_'
+               AND status IN ('open','upcoming','live')
+               AND COALESCE(event_end_time, startTime) > NOW()
+               AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
+               AND sideA IS NOT NULL AND sideB IS NOT NULL
+               AND sideA NOT IN ('Home','Away','Unknown','')
+               AND sideB NOT IN ('Home','Away','Unknown','')`,
+            [LIVE_VISIBILITY_MINUTES]
+        );
+        let recoveredFootballMarkets = [];
+        const hasVisibleFootball = Number(activeFootball?.count || 0) > 0;
+        const recoveryWindowElapsed = Date.now() - lastEmptyFootballRecoveryAt >= 3 * 60 * 60 * 1000;
+        if (!hasVisibleFootball && API_SPORTS_KEY && (recoveryWindowElapsed || emptyFootballRecoveryPromise)) {
+            if (!emptyFootballRecoveryPromise) {
+                lastEmptyFootballRecoveryAt = Date.now();
+                emptyFootballRecoveryPromise = syncFootballMarkets().finally(() => {
+                    emptyFootballRecoveryPromise = null;
+                });
+            }
+            await emptyFootballRecoveryPromise;
+            recoveredFootballMarkets = await dbAll(
+                `SELECT * FROM markets
+                 WHERE left(id, 3) = 'fb_'
+                   AND status IN ('open','upcoming','live')
+                   AND COALESCE(event_end_time, startTime) > NOW()
+                   AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
+                   AND sideA IS NOT NULL AND sideB IS NOT NULL
+                   AND sideA NOT IN ('Home','Away','Unknown','')
+                   AND sideB NOT IN ('Home','Away','Unknown','')`,
+                [LIVE_VISIBILITY_MINUTES]
+            );
+            recoveredFootballMarkets = (recoveredFootballMarkets || []).map(normalizeMarketRow);
+            console.warn(`[football] Empty category recovered with ${recoveredFootballMarkets.length} visible fixtures.`);
+        }
+
         const rows = await dbAll(
             `SELECT
                 CASE
@@ -4640,7 +4680,7 @@ app.get('/api/sports/categories', async (req, res) => {
         const sports = [...labels.entries()]
             .map(([key, sport]) => ({ sport, count: counts.get(key) || 0 }))
             .sort((a, b) => a.sport.localeCompare(b.sport));
-        res.json({ success: true, sports });
+        res.json({ success: true, sports, footballMarkets: recoveredFootballMarkets });
     } catch (e) {
         res.status(500).json({ success: false, message: "Unable to load sports categories" });
     }
@@ -7422,21 +7462,6 @@ app.get('/login', (req, res) => {
 // Polysoko routes/sockets are untouched. Table creation is deferred
 // to boot (non-blocking) and uses CREATE TABLE IF NOT EXISTS + idempotent
 // ADD COLUMN only.
-const stayUploadPath = path.join(publicPath, 'uploads', 'stays');
-try {
-    if (!fs.existsSync(stayUploadPath)) fs.mkdirSync(stayUploadPath, { recursive: true });
-} catch (e) { console.warn('[stay] upload dir init failed:', e.message); }
-const stayUpload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024, files: 15 },
-    fileFilter: (req, file, cb) => {
-        const ext = path.extname(file.originalname || '').toLowerCase();
-        const mime = String(file.mimetype || '').toLowerCase();
-        if (/\.(jpeg|jpg|png|webp|gif)$/.test(ext) && /^image\/(jpeg|png|webp|gif)$/.test(mime)) return cb(null, true);
-        cb(new Error('Only images are allowed'));
-    },
-});
-
 // Multi-channel booking confirmation: SMS (Africa's Talking) + HTML email
 // (Nodemailer, guest receipt + admin alert) + live socket toast. Fire-and-forget.
 const notifyStayBooking = async (type, b) => {
@@ -7518,35 +7543,7 @@ try {
     if (stayRoutes && stayRoutes.createStayApiRouter) {
         app.use('/api', stayRoutes.createStayApiRouter({ dbAll, dbGet, dbRun, withTransaction, authenticateAdmin, notifyStayBooking, startStayPayment }));
         stayMounted = true;
-        console.log('🏠 Stay & Roam API mounted: /api/stays, /api/admin/bookings, /api/admin/properties, /api/admin/stays/upload');
-        // Admin multi-image upload (up to 15 photos, sharp-compressed server-side).
-        // Returns web paths for the images JSON column.
-        app.post('/api/admin/stays/upload', authenticateAdmin, (req, res) => {
-            stayUpload.array('photos', 15)(req, res, async (err) => {
-                if (err) {
-                    const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Each photo must be 5MB or smaller'
-                        : err.code === 'LIMIT_FILE_COUNT' ? 'Maximum 15 photos per upload'
-                        : (err.message || 'Upload failed');
-                    return res.status(400).json({ success: false, message: msg });
-                }
-                try {
-                    const { default: sharp } = await import('sharp');
-                    const files = [];
-                    for (const f of (req.files || []).slice(0, 15)) {
-                        const name = 'stay-' + Date.now() + '-' + Math.round(Math.random() * 1E9) + '.webp';
-                        const out = path.join(stayUploadPath, name);
-                        await sharp(f.buffer).rotate().resize({ width: 1280, withoutEnlargement: true }).webp({ quality: 72 }).toFile(out);
-                        files.push(`/uploads/stays/${name}`);
-                    }
-                    if (!files.length) return res.status(400).json({ success: false, message: 'No photos received' });
-                    res.json({ success: true, files });
-                } catch (e) {
-                    console.error('[stay] compress failed:', e.message);
-                    res.status(500).json({ success: false, message: 'Image compression failed' });
-                }
-            });
-        });
-        console.log('🏠 Stay & Roam upload mounted: POST /api/admin/stays/upload (15 photos max)');
+        console.log('🏠 Stay & Roam API mounted: /api/stays, /api/admin/bookings, /api/admin/properties');
     }
 } catch (e) {
     console.error('[stay] mount failed (existing routes unaffected):', e.message);

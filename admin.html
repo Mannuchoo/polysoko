@@ -11,6 +11,7 @@
         img-src 'self' data: https:; 
         media-src 'self' data: blob: https:; 
         frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com;">
+    <script src="./dialogs.js?v=1"></script>
     <script>
         const ADMIN_DEFAULT_API_BASE = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname) ? window.location.origin : "https://api.polysoko.online";
         const ADMIN_LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1"];
@@ -1151,11 +1152,10 @@ button, input, select {
                 <textarea id="stayDesc" placeholder="Description" rows="2" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;"></textarea>
                 <div style="margin-top:10px;color:#9fb0c0;font-size:.82rem;">Amenities (tick to include):</div>
                 <div id="stayAmenRow" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;font-size:.82rem;color:#cfe3ff;"></div>
-                <div style="margin-top:10px;color:#9fb0c0;font-size:.82rem;">Photos (up to 15 — upload files or paste URLs):</div>
+                <div style="margin-top:10px;color:#9fb0c0;font-size:.82rem;">Photos (up to 15 — files upload to Cloudinary):</div>
                 <input id="stayPhotoFiles" type="file" accept="image/*" multiple style="width:100%;margin-top:8px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
                 <div id="stayUploadBar" style="display:none;margin-top:8px;background:#111;border:1px solid #333;border-radius:8px;overflow:hidden;"><div id="stayUploadFill" style="height:8px;width:0%;background:linear-gradient(135deg,#00ff88,#00c96b);"></div></div>
                 <div id="stayPreviewRow" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;"></div>
-                <input id="stayImages" placeholder="Image URL(s), comma separated (or use upload above)" style="width:100%;margin-top:10px;padding:10px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;" />
                 <button onclick="createStayProperty()" class="btn-primary" style="margin-top:10px;padding:11px 16px;">Add Property</button>
                 <div id="stayFormMsg" style="margin-top:8px;font-size:.85rem;color:#8b98a5;"></div>
             </div>
@@ -1163,7 +1163,13 @@ button, input, select {
                 <h3 style="margin:0;">Manage properties</h3>
                 <button onclick="loadStayProperties()" class="btn-primary" style="padding:8px 14px;font-size:.75rem;">Refresh</button>
             </div>
-            <div class="table-responsive"><table class="market-table"><thead><tr><th>Property</th><th>Price / night</th><th>Photos</th><th>Actions</th></tr></thead><tbody id="stayPropertiesTable"><tr><td colspan="4">Loading properties…</td></tr></tbody></table></div>
+            <div id="stayPropertiesGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:14px;"><div style="color:#8b98a5;">Loading properties…</div></div>
+            <div id="stayPropertyDetailModal" style="display:none;position:fixed;inset:0;z-index:10050;background:#000c;overflow:auto;padding:24px;" onclick="if(event.target===this) closeStayPropertyDetail()">
+                <div style="max-width:980px;margin:3vh auto;background:#0d1118;border:1px solid #35404d;border-radius:16px;padding:20px;box-shadow:0 20px 70px #000;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;"><div><h2 id="stayDetailHeading" style="margin:0;">Property details</h2><div id="stayDetailFinance" style="color:#9fb0c0;margin-top:6px;"></div></div><button onclick="closeStayPropertyDetail()" style="padding:8px 12px;">Close</button></div>
+                    <div id="stayDetailBody" style="margin-top:18px;">Loading…</div>
+                </div>
+            </div>
             <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:22px;">
                 <h3 style="margin:0;">Bookings</h3>
                 <button onclick="loadStayAdmin()" class="btn-primary" style="padding:8px 14px;font-size:.75rem;">Refresh</button>
@@ -1741,28 +1747,69 @@ async function loadStayAdmin() {
     }
 }
 async function loadStayProperties() {
-    const tb = document.getElementById('stayPropertiesTable');
-    if (!tb) return;
+    const grid = document.getElementById('stayPropertiesGrid');
+    if (!grid) return;
     try {
         const res = await API.get('/admin/stays');
         const rows = res.properties || [];
-        if (!rows.length) { tb.innerHTML = '<tr><td colspan="4">No properties yet.</td></tr>'; return; }
-        tb.innerHTML = rows.map(p => `<tr><td><b>${esc(p.title)}</b><br><small>${esc(p.location)} · ${Number(p.max_guests || 2)} guests</small></td>` +
-            `<td><input id="stayPrice-${Number(p.id)}" type="number" min="1" value="${Number(p.price_per_night)}" style="width:110px;padding:6px;background:#000;color:#fff;border:1px solid #333;border-radius:6px;"></td>` +
-            `<td>${(p.images || []).length}/15 <input id="stayPhotos-${Number(p.id)}" type="file" accept="image/*" multiple style="max-width:170px;"></td>` +
-            `<td><button onclick="saveStayProperty(${Number(p.id)})" class="btn-primary" style="padding:6px 9px;font-size:.7rem;">Save price</button> ` +
-            `<button onclick="uploadStayPropertyPhotos(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Add photos</button> ` +
-            `<button onclick="editStayImages(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Manage photos</button> ` +
-            `<button onclick="editStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;">Edit details</button> ` +
-            (Number(p.is_active) === 0
-                ? `<button onclick="restoreStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;background:#12301f;color:#8fffc0;border:1px solid #245a3b;border-radius:8px;cursor:pointer;">Restore</button>`
-                : `<button onclick="deleteStayProperty(${Number(p.id)})" style="padding:6px 9px;font-size:.7rem;background:#3a1214;color:#ff8080;border:1px solid #5a1e22;border-radius:8px;cursor:pointer;">Delete</button>`)+`</td></tr>`).join('');
-    } catch (e) { tb.innerHTML = `<tr><td colspan="4" style="color:#ff8080;">${esc(e.message || 'Failed to load properties')}</td></tr>`; }
+        if (!rows.length) { grid.innerHTML = '<div style="color:#8b98a5;">No properties yet.</div>'; return; }
+        grid.innerHTML = rows.map(p => {
+            const id = Number(p.id), image = Array.isArray(p.images) && p.images[0] ? p.images[0] : '';
+            const archived = Number(p.is_active) === 0;
+            return `<button type="button" onclick="openStayPropertyDetail(${id})" style="text-align:left;padding:0;overflow:hidden;background:#10151d;border:1px solid #303a46;border-radius:13px;color:#fff;cursor:pointer;">
+              <div style="height:155px;background:#080b10;position:relative;">${image ? `<img src="${esc(image)}" alt="${esc(p.title)}" style="width:100%;height:100%;object-fit:cover;">` : '<div style="height:100%;display:grid;place-items:center;color:#718096;">No property photo</div>'}<span style="position:absolute;top:10px;right:10px;background:${archived?'#56252a':'#123923'};padding:5px 9px;border-radius:20px;font-size:.72rem;">${archived?'Archived':'Active'}</span></div>
+              <div style="padding:13px;"><strong style="font-size:1rem;">${esc(p.title)}</strong><div style="color:#aab6c3;margin:5px 0 10px;">${esc(p.location||'Finance record')} · ${Number(p.max_guests||0)} guests · ${(p.images||[]).length} photos</div><div style="color:#78e5ae;font-weight:700;">${Number(p.price_per_night||0)>0?`KSh ${Number(p.price_per_night).toLocaleString()} / night`:'Listing details cleared'}</div><div style="color:#758393;font-size:.78rem;margin-top:10px;">Click to view details and edit</div></div></button>`;
+        }).join('');
+    } catch (e) { grid.innerHTML = `<div style="color:#ff8080;">${esc(e.message || 'Failed to load properties')}</div>`; }
+}
+function closeStayPropertyDetail() { document.getElementById('stayPropertyDetailModal').style.display = 'none'; }
+async function openStayPropertyDetail(id) {
+    const modal = document.getElementById('stayPropertyDetailModal'), body = document.getElementById('stayDetailBody');
+    modal.style.display = 'block'; body.innerHTML = 'Loading property details…';
+    try {
+        const {property:p,finance:f={},bookings=[]} = await API.get(`/admin/properties/${id}`);
+        p.images = window.stayDetailImageDrafts?.[id] || p.images || [];
+        window.stayDetailProperty = p;
+        document.getElementById('stayDetailHeading').textContent = p.title || `Property #${id}`;
+        document.getElementById('stayDetailFinance').textContent = `Finance · ${Number(f.booking_count||0)} bookings · KSh ${Number(f.paid_revenue||0).toLocaleString()} paid · KSh ${Number(f.booked_value||0).toLocaleString()} booked`;
+        const amenities = Array.isArray(p.amenities)?p.amenities:[];
+        const hasLegacyPhotos=(p.images||[]).some(src=>!/^https:\/\/res\.cloudinary\.com\//i.test(String(src)));
+        const imgs = (p.images||[]).map((src,i)=>`<div style="position:relative;"><img src="${esc(src)}" alt="Property photo ${i+1}" style="width:112px;height:86px;object-fit:cover;border-radius:8px;border:1px solid #35404d;"><button type="button" onclick="removeStayDetailPhoto(${i})" style="position:absolute;right:3px;top:3px;background:#491b20;color:white;border:0;border-radius:50%;width:24px;height:24px;">×</button></div>`).join('');
+        const bookingRows=bookings.slice(0,12).map(b=>`<tr><td>${esc(b.booking_reference||'')}</td><td>${esc(b.guest_name||'')}</td><td>${esc(b.check_in||'')} – ${esc(b.check_out||'')}</td><td>KSh ${Number(b.total_price||0).toLocaleString()}</td><td>${esc(b.payment_status||'')}</td></tr>`).join('');
+        body.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">
+          <label>Title<input id="stayEditTitle" value="${esc(p.title||'')}" class="stay-detail-input"></label><label>Public location<input id="stayEditLocation" value="${esc(p.location||'')}" class="stay-detail-input"></label><label>Price per night (KSh)<input id="stayEditPrice" type="number" min="1" value="${Number(p.price_per_night||0)}" class="stay-detail-input"></label><label>Maximum guests<input id="stayEditGuests" type="number" min="1" value="${Number(p.max_guests||2)}" class="stay-detail-input"></label>
+          <label style="grid-column:1/-1;">Description<textarea id="stayEditDescription" rows="3" class="stay-detail-input">${esc(p.description||'')}</textarea></label>
+          <label>Latitude<input id="stayEditLat" value="${esc(p.latitude??'')}" class="stay-detail-input"></label><label>Longitude<input id="stayEditLng" value="${esc(p.longitude??'')}" class="stay-detail-input"></label><label>Google Maps link<input id="stayEditMaps" value="${esc(p.google_maps_link||'')}" class="stay-detail-input"></label><label>Exact address<input id="stayEditAddress" value="${esc(p.exact_address||'')}" class="stay-detail-input"></label>
+          <label style="grid-column:1/-1;">Amenities (comma separated)<input id="stayEditAmenities" value="${esc(amenities.join(', '))}" class="stay-detail-input"></label></div>
+          <h3 style="margin:20px 0 8px;">Photos (${(p.images||[]).length}/15) · Cloudinary</h3>${hasLegacyPhotos?'<div style="padding:9px;margin-bottom:8px;background:#302611;color:#ffd781;border-radius:7px;">Some existing photos are stored outside Cloudinary. Replace them with uploaded photos before saving.</div>':''}<div style="display:flex;flex-wrap:wrap;gap:8px;">${imgs||'<span style="color:#8995a2;">No photos attached</span>'}</div>
+          <label style="display:block;margin-top:12px;"><input id="stayReplacePhotos" type="checkbox"> Replace all existing photos with selected uploads</label><input id="stayDetailPhotoFiles" type="file" accept="image/*" multiple style="margin-top:8px;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;"><button onclick="saveStayDetail(${id})" class="btn-primary" style="padding:9px 14px;">${Number(p.is_active)===0?'Save and restore listing':'Save property'}</button>${Number(p.is_active)!==0?`<button onclick="deleteStayProperty(${id})" style="padding:9px 14px;background:#3a1214;color:#ff9c9c;">Delete listing</button>`:''}</div>
+          <h3 style="margin:22px 0 8px;">Booking and finance history</h3><div class="table-responsive"><table class="market-table"><thead><tr><th>Reference</th><th>Guest</th><th>Dates</th><th>Amount</th><th>Status</th></tr></thead><tbody>${bookingRows||'<tr><td colspan="5">No bookings recorded.</td></tr>'}</tbody></table></div>`;
+        body.insertAdjacentHTML('beforeend','<style>.stay-detail-input{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:9px;background:#05070a;color:#fff;border:1px solid #394553;border-radius:7px;}</style>');
+    } catch(e) { body.innerHTML=`<div style="color:#ff8080;">${esc(e.message||'Could not load property')}</div>`; }
+}
+function removeStayDetailPhoto(index) { const p=window.stayDetailProperty; if(!p)return; p.images=p.images.filter((_,i)=>i!==index); window.stayDetailImageDrafts=window.stayDetailImageDrafts||{}; window.stayDetailImageDrafts[p.id]=p.images; openStayPropertyDetail(p.id); }
+async function saveStayDetail(id) {
+    try {
+        const p=window.stayDetailProperty, files=[...(document.getElementById('stayDetailPhotoFiles').files||[])];
+        const replace=document.getElementById('stayReplacePhotos').checked;
+        let images=replace?[]:[...(p.images||[])];
+        if(!replace && images.some(url=>!/^https:\/\/res\.cloudinary\.com\//i.test(String(url))))
+            throw new Error('This property has older non-Cloudinary photos. Select “Replace all existing photos” and upload Cloudinary photos to continue.');
+        if(files.length){if(images.length+files.length>15)throw new Error('Maximum 15 photos per property.'); images.push(...await uploadStayPhotos(files));}
+        const update={title:document.getElementById('stayEditTitle').value.trim(),location:document.getElementById('stayEditLocation').value.trim(),price_per_night:Number(document.getElementById('stayEditPrice').value),max_guests:Number(document.getElementById('stayEditGuests').value),description:document.getElementById('stayEditDescription').value,latitude:document.getElementById('stayEditLat').value,longitude:document.getElementById('stayEditLng').value,google_maps_link:document.getElementById('stayEditMaps').value,exact_address:document.getElementById('stayEditAddress').value,amenities:document.getElementById('stayEditAmenities').value.split(',').map(x=>x.trim()).filter(Boolean),images};
+        if(Number(p.is_active)===0)update.is_active=1;
+        await API.patch(`/admin/properties/${id}`,update);
+        if(window.stayDetailImageDrafts)delete window.stayDetailImageDrafts[id];
+        await loadStayProperties(); await openStayPropertyDetail(id);
+    } catch(e){alert(e.message||'Could not save property');}
 }
 async function deleteStayProperty(id) {
-    if (!confirm('Remove this property from the public listing? Existing booking history will be kept.')) return;
+    if (!await window.showAppConfirm('Delete listing details and photos? Booking and finance history stays available for accounting; pending bookings will be cancelled.', { title: 'Delete property', danger: true, confirmLabel: 'Delete listing' })) return;
     try {
         await API.delete(`/admin/properties/${id}`);
+        window.stayDetailProperty=null;
+        closeStayPropertyDetail();
         await loadStayProperties();
     } catch (e) { alert(e.message || 'Could not delete property'); }
 }
@@ -1772,53 +1819,8 @@ async function restoreStayProperty(id) {
         await loadStayProperties();
     } catch (e) { alert(e.message || 'Could not restore property'); }
 }
-async function saveStayProperty(id) {
-    try { await API.patch(`/admin/properties/${id}`, { price_per_night: Number(document.getElementById(`stayPrice-${id}`).value) }); await loadStayProperties(); }
-    catch (e) { alert(e.message || 'Could not save price'); }
-}
-async function editStayProperty(id) {
-    try {
-        const res = await API.get('/admin/stays');
-        const p = (res.properties || []).find(x => Number(x.id) === id);
-        if (!p) throw new Error('Property not found');
-        const title = prompt('Property title', p.title); if (title == null) return;
-        const location = prompt('Public area / location', p.location); if (location == null) return;
-        const description = prompt('Description', p.description || ''); if (description == null) return;
-        await API.patch(`/admin/properties/${id}`, { title, location, description });
-        await loadStayProperties();
-    } catch (e) { alert(e.message || 'Could not update property'); }
-}
-async function uploadStayPropertyPhotos(id) {
-    try {
-        const input = document.getElementById(`stayPhotos-${id}`);
-        const files = [...(input.files || [])];
-        if (!files.length) return alert('Choose one or more photos first.');
-        if (files.length > 15) throw new Error('Maximum 15 photos per property.');
-        const current = await API.get('/admin/stays');
-        const p = (current.properties || []).find(x => Number(x.id) === id);
-        if (!p) throw new Error('Property not found');
-        if ((p.images || []).length + files.length > 15) throw new Error(`This property has ${(p.images || []).length} photos. Choose ${15 - (p.images || []).length} or fewer.`);
-        const uploaded = await uploadStayPhotos(files);
-        const images = [...(p.images || []), ...uploaded];
-        await API.patch(`/admin/properties/${id}`, { images });
-        await loadStayProperties();
-    } catch (e) { alert(e.message || 'Photo upload failed'); }
-}
-async function editStayImages(id) {
-    try {
-        const res = await API.get('/admin/stays');
-        const p = (res.properties || []).find(x => Number(x.id) === id);
-        if (!p) throw new Error('Property not found');
-        const value = prompt('Image URLs or uploaded paths, comma separated (maximum 15). Remove a path to remove that photo.', (p.images || []).join(', '));
-        if (value == null) return;
-        const images = value.split(',').map(x => x.trim()).filter(Boolean);
-        if (images.length > 15) throw new Error('Maximum 15 photos per property.');
-        await API.patch(`/admin/properties/${id}`, { images });
-        await loadStayProperties();
-    } catch (e) { alert(e.message || 'Could not update photos'); }
-}
 async function verifyStayPin(id) {
-    const pin = prompt('Enter the guest check-in PIN'); if (pin == null) return;
+    const pin = await window.showAppPrompt('Enter the guest check-in PIN', '', { title: 'Verify check-in PIN', inputType: 'password', label: 'Guest check-in PIN' }); if (pin == null) return;
     try { const r = await API.post(`/admin/bookings/${id}/verify-pin`, { pin }); alert(r.valid ? 'PIN verified.' : 'PIN does not match a paid booking.'); }
     catch (e) { alert(e.message || 'PIN verification failed'); }
 }
@@ -1833,7 +1835,7 @@ async function createStayProperty() {
     msg.style.color = '#8b98a5'; msg.textContent = 'Saving...';
     try {
         const amenities = [...document.querySelectorAll('#stayAmenRow input:checked')].map((x) => x.value);
-        let images = String(document.getElementById('stayImages').value || '').split(',').map((s) => s.trim()).filter(Boolean);
+        let images = [];
         const files = [...(document.getElementById('stayPhotoFiles').files || [])];
         if (files.length > 15) throw new Error('Maximum 15 photos per property.');
         if (files.length) {
@@ -1856,7 +1858,7 @@ async function createStayProperty() {
         if (!res.success) throw new Error(res.message || 'Save failed');
         await loadStayProperties();
         msg.style.color = '#00ff88'; msg.textContent = 'Property added.';
-        ['stayTitle', 'stayLocation', 'stayPrice', 'stayDesc', 'stayImages', 'stayLat', 'stayLng', 'stayMaps', 'stayAddr'].forEach((id) => { document.getElementById(id).value = ''; });
+        ['stayTitle', 'stayLocation', 'stayPrice', 'stayDesc', 'stayLat', 'stayLng', 'stayMaps', 'stayAddr'].forEach((id) => { document.getElementById(id).value = ''; });
         document.getElementById('stayPhotoFiles').value = '';
         document.getElementById('stayPreviewRow').innerHTML = '';
         document.querySelectorAll('#stayAmenRow input:checked').forEach((x) => { x.checked = false; });
@@ -2050,7 +2052,7 @@ async function approveWithdraw(txId) {
 }
 
 async function rejectWithdraw(txId) {
-    const reason = prompt("Enter rejection reason:");
+    const reason = await window.showAppPrompt("Enter rejection reason:", '', { title: 'Reject withdrawal', multiline: true });
     if (reason === null) return;
     try {
         const data = await API.post('/admin/reject-withdraw', { txId, reason });
@@ -2125,7 +2127,7 @@ async function approveMarket(marketId) {
 }
 
 async function rejectMarket(marketId) {
-    if (!confirm('Are you sure you want to reject this market?')) return;
+    if (!await window.showAppConfirm('Are you sure you want to reject this market?', { title: 'Reject market', danger: true, confirmLabel: 'Reject' })) return;
     
     try {
         const data = await API.post('/admin/reject-market', { marketId });
@@ -2141,7 +2143,7 @@ async function rejectMarket(marketId) {
 }
 
 async function bulkApproveEliteMarkets() {
-    if (!confirm("Are you sure you want to bulk approve all pending markets from Elite users?")) {
+    if (!await window.showAppConfirm("Are you sure you want to bulk approve all pending markets from Elite users?", { title: 'Bulk approve markets', confirmLabel: 'Approve all' })) {
         return;
     }
 
@@ -2461,7 +2463,7 @@ async function loadAdminMarkets() {
 }
 
 async function deleteMarket(id) {
-    if (!confirm("Delete market?")) return;
+    if (!await window.showAppConfirm("Delete market?", { title: 'Delete market', danger: true, confirmLabel: 'Delete market' })) return;
 
     try {
         await API.post('/admin/delete-market', { id });
@@ -2497,7 +2499,7 @@ async function adminSettleMarket(marketId, btn) {
     if (!result) {
         return alert("Please enter a valid result outcome");
     }
-    if (!confirm(`Settle market ${marketId} as ${result}? This will payout winners.`)) return;
+    if (!await window.showAppConfirm(`Settle market ${marketId} as ${result}? This will payout winners.`, { title: 'Settle market', confirmLabel: 'Settle' })) return;
 
     btn.innerText = "Settling...";
     btn.disabled = true;
@@ -2555,7 +2557,7 @@ async function loadPendingSettlements() {
 
 async function adminSettleMarketPanel(marketId, btn) {
     const result = document.getElementById(`ps-result-${marketId}`).value;
-    if (!confirm(`Settle market ${marketId} as ${result}? Winners will be paid out.`)) return;
+    if (!await window.showAppConfirm(`Settle market ${marketId} as ${result}? Winners will be paid out.`, { title: 'Settle market', confirmLabel: 'Settle' })) return;
     btn.innerText = "Settling...";
     btn.disabled = true;
     try {
@@ -2571,7 +2573,7 @@ async function adminSettleMarketPanel(marketId, btn) {
 }
 
 async function adminVoidMarket(marketId, btn) {
-    if (!confirm(`Void market ${marketId} and refund 100% of all active stakes?`)) return;
+    if (!await window.showAppConfirm(`Void market ${marketId} and refund 100% of all active stakes?`, { title: 'Void and refund market', danger: true, confirmLabel: 'Void and refund' })) return;
     btn.innerText = "Voiding...";
     btn.disabled = true;
     try {
@@ -2626,9 +2628,9 @@ async function loadGlobalActiveBets() {
 }
 
 async function adminSettleBet(betId, sideA = 'YES', sideB = 'NO') {
-    const result = prompt(`Winning result for bet #${betId}? Use ${sideA}, ${sideB}, YES, NO, HOME, AWAY, DRAW, or CANCEL.`);
+    const result = await window.showAppPrompt(`Winning result for bet #${betId}? Use ${sideA}, ${sideB}, YES, NO, HOME, AWAY, DRAW, or CANCEL.`, '', { title: `Settle bet #${betId}` });
     if (!result) return;
-    if (!confirm(`Settle bet #${betId} using result ${result.toUpperCase()}?`)) return;
+    if (!await window.showAppConfirm(`Settle bet #${betId} using result ${result.toUpperCase()}?`, { title: 'Confirm bet settlement', confirmLabel: 'Settle bet' })) return;
 
     try {
         await API.post('/admin/settle-bet', { betId, result: result.trim().toUpperCase() });
@@ -2640,7 +2642,7 @@ async function adminSettleBet(betId, sideA = 'YES', sideB = 'NO') {
 }
 
 async function adminCancelBet(betId) {
-    if (!confirm(`Cancel and refund bet #${betId}?`)) return;
+    if (!await window.showAppConfirm(`Cancel and refund bet #${betId}?`, { title: 'Cancel and refund bet', danger: true, confirmLabel: 'Cancel and refund' })) return;
     try {
         await API.post('/admin/cancel-bet', { betId, reason: 'ADMIN_CANCELLED' });
         alert("Bet cancelled and refunded.");

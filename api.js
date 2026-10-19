@@ -515,7 +515,7 @@ async function fetchGlobalNews() {
 
 
 window.processWithdraw = async function() {
-    const amount = prompt("Enter amount to withdraw (min 100 sKES):");
+    const amount = await window.showAppPrompt("Enter amount to withdraw (min 100 sKES):", '', { title: 'Withdraw' });
     
     if (!amount || amount.trim() === "") return; 
     const withdrawAmt = parseFloat(amount);

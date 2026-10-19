@@ -194,6 +194,15 @@ function createStayApiRouter(deps) {
       res.json({ success: true, properties: (rows || []).map(fullProp) });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not load properties' }); }
   });
+  router.get('/admin/properties/:id', authenticateAdmin, async (req, res) => {
+    try {
+      const property = await dbGet(`SELECT * FROM properties WHERE id = ? LIMIT 1`, [req.params.id]);
+      if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
+      const finance = await dbGet(`SELECT COUNT(*) AS booking_count, COALESCE(SUM(total_price), 0) AS booked_value, COALESCE(SUM(CASE WHEN LOWER(payment_status) = 'paid' THEN total_price ELSE 0 END), 0) AS paid_revenue, SUM(CASE WHEN LOWER(payment_status) = 'paid' THEN 1 ELSE 0 END) AS paid_count, SUM(CASE WHEN LOWER(payment_status) = 'pending' THEN 1 ELSE 0 END) AS pending_count, SUM(CASE WHEN LOWER(payment_status) = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count FROM bookings WHERE property_id = ?`, [req.params.id]);
+      const bookings = await dbAll(`SELECT id, guest_name, guest_email, guest_phone, check_in, check_out, total_price, booking_reference, payment_status, created_at FROM bookings WHERE property_id = ? ORDER BY created_at DESC LIMIT 100`, [req.params.id]);
+      res.json({ success: true, property: fullProp(property), finance: finance || {}, bookings: bookings || [] });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not load property details' }); }
+  });
   router.post('/stays/booking/:reference/pay', async (req, res) => {
     try {
       const booking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? LIMIT 1`, [String(req.params.reference || '').trim()]);
@@ -212,6 +221,8 @@ function createStayApiRouter(deps) {
         return res.status(400).json({ success: false, message: 'Title, location and price/night required' });
       const na = (v) => (Array.isArray(v) ? v : String(v || '').split(',').map((s) => s.trim()).filter(Boolean));
       const imgs = na(p.images).slice(0, 15);
+      if (imgs.some((url) => !/^https:\/\/res\.cloudinary\.com\//i.test(String(url))))
+        return res.status(400).json({ success: false, message: 'Property photos must be uploaded to Cloudinary.' });
       const nn = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
       const r = await dbRun(`INSERT INTO properties (title, description, location, price_per_night, max_guests, amenities, images, is_active, latitude, longitude, google_maps_link, exact_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [String(p.title).trim(), String(p.description || ''), String(p.location).trim(), Number(p.price_per_night), Math.max(1, Number(p.max_guests) || 2), JSON.stringify(na(p.amenities)), JSON.stringify(imgs), Number(p.is_active) === 0 ? 0 : 1, nn(p.latitude), nn(p.longitude), p.google_maps_link ? String(p.google_maps_link) : null, p.exact_address ? String(p.exact_address) : null]);
@@ -239,7 +250,12 @@ function createStayApiRouter(deps) {
       }
       if (p.max_guests != null) set('max_guests', Math.max(1, Number(p.max_guests) || 1));
       if (p.amenities != null) set('amenities', JSON.stringify(Array.isArray(p.amenities) ? p.amenities.slice(0, 50) : []));
-      if (p.images != null) set('images', JSON.stringify((Array.isArray(p.images) ? p.images : []).filter(Boolean).slice(0, 15)));
+      if (p.images != null) {
+        const images = (Array.isArray(p.images) ? p.images : []).filter(Boolean).slice(0, 15);
+        if (images.some((url) => !/^https:\/\/res\.cloudinary\.com\//i.test(String(url))))
+          return res.status(400).json({ success: false, message: 'Property photos must be uploaded to Cloudinary.' });
+        set('images', JSON.stringify(images));
+      }
       if (p.is_active != null) set('is_active', Number(p.is_active) ? 1 : 0);
       for (const k of ['latitude', 'longitude', 'google_maps_link', 'exact_address']) {
         if (p[k] !== undefined) set(k, (p[k] === '' || p[k] == null) ? null : String(p[k]));
@@ -250,13 +266,16 @@ function createStayApiRouter(deps) {
       res.json({ success: true, id: Number(req.params.id) });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not update property' }); }
   });
-  // Keep property and booking history intact when an admin removes a listing.
+  // Keep booking and payment records for accounting, while erasing listing content.
   router.delete('/admin/properties/:id', authenticateAdmin, async (req, res) => {
     try {
       const property = await dbGet(`SELECT id FROM properties WHERE id = ? LIMIT 1`, [req.params.id]);
       if (!property) return res.status(404).json({ success: false, message: 'Property not found' });
-      await dbRun(`UPDATE properties SET is_active = 0 WHERE id = ?`, [req.params.id]);
-      res.json({ success: true, id: Number(req.params.id), archived: true });
+      await deps.withTransaction(async () => {
+        await dbRun(`UPDATE bookings SET payment_status = 'cancelled' WHERE property_id = ? AND LOWER(payment_status) = 'pending'`, [req.params.id]);
+        await dbRun(`UPDATE properties SET title = ?, description = '', location = '', max_guests = 0, amenities = '[]', images = '[]', latitude = NULL, longitude = NULL, google_maps_link = NULL, exact_address = NULL, is_active = 0 WHERE id = ?`, [`Deleted property #${Number(req.params.id)}`, req.params.id]);
+      });
+      res.json({ success: true, id: Number(req.params.id), archived: true, financeRetained: true });
     } catch (e) { res.status(500).json({ success: false, message: 'Could not delete property' }); }
   });
   async function applyStatus(id, st) {
