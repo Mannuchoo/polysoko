@@ -16,7 +16,12 @@
 .stay-badge{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#00ff88,#00c96b);color:#04120a;border-radius:999px;padding:8px 14px;font-weight:900;text-decoration:none;flex:0 0 auto;white-space:nowrap;}
 .stay-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-top:16px;}
 .stay-card{background:#10161d;border:1px solid #223041;border-radius:16px;overflow:hidden;}
+.stay-card{position:relative;}
 .stay-card img{width:100%;height:190px;object-fit:cover;display:block;background:#0a0f14;}
+.stay-favorite{position:absolute;top:10px;right:10px;z-index:2;width:42px;height:42px;border-radius:50%;border:1px solid #ffffff66;background:#080b10d9;color:#fff;font-size:1.5rem;line-height:1;cursor:pointer;box-shadow:0 3px 12px #0008;}
+.stay-favorite[aria-pressed="true"]{color:#ff5d7d;border-color:#ff5d7d;background:#180b11e8;}
+.stay-fav-toggle{width:auto;margin:12px 0 0;padding:9px 13px;background:#111923;color:#dce6ef;border:1px solid #304052;border-radius:9px;cursor:pointer;font-weight:800;}
+.stay-fav-toggle[aria-pressed="true"]{color:#ff8298;border-color:#ff5d7d;}
 .stay-body{padding:14px;}
 .pillrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
 .pillx{font-size:.72rem;background:#182633;border:1px solid #2b3d52;color:#cfe3ff;border-radius:999px;padding:4px 10px;}
@@ -60,6 +65,8 @@
 <select id="stayGuests"><option value="">Any guests</option><option value="2">2+ guests</option><option value="4">4+ guests</option><option value="6">6+ guests</option></select>
 <select id="staySort"><option value="new">Recommended</option><option value="low">Price: low to high</option><option value="high">Price: high to low</option></select>
 </div>
+<button id="stayFavoritesToggle" class="stay-fav-toggle" type="button" aria-pressed="false" onclick="toggleStayFavoritesView()">♡ Favorites (0)</button>
+<div id="stayAccountNudge" style="display:none;margin-top:12px;padding:12px 14px;background:#101923;border:1px solid #304052;border-radius:10px;color:#aebbc8;font-size:.88rem;">Your favorites are saved on this device. <a href="./login.html?mode=register" style="color:#00ff88;font-weight:800;">Create a free account</a> to access the full PolySoko experience.</div>
 <div id="stayGrid" class="stay-grid"><p style="color:#8b98a5;">Loading stays...</p></div>
 </main>
 <div id="stayModal" class="stay-modal"><div class="stay-sheet">

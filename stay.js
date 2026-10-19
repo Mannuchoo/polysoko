@@ -1,4 +1,49 @@
 let STAYS = [];
+var STAY_FAVORITES_KEY = 'polysoko_stay_favorites_v1';
+var STAY_FAVORITES_PROMPT_KEY = 'polysoko_stay_favorites_signup_prompted_v1';
+var STAY_FAVORITES = readStayFavorites();
+var SHOW_STAY_FAVORITES = false;
+var stayFavoritesPrompted = false;
+function readStayFavorites() {
+  try {
+    var value = JSON.parse(localStorage.getItem(STAY_FAVORITES_KEY) || '[]');
+    return Array.isArray(value) ? [...new Set(value.map(String).filter(function (id) { return /^\d+$/.test(id); }))] : [];
+  } catch (e) { return []; }
+}
+function saveStayFavorites() {
+  try { localStorage.setItem(STAY_FAVORITES_KEY, JSON.stringify(STAY_FAVORITES)); } catch (e) { /* memory still works for this page session */ }
+}
+function isStayFavorite(id) { return STAY_FAVORITES.indexOf(String(id)) !== -1; }
+function syncStayFavoriteControls() {
+  var toggle = document.getElementById('stayFavoritesToggle');
+  if (toggle) {
+    toggle.textContent = (SHOW_STAY_FAVORITES ? '♥' : '♡') + ' Favorites (' + STAY_FAVORITES.length + ')';
+    toggle.setAttribute('aria-pressed', String(SHOW_STAY_FAVORITES));
+  }
+  var nudge = document.getElementById('stayAccountNudge');
+  if (nudge) nudge.style.display = STAY_FAVORITES.length && !localStorage.getItem('token') ? 'block' : 'none';
+}
+function toggleStayFavoritesView() {
+  SHOW_STAY_FAVORITES = !SHOW_STAY_FAVORITES;
+  syncStayFavoriteControls();
+  renderStays();
+}
+function toggleStayFavorite(id, event) {
+  if (event) { event.preventDefault(); event.stopPropagation(); }
+  var key = String(id), wasFavorite = isStayFavorite(key);
+  STAY_FAVORITES = wasFavorite ? STAY_FAVORITES.filter(function (favoriteId) { return favoriteId !== key; }) : STAY_FAVORITES.concat(key);
+  saveStayFavorites();
+  syncStayFavoriteControls();
+  renderStays();
+  if (!wasFavorite && !localStorage.getItem('token')) {
+    try { stayFavoritesPrompted = localStorage.getItem(STAY_FAVORITES_PROMPT_KEY) === '1'; } catch (e) { /* use page-session flag */ }
+    if (!stayFavoritesPrompted) {
+      stayFavoritesPrompted = true;
+      try { localStorage.setItem(STAY_FAVORITES_PROMPT_KEY, '1'); } catch (e) { /* use page-session flag */ }
+      window.showAppDialog('This property is saved to Favorites on this device and will still be here when you return on it. Create a free account for the full PolySoko experience.', { title: 'Favorite saved' });
+    }
+  }
+}
 function fmtKSh(n) { return 'KSh ' + Number(n || 0).toLocaleString('en-KE'); }
 function escH(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (m) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]; }); }
 function stayImgs(s) {
@@ -48,7 +93,7 @@ function filteredStays() {
   var sort = document.getElementById('staySort').value;
   var list = STAYS.filter(function (s) {
     var hay = ((s.title || '') + ' ' + (s.location || '')).toLowerCase();
-    return (!q || hay.indexOf(q) >= 0) && (!g || Number(s.max_guests || 0) >= g);
+    return (!SHOW_STAY_FAVORITES || isStayFavorite(s.id)) && (!q || hay.indexOf(q) >= 0) && (!g || Number(s.max_guests || 0) >= g);
   });
   if (sort === 'low') list = list.slice().sort(function (a, b) { return a.price_per_night - b.price_per_night; });
   if (sort === 'high') list = list.slice().sort(function (a, b) { return b.price_per_night - a.price_per_night; });
@@ -57,9 +102,11 @@ function filteredStays() {
 function renderStays() {
   var grid = document.getElementById('stayGrid');
   var list = filteredStays();
+  syncStayFavoriteControls();
   if (!list.length) { grid.innerHTML = '<p style="color:#8b98a5;">No stays match your search yet.</p>'; return; }
   grid.innerHTML = list.map(function (s) {
-    return '<article class="stay-card"><img src="' + escH(stayImg(s)) + '" alt="" loading="lazy" />' +
+    var id = Number(s.id), favorite = isStayFavorite(id);
+    return '<article class="stay-card"><button class="stay-favorite" type="button" aria-label="' + (favorite ? 'Remove ' : 'Add ') + escH(s.title) + ' ' + (favorite ? 'from' : 'to') + ' favorites" aria-pressed="' + favorite + '" onclick="toggleStayFavorite(' + id + ', event)">' + (favorite ? '♥' : '♡') + '</button><img src="' + escH(stayImg(s)) + '" alt="" loading="lazy" />' +
       '<div class="stay-body"><div style="font-weight:800;">' + escH(s.title) + '</div>' +
       '<div style="color:#8b98a5;font-size:.85rem;">' + escH(s.location) + ' · ' + escH(s.max_guests) + ' guests</div>' +
       '<div style="margin-top:6px;color:#00ff88;font-weight:900;">' + fmtKSh(s.price_per_night) + ' <span style="color:#8b98a5;font-weight:400;font-size:.8rem;">/ night</span></div>' +

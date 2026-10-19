@@ -225,6 +225,7 @@
 
         document.addEventListener("DOMContentLoaded", async () => { 
             checkVerifiedRedirect();
+            if (new URLSearchParams(window.location.search).get('mode') === 'register') scrollToAuth('register');
             if(window.showWelcomeHeader) window.showWelcomeHeader(); 
             console.log("Login module initialized.");
             const marketList = document.getElementById("marketsList");
