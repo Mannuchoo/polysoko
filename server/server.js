@@ -1165,6 +1165,7 @@ function buildNewsQuestion(headline) {
         .replace(/\?+$/g, '')
         .trim();
     if (!clean) return 'Is this report accurate?';
+    if (clean.endsWith('?')) return polishMarketTitle(clean);
 
     const lower = clean.toLowerCase();
     const tmdbQuestion = buildTmdbQuestion(clean);
@@ -1464,7 +1465,8 @@ function buildFallbackMarketQuestion(headline) {
     const topic = extractMarketTopic(clean);
     if (actor && topic) return `Is ${actor} likely to face fallout over ${topic}?`;
     if (actor) return `Is ${actor} likely to stay in the spotlight?`;
-    return `Is this story likely to develop further?`;
+    const claim = clean.replace(/[.!?]+$/g, '').slice(0, 105).trim();
+    return claim ? `Is this headline accurate: “${claim}”?` : 'Is this report accurate?';
 }
 
 function buildFootballQuestion(headline) {
@@ -1595,71 +1597,16 @@ function buildPersonaInsight(headline) {
     return `Market insight: ${base}. ${hook} This feels ${keyword.toLowerCase()} unless trends shift.`;
 }
 
-// --- GEOPOLITICAL NEWS DETECTION ---
-function isGeopoliticalNews(headline, description) {
-    const text = `${headline || ''} ${description || ''}`.toLowerCase();
-    
-    // Geopolitical keywords that indicate political, diplomatic, or international affairs news
-    const geopoliticalKeywords = [
-        // Government & Diplomacy
-        'parliament', 'congress', 'senate', 'minister', 'government', 'diplomat', 'ambassador',
-        'treaty', 'sanctions', 'embargo', 'resolution', 'legislation', 'bill',
-        
-        // Elections & Politics
-        'election', 'vote', 'campaign', 'candidate', 'political', 'politician', 'party',
-        'referendum', 'ballots', 'voting', 'inauguration',
-        
-        // International Relations
-        'war', 'conflict', 'border', 'invasion', 'military', 'troops', 'deployed',
-        'ceasefire', 'peace talks', 'negotiations', 'tension', 'crisis',
-        
-        // Regional & Global Issues
-        'russia', 'china', 'iran', 'ukraine', 'israel', 'palestine', 'middle east',
-        'north korea', 'south korea', 'taiwan', 'eu', 'brexit', 'nato', 'un',
-        'united nations', 'security council', 'geopolitical',
-        
-        // Economic Sanctions & Trade Wars
-        'tariff', 'trade war', 'trade deal', 'export ban', 'import ban', 'trade agreement',
-        'commerce department', 'trade policy',
-        
-        // Protests & Civil Unrest
-        'protest', 'demonstration', 'riot', 'civil unrest', 'martial law', 'coup', 'uprising',
-        'revolution', 'rebellion',
-        
-        // Key Politicians & Leaders
-        'trump', 'biden', 'putin', 'xi jinping', 'modi', 'macron', 'sunak', 'zelensky',
-        'johnson', 'scholz', 'draghi', 'sanchez',
-        
-        // International Organizations & Summits
-        'summit', 'g7', 'g20', 'imf', 'world bank', 'wto', 'oecd', 'brics',
-        'apec', 'asean', 'european union',
-        
-        // Weapons & Military Technology
-        'nuclear', 'missile', 'drone strike', 'weapons', 'military exercise', 'defense',
-        'airstrikes', 'bombardment', 'naval'
-    ];
-    
-    // Check if any geopolitical keyword matches
-    return geopoliticalKeywords.some(keyword => text.includes(keyword));
-}
-
-function isTechNews(headline, description) {
-    const text = `${headline || ''} ${description || ''}`.toLowerCase();
-    const techKeywords = [
-        'tech', 'technology', 'software', 'hardware', 'app', 'apps', 'internet',
-        'startup', 'silicon', 'chip', 'semiconductor', 'cpu', 'gpu', 'ai', 'artificial intelligence',
-        'machine learning', 'robot', 'robotics', 'cloud', 'data breach', 'cyber', 'cybersecurity',
-        'hack', 'hacker', 'security', 'smartphone', 'mobile', 'device', 'gadget',
-        'streaming', 'vr', 'ar', 'metaverse', 'blockchain', 'web3', 'nft', 'crypto',
-        'google', 'apple', 'microsoft', 'amazon', 'tesla', 'meta', 'facebook', 'netflix',
-        'spotify', 'elon musk', 'twitter', 'x.com', 'samsung', 'intel', 'amd',
-        'nvidia', 'oracle', 'ibm', 'qualcomm', 'sap', 'tiktok', 'wechat',
-        'drone', 'satellite', '5g', '6g', 'quantum', 'ai chip', 'sensor',
-        'autonomous', 'autonomy', 'self-driving', 'electric vehicle', 'ev',
-        'software update', 'operating system', 'ios', 'android'
-    ];
-    return techKeywords.some(keyword => text.includes(keyword));
-}
+const NEWS_CATEGORY_PATTERNS = {
+    politics: [
+        /\b(election|vote|voting|ballot|candidate|campaign|referendum|politic(?:al|ian)?|parliament|congress|senate|government|president|prime minister|governor|minister|legislation|bill|policy|diplomat|ambassador|treaty|sanction|tariff|ceasefire|peace talks|war|conflict|invasion|military|troops|protest|riot|coup|uprising|nato|united nations|security council|summit|geopolitical)\b/i,
+        /\b(trump|biden|putin|xi jinping|modi|macron|zelensky|sunak|scholz|sanchez)\b/i
+    ],
+    tech: [
+        /\b(technology|tech|software|hardware|startup|semiconductor|chip|cpu|gpu|ai|artificial intelligence|machine learning|large language model|llm|chatgpt|robotics?|cloud computing|data breach|cyber(?:security)?|hacker|smartphone|gadget|streaming|virtual reality|augmented reality|metaverse|blockchain|web3|nft|5g|6g|quantum computing|self-driving|electric vehicle|software update|operating system|ios|android)\b/i,
+        /\b(openai|anthropic|xai|google|apple|microsoft|amazon|tesla|meta|facebook|netflix|spotify|samsung|intel|amd|nvidia|oracle|ibm|qualcomm|tiktok|wechat)\b/i
+    ]
+};
 
 function createMatchNewsQuery(teamA, teamB) {
     const safeTeamA = teamA ? teamA.replace(/[^a-zA-Z0-9 ]/g, ' ').trim() : '';
@@ -1683,32 +1630,15 @@ function isFootballNews(title, content = '') {
 
 function classifyNewsArticle(title, content = '') {
     const text = `${title || ''} ${content || ''}`;
-    
-    // Football-specific news goes to its own category
-    if (isFootballNews(title, content)) {
-        return { category: 'football', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'news_football' };
-    }
-
-    // Keep political and geopolitical stories in Politics even when their
-    // descriptions also mention technology, sports, or other broad topics.
-    if (isGeopoliticalNews(title, content)) {
+    const hasMatch = (patterns) => patterns.some((pattern) => pattern.test(text));
+    // Politics has priority when a story also mentions technology or business.
+    if (hasMatch(NEWS_CATEGORY_PATTERNS.politics)) {
         return { category: 'politics', sideA: 'LIKELY', sideB: 'UNLIKELY', expiryHours: 48, prefix: 'geo' };
     }
-    
-    const sportsKeywords = [
-        'nba', 'nfl', 'mlb', 'nhl',
-        'tennis', 'cricket', 'rugby', 'golf', 'formula 1', 'f1', 'ufc', 'boxing', 'olympics',
-        'basketball', 'baseball', 'hockey', 'volleyball'
-    ];
-    const lower = text.toLowerCase();
-    const isSports = sportsKeywords.some(keyword => lower.includes(keyword));
-    if (isSports) {
-        return { category: 'sports', sideA: 'YES', sideB: 'NO', expiryHours: 18, prefix: 'news_sports' };
-    }
-    if (isTechNews(title, content)) {
+    if (hasMatch(NEWS_CATEGORY_PATTERNS.tech)) {
         return { category: 'tech', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'tech' };
     }
-    return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: 18, prefix: 'news' };
+    return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'news' };
 }
 
 function normalizeNewsArticle(article) {
@@ -1717,21 +1647,26 @@ function normalizeNewsArticle(article) {
 
     const content = article.description || article.content || rawHeadline;
     const classification = classifyNewsArticle(rawHeadline, content);
-    const hash = crypto.createHash('md5').update(rawHeadline + (article.source?.name || '') + (article.publishedAt || '')).digest('hex');
+    const sourceName = typeof article.source === 'string' ? article.source : article.source?.name;
+    const publishedAt = article.publishedAt || article.published_at || article.published || new Date().toISOString();
+    const hash = crypto.createHash('md5').update(`${rawHeadline}|${sourceName || ''}|${publishedAt}`).digest('hex');
+    const expiresAt = new Date(Date.now() + classification.expiryHours * 60 * 60 * 1000).toISOString();
     const market = buildNewsMarket({
         id: `${classification.prefix}_${hash}`,
         title: rawHeadline,
         description: content,
         content: `Headline: ${rawHeadline}\nDescription: ${content}`,
-        media_url: article.urlToImage || null,
+        media_url: article.urlToImage || article.image || article.media_url || null,
         media_type: 'image',
         category: classification.category,
-        country: article.source?.name || 'GLOBAL',
-        source: article.source?.name || 'GLOBAL',
+        country: sourceName || 'GLOBAL',
+        source: sourceName || 'GLOBAL',
         sideA: classification.sideA,
         sideB: classification.sideB,
-        url: article.url || null,
-        startTime: new Date(Date.now() + classification.expiryHours * 60 * 60 * 1000).toISOString(),
+        url: article.url || article.link || null,
+        startTime: expiresAt,
+        event_start_time: publishedAt,
+        event_end_time: expiresAt,
         status: 'open'
     });
     market.rawHeadline = rawHeadline;
@@ -1740,8 +1675,8 @@ function normalizeNewsArticle(article) {
 
 async function saveNewsMarket(market) {
     await dbRun(
-        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, status, url)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title,
             description=excluded.description,
@@ -1753,10 +1688,12 @@ async function saveNewsMarket(market) {
             sideA=excluded.sideA,
             sideB=excluded.sideB,
             startTime=excluded.startTime,
+            event_start_time=excluded.event_start_time,
+            event_end_time=excluded.event_end_time,
             status=excluded.status,
             url=excluded.url,
             timestamp=CURRENT_TIMESTAMP`,
-        [market.id, market.title, market.description, market.content, market.media_url, market.media_type, market.category, market.country, market.sideA, market.sideB, market.startTime, market.status, market.url]
+        [market.id, market.title, market.description, market.content, market.media_url, market.media_type, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time || new Date().toISOString(), market.event_end_time || market.startTime, market.status, market.url]
     );
 }
 
@@ -1770,31 +1707,49 @@ function syncNewsApiMarkets(options = {}) {
 
 async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     const apiKey = process.env.NEWS_API_KEY;
-    if (!apiKey) throw new Error('NEWS_API_KEY is not configured');
 
     const cachedNews = await dbAll(
         `SELECT *
          FROM markets
-         WHERE category IN ('news','tech','politics','sports')
-           AND (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
+         WHERE (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
            AND status IN ('open','upcoming','live')
+           AND COALESCE(event_end_time, startTime, timestamp) > NOW()
          ORDER BY timestamp DESC
          LIMIT ?`,
         [limit]
     );
     const newestCachedAt = cachedNews.length ? new Date(cachedNews[0].timestamp).getTime() : 0;
     const cacheFresh = Number.isFinite(newestCachedAt) && Date.now() - newestCachedAt < 2 * 60 * 60 * 1000;
-    const cachedArticles = cachedNews.map(article => {
+    const cachedArticles = [];
+    for (const article of cachedNews) {
         const headline = extractContentField(article.content, 'Headline') || article.rawHeadline || article.title;
-        if (!headline) return article;
+        if (!headline) {
+            cachedArticles.push(normalizeMarketRow(article));
+            continue;
+        }
         const classification = classifyNewsArticle(headline, article.description || article.content);
-        return buildNewsMarket({
+        const cachedMarket = buildNewsMarket({
             ...article,
+            id: article.id,
             category: classification.category,
             sideA: classification.sideA,
-            sideB: classification.sideB
+            sideB: classification.sideB,
+            startTime: article.startTime ?? article.starttime,
+            event_start_time: article.event_start_time || article.timestamp,
+            event_end_time: article.event_end_time || article.startTime || article.starttime
         });
-    });
+        if (String(article.category || '').toLowerCase() !== classification.category ||
+            String(article.title || '') !== cachedMarket.title ||
+            String(article.sideA || '') !== classification.sideA ||
+            String(article.sideB || '') !== classification.sideB) {
+            await saveNewsMarket(cachedMarket);
+        }
+        cachedArticles.push(cachedMarket);
+    }
+    if (!apiKey) {
+        if (!cachedNews.length) console.warn('[news] NEWS_API_KEY is not configured and the news cache is empty.');
+        return cachedArticles;
+    }
     if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
 
     // Pull a broad, international set of current headlines plus a general
@@ -1805,7 +1760,10 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
             axios.get('https://newsapi.org/v2/top-headlines', {
                 params: { country, pageSize: 100, apiKey },
                 timeout: 10000
-            }).catch(() => ({ data: { articles: [] } }))
+            }).catch(error => {
+                console.warn(`[news] NewsAPI top-headlines (${country}) failed: ${error.response?.status || error.message}`);
+                return { data: { articles: [] } };
+            })
         ),
         axios.get('https://newsapi.org/v2/everything', {
             params: {
@@ -1816,7 +1774,10 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
                 apiKey
             },
             timeout: 10000
-        }).catch(() => ({ data: { articles: [] } }))
+        }).catch(error => {
+            console.warn(`[news] NewsAPI everything failed: ${error.response?.status || error.message}`);
+            return { data: { articles: [] } };
+        })
     ];
 
     const responses = await Promise.all(requests);
@@ -1835,6 +1796,9 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         if (processedMarkets.length >= limit) break;
     }
 
+    if (!processedMarkets.length && cachedArticles.length) {
+        console.warn('[news] NewsAPI returned no articles; serving the active database cache.');
+    }
     return processedMarkets.length ? processedMarkets : cachedArticles;
 }
 
@@ -2790,8 +2754,13 @@ const authenticateAdmin = (req, res, next) => {
         let decoded;
         try {
             decoded = verifyJwt(token);
-        } catch {
-            return res.status(403).json({ success: false, code: 'TOKEN_INVALID', message: "Invalid or expired session" });
+        } catch (error) {
+            const expired = error?.name === 'TokenExpiredError';
+            return res.status(401).json({
+                success: false,
+                code: expired ? 'TOKEN_EXPIRED' : 'TOKEN_INVALID',
+                message: expired ? 'Admin session expired. Please log in again.' : 'Invalid admin session. Please log in again.'
+            });
         }
         // Must use the same resolver as the login routes. Comparing against a
         // missing ADMIN_PHONE here would reject every token that pin-login or
@@ -4075,54 +4044,6 @@ const sendDailyMarkets = () => {
 // --- AUTH MIDDLEWARE ---
 
 // --- SYNC LOGIC ---
-// Dedicated football news sync - fetches football-specific news from APIs
-const syncFootballNews = async () => {
-    const apiKey = process.env.NEWS_API_KEY;
-    if (!apiKey) return;
-
-    try {
-        const footballQueries = [
-            'FIFA World Cup favorites likely win prediction',
-            'World Cup football odds favorites winner',
-            'premier league football',
-            'champions league football',
-            'football transfer news',
-            'football injuries team news',
-            'football match preview prediction'
-        ];
-
-        const requests = footballQueries.map(q =>
-            axios.get('https://newsapi.org/v2/everything', {
-                params: { q, language: 'en', sortBy: 'publishedAt', pageSize: 8, apiKey }
-            }).catch(() => ({ data: { articles: [] } }))
-        );
-
-        const responses = await Promise.all(requests);
-        const articles = responses.flatMap(r => r.data?.articles || []);
-        const seen = new Set();
-
-        const existing = await dbAll(`SELECT id FROM markets WHERE category='football' AND id LIKE 'news_football_%'`, []);
-        existing.forEach(m => seen.add(m.id));
-
-        let saved = 0;
-        for (const article of articles) {
-            const market = normalizeNewsArticle(article);
-            if (!market || market.category !== 'football' || seen.has(market.id)) continue;
-            seen.add(market.id);
-            await saveNewsMarket(market);
-            saved++;
-            if (saved >= 40) break;
-        }
-
-        if (saved > 0) {
-            console.log(`⚽ Football news sync: saved ${saved} new markets`);
-            emitMarkets();
-        }
-    } catch (e) {
-        console.error('Football news sync error:', e.message);
-    }
-};
-
 // Stablecoins, wrapped/derivative assets and tokenised credit products make for
 // dull "will it close higher today?" questions (they are pegged or illiquid), so
 // they are skipped in favour of tradeable coins such as BNB, BTC and ETH.
@@ -4241,6 +4162,15 @@ function categoryAliasClause(alias) {
             params: []
         };
     }
+    if (a === 'news') {
+        return { clause: `AND (LOWER(COALESCE(category,'')) = 'news' OR id LIKE 'news\\_%' ESCAPE '\\')`, params: [] };
+    }
+    if (a === 'tech') {
+        return { clause: `AND (LOWER(COALESCE(category,'')) = 'tech' OR id LIKE 'tech\\_%' ESCAPE '\\')`, params: [] };
+    }
+    if (a === 'politics') {
+        return { clause: `AND (LOWER(COALESCE(category,'')) = 'politics' OR id LIKE 'geo\\_%' ESCAPE '\\')`, params: [] };
+    }
     if (a && a !== 'all') {
         return {
             clause: `AND LOWER(COALESCE(category,'')) = LOWER(?)`,
@@ -4342,9 +4272,17 @@ const marketsRouteHandler = async (req, res) => {
 
         const markets = (rows || []).map(normalizeMarketRow).map((market) => {
             const category = String(market.category || '').toLowerCase();
-            const generatedNews = /^(news_|tech_|geo_)/i.test(String(market.id || '')) ||
-                ['news', 'politics', 'tech'].includes(category);
-            return generatedNews ? buildNewsMarket(market) : market;
+            const newsArticle = /^(news_|tech_|geo_)/i.test(String(market.id || '')) ||
+                ['news', 'politics'].includes(category);
+            if (!newsArticle) return category === 'tech' ? buildNewsMarket(market) : market;
+            const headline = extractContentField(market.content, 'Headline') || market.rawHeadline || market.title;
+            const classification = classifyNewsArticle(headline, market.description || market.content);
+            return buildNewsMarket({
+                ...market,
+                category: classification.category,
+                sideA: classification.sideA,
+                sideB: classification.sideB
+            });
         });
 
         res.json({ success: true, markets });
@@ -5999,6 +5937,7 @@ app.post('/api/admin/delete-market', authenticateAdmin, async (req, res) => {
 // stored in users, then verifies that account is the resolved SuperAdmin.
 app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
     try {
+        await jwtSecretReady;
         const phone = normalizePhone(req.body?.phone);
         const password = String(req.body?.password || '');
         if (!phone || !password) {
@@ -7218,26 +7157,12 @@ app.get('/api/football/details/:id', async (req, res) => {
         if (Array.isArray(relatedNews) && relatedNews.length) {
             for (const article of relatedNews) {
                 try {
-                    const rawHeadline = String(article.title || '').trim();
-                    const hash = crypto.createHash('md5').update(rawHeadline + fixtureId).digest('hex');
-                    const content = article.description || rawHeadline;
-
-                    const newsMarket = buildNewsMarket({
-                        id: `news_${hash}`,
-                        title: rawHeadline,
-                        description: content,
-                        content,
-                        media_url: article.image || null,
-                        media_type: 'image',
-                        category: 'news',
-                        country: article.source || 'API-FOOTBALL',
-                        startTime: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(),
-                        status: 'open',
-                        url: article.url || article.url || null
+                    const newsMarket = normalizeNewsArticle({
+                        ...article,
+                        source: article.source || 'API-FOOTBALL',
+                        publishedAt: article.publishedAt || new Date().toISOString()
                     });
-
-                    await dbRun(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, status, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'YES', 'NO', ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, startTime=excluded.startTime, status=excluded.status, url=excluded.url, timestamp=CURRENT_TIMESTAMP`,
-                        [newsMarket.id, newsMarket.title, newsMarket.description, newsMarket.content, newsMarket.media_url, newsMarket.media_type, newsMarket.category, newsMarket.country, newsMarket.startTime, newsMarket.status, newsMarket.url]);
+                    if (newsMarket) await saveNewsMarket(newsMarket);
                 } catch (e) {
                     console.warn('Failed to persist related match news:', e.message);
                 }
@@ -7261,10 +7186,29 @@ app.get('/api/news/everything', async (req, res) => {
         const force = req.query.refresh === '1' || req.query.refresh === 'true';
         const processedMarkets = await syncNewsApiMarkets({ force, limit: 500 });
         emitMarkets();
-        res.json({ articles: processedMarkets });
+        res.json({ success: true, articles: processedMarkets, markets: processedMarkets });
     } catch (error) {
         console.error("❌ Aggregator Error:", error.response?.data || error.message);
-        res.status(500).json({ error: "Failed to scrape the global grid." });
+        try {
+            const cached = await dbAll(
+                `SELECT * FROM markets
+                 WHERE category IN ('news','tech','politics')
+                   AND (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
+                   AND status IN ('open','upcoming','live')
+                   AND COALESCE(event_end_time, startTime, timestamp) > NOW()
+                 ORDER BY timestamp DESC LIMIT 500`
+            );
+            const articles = cached.map((row) => {
+                const market = normalizeMarketRow(row);
+                const headline = extractContentField(market.content, 'Headline') || market.rawHeadline || market.title;
+                const classification = classifyNewsArticle(headline, market.description || market.content);
+                return buildNewsMarket({ ...market, category: classification.category, sideA: classification.sideA, sideB: classification.sideB });
+            });
+            return res.json({ success: true, articles, markets: articles, stale: true });
+        } catch (cacheError) {
+            console.error('[news] Could not read saved headlines:', cacheError.message);
+            return res.status(503).json({ success: false, articles: [], message: 'Saved headlines are temporarily unavailable.' });
+        }
     }
 });
 
@@ -7700,7 +7644,6 @@ const startServer = async () => {
             runSafely('syncAllMarkets', syncAllMarkets);
             runSafely('syncFootballMarkets', syncFootballMarkets);
             runSafely('syncSportsMarkets', syncSportsMarkets);
-            runSafely('syncFootballNews', syncFootballNews);
             runSafely('syncNewsApiMarkets', async () => {
                 const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
                 emitMarkets();
@@ -7714,7 +7657,6 @@ const startServer = async () => {
             // Keep API-Sports free-tier usage below its daily request limit.
             setInterval(syncFootballMarkets, 3 * 60 * 60 * 1000);
             setInterval(syncSportsMarkets, 6 * 60 * 60 * 1000);
-            setInterval(syncFootballNews, 7200000); // every 2 hours
             setInterval(() => runSafely('syncNewsApiMarkets', async () => {
                 const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
                 emitMarkets();

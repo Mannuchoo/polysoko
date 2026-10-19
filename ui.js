@@ -181,7 +181,7 @@ function applyStateAndRender() {
                 return isSportsMarket(m);
             }
             if (active === "news") {
-                return isNewsLikeMarket(m);
+                return cat === "news";
             }
             return cat === active;
         });
@@ -355,7 +355,10 @@ function renderFilteredMarkets() {
 
     // 3. Render News Feed (compact cards only; expanded feed loads on demand)
     if (news.length > 0) {
-        html += `<div class="main-category-label" style="color: #00ff88; font-weight: 800; padding: 20px 0 10px 0;">📰 LATEST NEWS</div>`;
+        const newsHeading = ['news', 'tech', 'politics'].includes(state.category)
+            ? `${state.category.toUpperCase()} HEADLINES`
+            : 'LATEST NEWS';
+        html += `<div class="main-category-label" style="color: #00ff88; font-weight: 800; padding: 20px 0 10px 0;">📰 ${newsHeading}</div>`;
         news.forEach(m => html += createMarketCard(m));
         // Collapsible news feed (hidden by default to avoid showing extra content)
         html += `
@@ -388,8 +391,8 @@ function renderFilteredMarkets() {
         });
     }
 
-    if (!allMarkets.length && ['news', 'politics'].includes(state.category)) {
-        html += `<div class="empty-state" style="padding:24px;">No ${escapeHtml(state.category)} markets are available yet. Try again shortly.</div>`;
+    if (!allMarkets.length && ['news', 'politics', 'tech'].includes(state.category)) {
+        html += `<div class="empty-state" style="padding:24px;">No ${escapeHtml(state.category)} headlines are available right now.</div>`;
     }
     mainGrid.innerHTML = html || `<div style="padding:20px;">No markets found. Searching for elite aura...</div>`;
 }

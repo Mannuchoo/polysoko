@@ -1320,14 +1320,11 @@ function esc(str) {
 </div>
 
 <div id="adminLoginGate" style="display:flex; position:fixed; inset:0; background:rgba(0,0,0,0.96); z-index:12000; justify-content:center; align-items:center; padding:20px;">
-    <div style="width:100%; max-width:420px; background:#101014; border:1px solid #333; border-radius:16px; padding:24px; box-shadow:0 24px 70px rgba(0,0,0,.55);">
-        <h2 style="margin:0 0 8px; color:#00ff88;">SuperAdmin Login</h2>
-        <p id="adminLoginGateMessage" style="margin:0 0 16px; color:#aaa; font-size:.9rem;">Sign in with your SuperAdmin account credentials.</p>
-        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin-bottom:6px;">Phone number</label>
-        <input id="adminInlinePhoneInput" type="tel" autocomplete="username" autofocus required placeholder="Your account phone number" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
-        <label style="display:block; color:#888; font-size:.72rem; font-weight:700; text-transform:uppercase; margin:12px 0 6px;">Password</label>
-        <input id="adminInlinePasswordInput" type="password" autocomplete="current-password" required placeholder="Your account password" style="width:100%; padding:14px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
-        <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:10px 0; color:#ff7777; font-size:.82rem;"></div>
+    <div style="width:100%; max-width:360px; background:#101014; border:1px solid #333; border-radius:14px; padding:18px; box-shadow:0 24px 70px rgba(0,0,0,.55);">
+        <p id="adminLoginGateMessage" style="margin:0 0 10px; color:#aaa; font-size:.82rem; min-height:1rem;"></p>
+        <input id="adminInlinePhoneInput" type="tel" autocomplete="username" autofocus required aria-label="Phone number" placeholder="Phone number" style="width:100%; box-sizing:border-box; padding:13px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
+        <input id="adminInlinePasswordInput" type="password" autocomplete="current-password" required aria-label="Password" placeholder="Password" style="width:100%; box-sizing:border-box; padding:13px; margin-top:10px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
+        <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:8px 0; color:#ff7777; font-size:.82rem;"></div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
             <button id="adminInlineLoginBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Log in</button>
         </div>
@@ -1458,7 +1455,9 @@ const API = {
                 if (tokenIsDead) {
                     localStorage.removeItem("token");
                 }
-                showAdminLoginGate(message);
+                // A failed dashboard request must not look like a logout. Only
+                // authentication failures should replace the admin panel.
+                if (tokenIsDead || res.status === 403) showAdminLoginGate(message);
                 throw new Error(message);
             }
             return data;
@@ -1905,8 +1904,9 @@ async function initAdminAfterLogin() {
     try {
         await API.get('/admin/session');
     } catch (error) {
-        localStorage.removeItem('token');
-        showAdminLoginGate(error.message || 'Admin session expired. Enter your PIN to continue.');
+        // API.request removes the token only when the server explicitly marks it
+        // invalid or expired. Keep it across network and server startup failures.
+        showAdminLoginGate(error.message || 'Could not verify your admin session. Please try again.');
         return;
     }
     hideAdminLoginGate();
