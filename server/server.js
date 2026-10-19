@@ -1706,6 +1706,67 @@ function syncNewsApiMarkets(options = {}) {
     return newsSyncInFlight;
 }
 
+function decodeRssXml(value) {
+    return String(value || '')
+        .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+        .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+        .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function extractRssItemField(item, field) {
+    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = String(item || '').match(new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}\\s*>`, 'i'));
+    return match ? decodeRssXml(match[1]) : '';
+}
+
+async function syncRssNewsMarkets(limit = 500) {
+    const feeds = [
+        { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC News' },
+        { url: 'https://feeds.bbci.co.uk/news/politics/rss.xml', source: 'BBC News' },
+        { url: 'https://feeds.bbci.co.uk/news/technology/rss.xml', source: 'BBC News' }
+    ];
+    const responses = await Promise.all(feeds.map(async (feed) => {
+        try {
+            const response = await axios.get(feed.url, { timeout: 12000, responseType: 'text' });
+            return { ...feed, xml: response.data };
+        } catch (error) {
+            console.warn(`[news] RSS fallback failed (${feed.url}): ${error.response?.status || error.message}`);
+            return { ...feed, xml: '' };
+        }
+    }));
+
+    const seen = new Set();
+    const markets = [];
+    for (const feed of responses) {
+        const items = String(feed.xml || '').match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) || [];
+        for (const item of items) {
+            const title = extractRssItemField(item, 'title');
+            const link = extractRssItemField(item, 'link');
+            const description = extractRssItemField(item, 'description');
+            const publishedAt = extractRssItemField(item, 'pubDate') || new Date().toISOString();
+            if (!title || !link || seen.has(link)) continue;
+            seen.add(link);
+            const market = normalizeNewsArticle({
+                title,
+                description,
+                url: link,
+                publishedAt: Number.isFinite(Date.parse(publishedAt)) ? new Date(publishedAt).toISOString() : new Date().toISOString(),
+                source: feed.source
+            });
+            if (!market) continue;
+            await saveNewsMarket(market);
+            markets.push(market);
+            if (markets.length >= limit) return markets;
+        }
+    }
+    return markets;
+}
+
 async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     const apiKey = process.env.NEWS_API_KEY;
 
@@ -1748,8 +1809,10 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         cachedArticles.push(cachedMarket);
     }
     if (!apiKey) {
-        if (!cachedNews.length) console.warn('[news] NEWS_API_KEY is not configured and the news cache is empty.');
-        return cachedArticles;
+        if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
+        console.warn('[news] NEWS_API_KEY is not configured; using BBC RSS feeds as the headline source.');
+        const rssMarkets = await syncRssNewsMarkets(limit);
+        return rssMarkets.length ? rssMarkets : cachedArticles;
     }
     if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
 
@@ -1797,10 +1860,16 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         if (processedMarkets.length >= limit) break;
     }
 
-    if (!processedMarkets.length && cachedArticles.length) {
-        console.warn('[news] NewsAPI returned no articles; serving the active database cache.');
+    if (!processedMarkets.length) {
+        if (cachedArticles.length) {
+            console.warn('[news] NewsAPI returned no articles; serving the active database cache.');
+            return cachedArticles;
+        }
+        console.warn('[news] NewsAPI returned no articles and the active cache is empty; trying BBC RSS feeds.');
+        const rssMarkets = await syncRssNewsMarkets(limit);
+        return rssMarkets.length ? rssMarkets : cachedArticles;
     }
-    return processedMarkets.length ? processedMarkets : cachedArticles;
+    return processedMarkets;
 }
 
 async function syncTmdbMarkets() {
