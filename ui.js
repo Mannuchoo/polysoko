@@ -25,6 +25,19 @@ function normalizeCategory(cat) {
     return cat.toString().toLowerCase().trim();
 }
 
+function getMarketDisplayCategory(market) {
+    const category = normalizeCategory(market?.category);
+    if (['news', 'tech', 'politics'].includes(category)) return category;
+
+    // Older generated news rows can arrive without a usable category. Their
+    // stable ID prefix still identifies which tab should display them.
+    const id = String(market?.id || '');
+    if (/^tech_/i.test(id)) return 'tech';
+    if (/^geo_/i.test(id)) return 'politics';
+    if (/^news_/i.test(id)) return 'news';
+    return category;
+}
+
 function titleCase(value) {
     if (!value) return "";
     return value.toString().trim().replace(/\w\S*/g, txt => txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase());
@@ -59,7 +72,7 @@ function isInvalidSportsMarket(m) {
 }
 
 function isNewsLikeMarket(m) {
-    return ['news', 'tech', 'politics'].includes(normalizeCategory(m?.category)) || isFootballNewsMarket(m);
+    return ['news', 'tech', 'politics'].includes(getMarketDisplayCategory(m)) || isFootballNewsMarket(m);
 }
 
 function isCryptoMarket(m) {
@@ -170,7 +183,7 @@ function applyStateAndRender() {
         // "all" intentionally includes sports — see Sports pill for clickable subcategories
     } else {
         filtered = filtered.filter(m => {
-            const cat = normalizeCategory(m.category);
+            const cat = getMarketDisplayCategory(m);
             if (active === "football") {
                 return isFootballFixtureMarket(m) || isFootballNewsMarket(m);
             }
