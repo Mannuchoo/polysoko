@@ -1404,7 +1404,7 @@ function activateModules() {
                 <div id="assistantBox" class="assistant-panel" aria-live="polite">
                     <div class="assistant-head">
                         <div>
-                            <strong style="font-size:0.85rem;">PolySoko Bot</strong>
+                            <strong style="font-size:0.85rem;">PolySoko AI</strong>
                             <span style="font-size:0.65rem;">Markets, bets, deposits, profile</span>
                         </div>
                         <button id="assistantClose" class="assistant-mini-btn" type="button" aria-label="Close chat" style="padding:4px 8px; font-size:0.68rem;">Close</button>
@@ -1415,7 +1415,7 @@ function activateModules() {
                     </div>
                     <div id="assistantMessages" class="assistant-messages"></div>
                     <div class="assistant-composer" style="padding:6px 8px;">
-                        <textarea id="assistantInput" placeholder="Ask PolySoko Bot..." rows="1" style="min-height:32px; font-size:0.78rem;"></textarea>
+                        <textarea id="assistantInput" placeholder="Ask PolySoko AI..." rows="1" style="min-height:32px; font-size:0.78rem;"></textarea>
                         <button id="assistantSend" type="button" style="padding:6px 10px; font-size:0.75rem;">Send</button>
                     </div>
                 </div>
@@ -1460,7 +1460,7 @@ function activateModules() {
                 messagesEl.innerHTML = '';
                 const history = readChatHistory();
                 if (!history.length) {
-                    addAssistantMessage('bot', 'Hi, I am PolySoko Bot. Ask me about markets, bets, deposits, withdrawals, profile photos, or account safety.');
+                    addAssistantMessage('bot', 'Hi, I am PolySoko AI, your PolySoko Bot. Ask me about markets, bets, deposits, withdrawals, profile photos, or account safety.');
                     return;
                 }
                 history.forEach(item => addAssistantMessage(item.role === 'user' ? 'user' : 'bot', item.text || ''));

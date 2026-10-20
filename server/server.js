@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
+import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
 import { createBotRouter } from './src/routes/bot.js';
 import { fileURLToPath } from 'url'; // For __dirname fix
 import { dirname, join } from 'path';
@@ -890,7 +891,7 @@ function normalizeMarketRow(market) {
 }
 
 const SPORTS_MARKET_SQL = "(LOWER(COALESCE(category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(sport,'')) <> '' OR id LIKE 'sp_%' OR id LIKE 'fb_%' OR country='Football')";
-const AI_HEADLINE_MARKET_SQL = "(id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' AND id NOT LIKE 'tmdb_%' AND id NOT LIKE 'crypto_%' AND id NOT LIKE 'env_%' OR COALESCE(ai_headline_generated,0)=1)";
+const AI_HEADLINE_MARKET_SQL = "(id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' AND id NOT LIKE 'tmdb_%' AND id NOT LIKE 'crypto_%' AND id NOT LIKE 'env_%' OR COALESCE(ai_headline_generated,0)=1) AND (id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' OR COALESCE(headline_version,0)>=2)";
 const isSportsMarket = market => {
     const category = String(market?.category || '').toLowerCase();
     return ['sports', 'football', 'soccer'].includes(category) || Boolean(String(market?.sport || '').trim()) ||
@@ -1654,7 +1655,12 @@ async function normalizeNewsArticle(article) {
     const expiresAt = new Date(Date.now() + classification.expiryHours * 60 * 60 * 1000).toISOString();
     const id = `${classification.prefix}_${hash}`;
     const existing = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime) > NOW()`, [id]);
-    if (existing) return { ...normalizeMarketRow(existing), _persisted: true };
+    if (existing && Number(existing.headline_version || 0) >= 2) return { ...normalizeMarketRow(existing), _persisted: true };
+    if (existing) {
+        // Old generated headlines may contain malformed grammar. Hide them while
+        // they are regenerated so a failed AI pass cannot leave a bad title live.
+        await dbRun(`UPDATE markets SET status='draft', admin_verified=0 WHERE id=?`, [id]);
+    }
     const generated = await generateMarketFromNews({
         title: rawHeadline,
         body: content,
@@ -1683,14 +1689,15 @@ async function normalizeNewsArticle(article) {
         event_end_time: generated.deadlineAt,
         status: 'draft',
         rawHeadline,
-        ai_headline_generated: 1
+        ai_headline_generated: 1,
+        headline_version: 2
     };
 }
 
 async function saveNewsMarket(market) {
     await dbRun(
-        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, image_url, video_url, ai_headline_generated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, image_url, video_url, ai_headline_generated, headline_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title,
             description=excluded.description,
@@ -1709,6 +1716,7 @@ async function saveNewsMarket(market) {
             image_url=excluded.image_url,
             video_url=excluded.video_url,
             ai_headline_generated=1,
+            headline_version=2,
             admin_verified=0,
             timestamp=CURRENT_TIMESTAMP`,
         [market.id, market.title, market.description, market.content, market.media_url, market.media_type, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time || new Date().toISOString(), market.event_end_time || market.startTime, market.status, market.url, market.image_url || null, market.video_url || null, 1]
@@ -1798,6 +1806,7 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         `SELECT *
          FROM markets
          WHERE (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
+           AND COALESCE(headline_version,0)>=2
            AND COALESCE(admin_verified,0)=1 AND COALESCE(ai_headline_generated,0)=1 AND status IN ('open','upcoming','live')
            AND COALESCE(event_end_time, startTime, timestamp) > NOW()
          ORDER BY timestamp DESC
@@ -1874,8 +1883,8 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     const processedMarkets = [];
 
     for (const article of articles) {
-        // normalizeNewsArticle runs the article's own headline through
-        // buildNewsQuestion and retains the source headline for display.
+        // normalizeNewsArticle asks Gemini to generate and validate a natural,
+        // deadline-bound question while retaining the source headline separately.
         let market;
         try { market = await normalizeNewsArticle(article); }
         catch (error) {
@@ -2555,7 +2564,7 @@ db.serialize(() => {
         oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0,
         league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
         media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
-        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0,
+        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, headline_version INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0, settled_at DATETIME,
         url TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
     )`);
@@ -2641,6 +2650,12 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'content', 'TEXT');  
     addColumnSafely('markets', 'admin_verified', 'INTEGER DEFAULT 0');
     addColumnSafely('markets', 'ai_headline_generated', 'INTEGER DEFAULT 0');
+    addColumnSafely('markets', 'headline_version', 'INTEGER DEFAULT 0');
+    addColumnSafely('markets', 'settled_at', 'DATETIME', () => db.run(
+        `UPDATE markets
+         SET settled_at=COALESCE(settled_at, event_end_time, startTime, timestamp, CURRENT_TIMESTAMP)
+         WHERE COALESCE(settled,0)=1 AND settled_at IS NULL`
+    ));
     addColumnSafely('transactions', 'odds', 'REAL');
     addColumnSafely('transactions', 'settled_amount', 'REAL');
     addColumnSafely('transactions', 'potential_payout', 'REAL');
@@ -3623,22 +3638,10 @@ const computeMarketStatus = (startTime, apiStatusShort = null) => {
     return "upcoming";
 };
 const cleanupOutdatedMarkets = async () => {
-    const today = formatNairobiDate();
-    const now = new Date().toISOString();
-
-    // 1. Only purge markets that are already settled/cancelled and old.
-    // Deleting "closed" markets breaks settlement because bets still reference them.
-    await dbRun(`DELETE FROM markets WHERE settled = 1 AND timestamp < NOW() - INTERVAL '7 days'`);
-    await dbRun(`DELETE FROM markets WHERE status IN ('cancelled') AND timestamp < NOW() - INTERVAL '7 days'`);
-    
-    // 2. Remove football matches that started before today (only once settled/cancelled)
-    await dbRun(
-        `DELETE FROM markets 
-         WHERE category='football' 
-         AND settled = 1
-         AND startTime::date < ?::date`,
-        [today]
-    );
+    // Retain settled markets for ten days from the settlement time so the
+    // admin panel and bet history remain useful before old rows are pruned.
+    await deleteSettledMarketsOlderThan(dbRun);
+    await dbRun(`DELETE FROM markets WHERE status IN ('cancelled') AND COALESCE(settled,0)=0 AND timestamp < NOW() - INTERVAL '7 days'`);
 
     // 3. Do not delete expired crypto/weather/news markets here.
     // They must remain until settled; expiry is handled by status updates + settlement engine.
@@ -3728,7 +3731,7 @@ const cancelMarket = async (marketId, reason = 'CANCELLED') => {
         }
 
         await dbRun(
-            `UPDATE markets SET status='cancelled', result=?, settled=1 WHERE id=?`,
+            `UPDATE markets SET status='cancelled', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP) WHERE id=?`,
             [String(reason || 'CANCELLED').toUpperCase(), marketId]
         );
         });
@@ -3798,7 +3801,7 @@ const settleMarket = async (marketId, winningSide) => {
         if (!bets.length) {
             console.log("⚠️ No active bets found.");
             await dbRun(
-                `UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`,
+                `UPDATE markets SET status='settled', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP) WHERE id=?`,
                 [normalizeSettlementSide(winningSide), marketId]
             );
             emitMarkets();
@@ -3882,7 +3885,7 @@ const settleMarket = async (marketId, winningSide) => {
 
         await dbRun(`
             UPDATE markets 
-            SET status='settled', result=?, settled=1 
+            SET status='settled', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP)
             WHERE id=?
         `, [normalizeSettlementSide(winningSide), marketId]);
         });
@@ -4002,7 +4005,7 @@ const settleBetById = async (betId, winningSide) => {
              )`,
             [nextStatus, payout, bet.id, bet.transaction_id || -1, bet.market_id, bet.user_phone, bet.picked]
         );
-        await dbRun(`UPDATE markets SET result=COALESCE(NULLIF(result, ''), ?), status='settled', settled=1 WHERE id=?`, [outcome, bet.market_id]);
+        await dbRun(`UPDATE markets SET result=COALESCE(NULLIF(result, ''), ?), status='settled', settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP) WHERE id=?`, [outcome, bet.market_id]);
     });
 
     try {
@@ -4508,7 +4511,7 @@ app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
                     await run(`UPDATE bets SET status='lost' WHERE market_id=? AND user_phone=? AND status='active'`, [market_id, bet.user_phone]);
                 }
             }
-            await run(`UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`, [outcomeUpper, market_id]);
+            await run(`UPDATE markets SET status='settled', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP) WHERE id=?`, [outcomeUpper, market_id]);
             await run('COMMIT');
 
             res.json({
@@ -4609,7 +4612,7 @@ app.post('/api/admin/void-market', authenticateAdmin, async (req, res) => {
             }
 
             await run(
-                `UPDATE markets SET status='voided', result=?, settled=1, void_reason=?, void_timestamp=NOW() WHERE id=?`,
+                `UPDATE markets SET status='voided', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP), void_reason=?, void_timestamp=NOW() WHERE id=?`,
                 [String(req.body.reason || 'MANUAL_VOID').toUpperCase(), market_id]
             );
 
@@ -6681,7 +6684,7 @@ app.post('/api/admin/reject-market', authenticateAdmin, async (req, res) => {
             const activeBetRows = await dbGet(`SELECT COUNT(*) AS count FROM bets WHERE market_id=? AND status='active'`, [marketId]);
             if (Number(active?.count || 0) > 0) await cancelMarket(marketId, 'ADMIN_REJECTED');
             else if (Number(activeBetRows?.count || 0) > 0) return res.status(409).json({ success: false, message: 'Active bet history is missing matching transactions, so the market cannot be safely refunded or deleted.' });
-            else await dbRun(`UPDATE markets SET status='cancelled', settled=1 WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
+            else await dbRun(`UPDATE markets SET status='cancelled', settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP) WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
             return res.json({ success: true, archived: true, message: 'Market archived to preserve bet history; active bets were refunded.' });
         }
         await dbRun(`DELETE FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
@@ -6762,7 +6765,7 @@ app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
                     await run(`UPDATE bets SET status='lost' WHERE market_id=? AND user_phone=? AND status='active'`, [marketId, bet.user_phone]);
                 }
             }
-            await run(`UPDATE markets SET status='settled', result=?, settled=1 WHERE id=?`, [outcomeUpper, marketId]);
+            await run(`UPDATE markets SET status='settled', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP) WHERE id=?`, [outcomeUpper, marketId]);
             await run('COMMIT');
 
             res.json({
@@ -6820,7 +6823,7 @@ app.post('/api/admin/void-market', authenticateAdmin, async (req, res) => {
             }
 
             await run(
-                `UPDATE markets SET status='voided', result=?, settled=1, void_reason=?, void_timestamp=NOW() WHERE id=?`,
+                `UPDATE markets SET status='voided', result=?, settled=1, settled_at=COALESCE(settled_at,CURRENT_TIMESTAMP), void_reason=?, void_timestamp=NOW() WHERE id=?`,
                 [String(req.body.reason || 'MANUAL_VOID').toUpperCase(), marketId]
             );
 
@@ -7125,6 +7128,9 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                   AND NOT (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
                   AND m.status IN ('draft','pending','open','upcoming','live','closed','suspended')
                   AND COALESCE(m.settled,0)=0
+                  AND m.timestamp >= NOW() - INTERVAL '30 days'
+                  AND COALESCE(m.event_end_time,m.startTime,m.timestamp) > NOW()
+                ORDER BY m.timestamp DESC
             `);
 
             Object.assign(statsData, {
@@ -7154,6 +7160,10 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
             LEFT JOIN users u ON m.creator = u.phone 
             WHERE m.status='pending' AND COALESCE(m.admin_verified,0)=1
               AND NOT (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
+              AND COALESCE(m.settled,0)=0
+              AND m.timestamp >= NOW() - INTERVAL '30 days'
+              AND COALESCE(m.event_end_time,m.startTime,m.timestamp) > NOW()
+            ORDER BY m.timestamp DESC
         `);
         res.json({ success: true, markets });
     } catch (e) {
@@ -7172,7 +7182,9 @@ app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticat
               AND NOT (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
               AND m.status IN ('draft','pending','open','upcoming','live','closed','suspended')
               AND COALESCE(m.settled,0)=0
-            ORDER BY m.timestamp ASC, m.id ASC
+              AND m.timestamp >= NOW() - INTERVAL '30 days'
+              AND COALESCE(m.event_end_time,m.startTime,m.timestamp) > NOW()
+            ORDER BY m.timestamp DESC, m.id ASC
         `);
         res.json({ success: true, markets: markets || [] });
     } catch (e) {

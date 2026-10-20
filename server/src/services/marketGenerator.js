@@ -4,8 +4,8 @@ const OUTPUT_SCHEMA = {
   type: 'OBJECT',
   properties: {
     subject: { type: 'STRING' },
-    actionEvent: { type: 'STRING' },
-    condition: { type: 'STRING', description: 'A specific source, metric, venue, or context needed to resolve this event.' },
+    actionEvent: { type: 'STRING', description: 'A concise bare verb phrase in base form that follows "Will [subject]" grammatically. Example: "threaten to revoke", never "threatens to revoke" or "will threaten to revoke".' },
+    condition: { type: 'STRING', description: 'A concise context phrase that reads naturally after the action, preferably introduced by a preposition such as at, in, for, under, or during. Do not repeat the deadline.' },
     deadline: { type: 'STRING', description: 'An exact future ISO 8601 timestamp with timezone, preferably YYYY-MM-DDTHH:mm:ss.sssZ.' },
     resolutionCriteria: { type: 'STRING' },
     imageUrl: { type: 'STRING', description: 'Use an empty string when there is no supported image URL.' },
@@ -41,14 +41,23 @@ function validateDeadline(value, now = new Date()) {
   return { date: parsed.toISOString().slice(0, 10), timestamp: parsed.toISOString() };
 }
 
-function formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt }) {
-  const fields = [actionEvent, subject, condition, deadlineAt].map(value => clean(value));
+function formatStrictMarketTitle({ subject, actionEvent, condition, deadlineAt }) {
+  const fields = [subject, actionEvent, condition, deadlineAt].map(value => clean(value));
   if (fields.some(value => !value)) throw new Error('Strict market title requires action/event, subject, condition, and exact deadline.');
   if (/\b(might|could|possibly|perhaps|likely|unlikely|depends)\b/i.test(fields.slice(0, 3).join(' '))) {
     throw new Error('The generated market is not a definitive Yes/No outcome.');
   }
   if (fields.some(value => value.includes(' + '))) throw new Error('Market title fields cannot contain the title separator.');
-  return fields.join(' + ');
+  if (/^(?:will|shall|does|do|did|is|are|was|were|has|have)\b/i.test(actionEvent)) {
+    throw new Error('The event must use a bare verb phrase after the subject, without an extra auxiliary verb.');
+  }
+  if (/\b(?:threatens|revokes|retains|reaches|announces|resigns|approves|rejects|becomes|remains|wins|loses)\b/i.test(actionEvent)) {
+    throw new Error('The event verb must use its base form after "Will" so the headline is grammatical.');
+  }
+  const subjectText = subject.replace(/[?!.]+$/, '');
+  const actionText = actionEvent.replace(/[?!.]+$/, '').replace(/^[A-Z]/, first => first.toLowerCase());
+  const conditionText = condition.replace(/[?!.]+$/, '');
+  return `Will ${subjectText} ${actionText} ${conditionText} by ${deadlineAt}?`;
 }
 
 export async function generateMarketFromNews(rawArticleData) {
@@ -63,7 +72,7 @@ export async function generateMarketFromNews(rawArticleData) {
   const suppliedVideo = validHttpUrl(article.videoUrl || article.video_url || media.videoUrl || media.video_url || media.embedUrl);
   const suppliedDeadline = clean(article.requiredDeadline);
   const required = suppliedDeadline ? validateDeadline(suppliedDeadline) : null;
-  const prompt = `Extract one objectively resolvable prediction market from this source. Use only facts supported by the source. Return fields that form this exact title order: [Action/Event] + [Subject] + [Condition] + [Exact Timestamp/Deadline]. The deadline must be an exact future ISO 8601 timestamp with timezone. If no trusted deadline is supplied and the source does not support an explicit future deadline, return an empty deadline. ${required ? `Use this trusted deadline exactly, without changing it: ${required.timestamp}.` : ''} Condition must name the relevant context or resolution source; do not leave it empty. Resolution criteria must define one observable Yes/No rule and the source/event used to settle it. Do not make up media links; return supplied media URLs only. If the subject/action/context cannot be grounded in the source or the result is not definitively resolvable, return empty mandatory fields.\n\nSource title: ${title}\nSource body: ${body}\nTrusted deadline: ${required?.timestamp || 'none'}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
+  const prompt = `Extract one objectively resolvable prediction market from this source. Use only facts supported by the source. Extract all four required components in this order: [Action/Event], [Subject], [Condition], [Exact Timestamp/Deadline]. The displayed title will be phrased as a natural, grammatically correct Yes/No question: "Will [Subject] [Action/Event] [Condition] by [Exact Timestamp/Deadline]?" Use the subject before its action in that question. The action/event must be a bare verb phrase in base form after "Will" ("threaten to revoke", never "threatens to revoke" and never "will threaten"). The condition must be a short phrase that reads naturally after the action, preferably beginning with a preposition such as "at", "in", "for", "under", or "during". Keep the event and condition concise, avoid duplicated subjects or deadlines, and use correct capitalization, possessives, articles, and punctuation. The deadline must be an exact future ISO 8601 timestamp with timezone. If no trusted deadline is supplied and the source does not support an explicit future deadline, return an empty deadline. ${required ? `Use this trusted deadline exactly, without changing it: ${required.timestamp}.` : ''} Condition must name the relevant context or resolution source; do not leave it empty. Resolution criteria must define one observable Yes/No rule and the source/event used to settle it. Do not make up media links; return supplied media URLs only. If the subject/action/context cannot be grounded in the source or the result is not definitively resolvable, return empty mandatory fields.\n\nSource title: ${title}\nSource body: ${body}\nTrusted deadline: ${required?.timestamp || 'none'}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
 
   let result;
   let lastError;
