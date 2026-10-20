@@ -1484,7 +1484,7 @@ function activateModules() {
                 const waiting = addAssistantMessage('bot', 'Checking...', 'assistant-waiting');
 
                 try {
-                    const res = await apiFetch('ai/chat', { method: 'POST', body: { message: text, engine: 'polysoko-local', history: history.slice(-8) } });
+                    const res = await apiFetch('bot/chat', { method: 'POST', body: { message: text, history: history.slice(-8) } });
                     waiting.remove();
                     if (res && res.success) {
                         const reply = res.reply || 'Done.';

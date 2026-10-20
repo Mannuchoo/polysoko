@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
+import { createBotRouter } from './src/routes/bot.js';
 import { fileURLToPath } from 'url'; // For __dirname fix
 import { dirname, join } from 'path';
 
@@ -3060,6 +3061,8 @@ const processMatches = async (matches) => {
             sideB = excluded.sideB,
             status = excluded.status,
             startTime = excluded.startTime,
+            event_start_time = excluded.startTime,
+            event_end_time = excluded.startTime + INTERVAL '120 minutes',
             league = excluded.league,
             country = excluded.country,
             result = COALESCE(excluded.result, markets.result)`,
@@ -3128,7 +3131,7 @@ async function repairSportsMarketMetadata() {
     await ensureDbColumn('markets', 'sport', 'TEXT');
 
     const rows = await dbAll(
-        `SELECT id, title, category, sport, sideA, sideB, country, league, content, startTime, status
+        `SELECT id, title, category, sport, sideA, sideB, country, league, content, startTime, event_start_time, event_end_time, status
          FROM markets
          WHERE id LIKE 'sp_%' OR id LIKE 'fb_%' OR category='football' OR category='sports'`,
         []
@@ -3157,6 +3160,13 @@ async function repairSportsMarketMetadata() {
         const status = validStatuses.has(String(row.status || '').toLowerCase())
             ? row.status
             : computeMarketStatus(row.startTime);
+        const startMs = row.startTime ? new Date(row.startTime).getTime() : Number.NaN;
+        const eventStartTime = Number.isFinite(startMs) ? new Date(startMs).toISOString() : null;
+        const eventEndTime = Number.isFinite(startMs) ? new Date(startMs + 120 * 60 * 1000).toISOString() : null;
+        const eventWindowMatches = !eventEndTime || (
+            Number.isFinite(new Date(row.event_end_time).getTime()) &&
+            Math.abs(new Date(row.event_end_time).getTime() - new Date(eventEndTime).getTime()) < 1000
+        );
 
         // Skip writes when the row already matches (avoids piling up no-op
         // UPDATEs on every boot, which is costly on remote PostgreSQL).
@@ -3164,7 +3174,8 @@ async function repairSportsMarketMetadata() {
             row.category === 'sports' &&
             row.sport === sport &&
             row.country === country &&
-            row.status === status
+            row.status === status &&
+            eventWindowMatches
         ) {
             continue;
         }
@@ -3175,9 +3186,11 @@ async function repairSportsMarketMetadata() {
              SET category = 'sports',
                  sport = ?,
                  country = ?,
-                 status = ?
+                 status = ?,
+                 event_start_time = COALESCE(?, event_start_time),
+                 event_end_time = COALESCE(?, event_end_time)
              WHERE id = ?`,
-            [sport, country, status, row.id]
+            [sport, country, status, eventStartTime, eventEndTime, row.id]
         );
     }
 }
@@ -3388,6 +3401,8 @@ const syncSportsMarkets = async () => {
                         sideA = excluded.sideA,
                         sideB = excluded.sideB,
                         startTime = excluded.startTime,
+                        event_start_time = excluded.startTime,
+                        event_end_time = excluded.startTime + INTERVAL '120 minutes',
                         status = excluded.status,
                         league = excluded.league,
                         country = excluded.country,
@@ -7768,6 +7783,9 @@ try {
 } catch (e) {
     console.error('[stay] mount failed (existing routes unaffected):', e.message);
 }
+
+app.use('/api', createBotRouter({ dbAll, authenticate }));
+console.log('SokoBot API mounted: /api/bot/chat');
 if (stayRoutes && stayRoutes.ensureStayTables) {
     stayRoutes.ensureStayTables({ dbRun, dbGet, dbAll }).catch((e) => {
         console.error('[stay] table init failed (existing routes unaffected):', e.message);
