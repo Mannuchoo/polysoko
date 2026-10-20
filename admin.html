@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <!-- Updated CSP to allow both local and CDN as backup -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; 
         script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.socket.io; 
@@ -102,6 +102,9 @@ body {
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     margin: 0;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
 }
 
 .admin-sidebar {
@@ -218,6 +221,9 @@ body {
     position: relative;
     z-index: 10;
     pointer-events: auto !important;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
 }
 
 .admin-main input, 
@@ -441,6 +447,23 @@ button {
 .table-responsive {
     overflow-x: auto;
     margin-top: 20px;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x pan-y;
+    scrollbar-width: thin;
+}
+
+.table-responsive table {
+    min-width: 560px;
+}
+
+#activityLogsSection .table-responsive table {
+    min-width: 760px;
+}
+
+.mobile-scroll-hint {
+    display: none;
 }
 
 table {
@@ -569,6 +592,10 @@ tr[onclick] {
 
 .table-responsive {
     overflow-x: auto;
+    max-width: 100%;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x pan-y;
 }
 
 .market-table {
@@ -642,7 +669,25 @@ button, input, select {
 
 @media (max-width: 768px) {
     .admin-main {
-        padding: 60px 15px 20px 15px;
+        padding: calc(60px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 20px max(12px, env(safe-area-inset-left, 0px));
+        margin-top: 0;
+    }
+
+    .stat-card {
+        min-width: 0;
+        padding: 14px;
+    }
+
+    .table-responsive {
+        margin-left: -2px;
+        margin-right: -2px;
+        padding-bottom: 8px;
+    }
+
+    .mobile-scroll-hint {
+        display: block;
+        margin: 0 0 -8px;
+        font-size: 0.75rem;
     }
 }
 
@@ -1158,7 +1203,8 @@ button, input, select {
             </select>
             <button onclick="loadActivityLogs()" class="btn-primary" style="padding:10px 16px; font-size:0.75rem;">Refresh</button>
         </div>
-        <div class="table-responsive">
+        <p class="sub mobile-scroll-hint">Swipe left or right on the table to view all columns.</p>
+        <div class="table-responsive" role="region" aria-label="User activity logs table" tabindex="0">
             <table class="market-table">
                 <thead>
                     <tr>
@@ -2013,10 +2059,17 @@ async function initAdmin() {
 
 // --- iOS STYLE SWIPE GESTURES ---
 let touchStartX = 0;
-document.addEventListener('touchstart', e => { touchStartX = e.changedTouches[0].screenX; }, { passive: true });
+let touchStartTarget = null;
+document.addEventListener('touchstart', e => {
+    touchStartX = e.changedTouches[0].screenX;
+    touchStartTarget = e.target;
+}, { passive: true });
 document.addEventListener('touchend', e => {
     let touchEndX = e.changedTouches[0].screenX;
     const diffX = touchEndX - touchStartX;
+
+    // Let horizontally scrollable tables consume their own gestures.
+    if (touchStartTarget && touchStartTarget.closest('.table-responsive')) return;
 
     // Swipe Right from left edge (Navigate Back / Open Sidebar)
     if (diffX > 100 && touchStartX < 60) {
@@ -2033,7 +2086,8 @@ document.addEventListener('touchend', e => {
         }
     }
     if (touchStartX - touchEndX > 100) {
-        toggleAdminSidebar(true);
+        const sidebar = document.querySelector('.admin-sidebar');
+        if (sidebar && sidebar.classList.contains('open')) toggleAdminSidebar(true);
     }
 }, { passive: true });
 

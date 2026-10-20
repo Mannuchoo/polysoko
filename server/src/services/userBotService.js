@@ -1,10 +1,13 @@
 import OpenAI from 'openai';
 
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+// Groq retired the previous Llama default for developer-tier projects in
+// August 2026. Keep this on a currently supported model unless overridden.
+const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 let groqClient;
 function getGroqClient() {
-  if (!process.env.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured.');
-  if (!groqClient) groqClient = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' });
+  const apiKey = String(process.env.GROQ_API_KEY || '').trim();
+  if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
+  if (!groqClient) groqClient = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' });
   return groqClient;
 }
 const MARKET_VISIBILITY = `
