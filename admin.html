@@ -907,20 +907,47 @@ button, input, select {
     <!-- 🛠️ MARKETS -->
     <div id="marketsSection" class="admin-section">
         <div class="stat-card">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-                <h3>🛠️ Active Markets Manager</h3>
-                <select id="adminCategoryFilter" onchange="loadAdminMarkets()"
-                    style="padding:10px; background:#000; color:white; border:1px solid var(--border); border-radius:8px;">
-                    <option value="all">All Categories</option>
-                    <option value="politics">Politics</option>
-                    <option value="celebrities">Celebrities</option>
-                    <option value="football">Football</option>
-                    <option value="sports">Sports</option>
-                    <option value="crypto">Crypto</option>
-                    <option value="news">News</option>
-                    <option value="gaming">Gaming / Esports</option>
-                    <option value="soccer">Soccer</option>
-                </select>
+            <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; margin-bottom:20px;">
+                <div>
+                    <h3 style="margin:0;">Sports Management</h3>
+                    <p class="sub" style="margin:5px 0 0;">Manage sports markets, edit details, and settle results.</p>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                    <input id="adminSportsSearch" type="search" placeholder="Search sports markets" oninput="filterAdminSportsMarkets()"
+                        style="min-width:190px; padding:10px; background:#000; color:white; border:1px solid var(--border); border-radius:8px;">
+                    <select id="adminSportFilter" onchange="filterAdminSportsMarkets()"
+                        style="padding:10px; background:#000; color:white; border:1px solid var(--border); border-radius:8px;">
+                        <option value="all">All Sports</option>
+                        <option value="football">Football</option>
+                        <option value="basketball">Basketball</option>
+                        <option value="nba">NBA</option>
+                        <option value="nfl">NFL</option>
+                        <option value="baseball">Baseball</option>
+                        <option value="hockey">Hockey</option>
+                        <option value="rugby">Rugby</option>
+                        <option value="cricket">Cricket</option>
+                        <option value="tennis">Tennis</option>
+                        <option value="mma">MMA</option>
+                        <option value="afl">AFL</option>
+                        <option value="f1">F1</option>
+                        <option value="golf">Golf</option>
+                        <option value="volleyball">Volleyball</option>
+                        <option value="handball">Handball</option>
+                        <option value="other">Other sports</option>
+                    </select>
+                    <select id="adminMarketStatusFilter" onchange="filterAdminSportsMarkets()"
+                        style="padding:10px; background:#000; color:white; border:1px solid var(--border); border-radius:8px;">
+                        <option value="all">All Statuses</option>
+                        <option value="live">Live</option>
+                        <option value="open">Open</option>
+                        <option value="upcoming">Upcoming</option>
+                        <option value="suspended">Suspended</option>
+                        <option value="closed">Closed</option>
+                        <option value="settled">Settled</option>
+                        <option value="cancelled">Cancelled</option>
+                    </select>
+                    <button onclick="loadAdminMarkets()" class="btn-primary" style="padding:10px 14px;">Refresh</button>
+                </div>
             </div>
             <div id="adminMarketList"></div>
 
@@ -930,7 +957,7 @@ button, input, select {
                     ⚖️ Pending Settlements
                     <button onclick="loadPendingSettlements()" style="margin-left:auto; padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:#111; color:var(--text); cursor:pointer; font-size:0.8rem;">↻ Refresh</button>
                 </h3>
-                <p style="font-size:0.75rem;color:#888;margin:0 0 10px 0;">Suspended matches awaiting results. Football fixtures settle automatically every 30 minutes via the batch settlement worker; gaming/esports markets settle here manually.</p>
+                <p style="font-size:0.75rem;color:#888;margin:0 0 10px 0;">Suspended sports markets awaiting results. Football fixtures settle automatically every 30 minutes; other sports can be settled here.</p>
                 <div id="pendingSettlementsList" style="display:flex;flex-direction:column;gap:8px;"></div>
             </div>
         </div>
@@ -2577,78 +2604,99 @@ async function publishMarket() {
 }
 
 async function loadAdminMarkets() {
-    const filter = document.getElementById('adminCategoryFilter').value;
     const container = document.getElementById('adminMarketList');
-
-    container.innerHTML = "Loading...";
+    if (!container) return;
+    container.innerHTML = '<p style="text-align:center;color:#8b98a5;padding:24px;">Loading sports markets...</p>';
 
     try {
-        const res = await API.get('/admin/all-markets');
-
-        let markets = res.markets || [];
-        if (filter !== 'all') {
-            markets = markets.filter(m => m.category === filter);
-        }
-
+        const res = await API.get('/admin/sports-markets');
+        if (!res?.success) throw new Error(res?.message || 'Could not load sports markets.');
+        const markets = res.markets || [];
         if (!markets.length) {
-            container.innerHTML = `<p style="text-align:center;color:#71767b;">No markets found</p>`;
+            container.innerHTML = '<p style="text-align:center;color:#71767b;padding:24px;">No sports markets found.</p>';
+            loadPendingSettlements();
             return;
         }
 
-        container.innerHTML = markets.map(m => `
-            <div id="market-card-${m.id}" style="background:#000;padding:20px;border-radius:12px;margin-bottom:15px;border-left:5px solid ${m.status === 'open' ? 'var(--yes)' : 'gray'};">
-                
-                <div style="display:flex;justify-content:space-between;margin-bottom:15px; align-items:center;">
-                    <span style="font-size:0.7rem; color:gray; font-family:monospace;">ID: ${m.id} | Status: ${m.status.toUpperCase()}</span>
-                    <button onclick="deleteMarket('${m.id}')" style="background:none; border:none; cursor:pointer; font-size:1.1rem; opacity:0.6;">🗑️</button>
-                </div>
-
-                <div style="margin-bottom:12px;">
-                    <label style="font-size:0.6rem; color:gray; text-transform:uppercase; letter-spacing:1px;">Question</label>
-                    <input id="edit-title-${m.id}" value="${esc(m.title)}" style="width:100%; padding:12px; background:#111; border:1px solid #333; color:white; border-radius:8px; margin-top:4px; font-weight:bold;">
-                </div>
-
-                <div style="margin-bottom:12px;">
-                    <label style="font-size:0.6rem; color:gray; text-transform:uppercase; letter-spacing:1px;">Description / Context</label>
-                    <textarea id="edit-content-${m.id}" style="width:100%; padding:12px; background:#111; border:1px solid #333; color:white; border-radius:8px; margin-top:4px; height:80px; resize:none;">${esc(m.content || m.description)}</textarea>
-                </div>
-
-                <div style="display:grid; grid-template-columns: 1fr 140px; gap:10px; margin-bottom:15px;">
-                    <div>
-                        <label style="font-size:0.6rem; color:gray; text-transform:uppercase; letter-spacing:1px;">Media URL</label>
-                        <input id="edit-media-${m.id}" value="${esc(m.media_url)}" placeholder="URL" style="width:100%; padding:12px; background:#111; border:1px solid #333; color:white; border-radius:8px; margin-top:4px;">
+        container.innerHTML = markets.map(m => {
+            const id = String(m.id || '');
+            const category = String(m.category || '').toLowerCase();
+            const idSport = id.match(/^sp_([a-z0-9-]+)_/i)?.[1] || (/^fb_/i.test(id) ? 'football' : '');
+            const rawSport = String(m.sport || m.league || idSport || '').trim();
+            const sportText = `${rawSport} ${m.title || ''} ${m.league || ''} ${id}`.toLowerCase();
+            const sportKey = /^(fb_|football|soccer)|football|soccer|premier league|la liga|bundesliga|champions league/.test(sportText)
+                ? 'football'
+                : (rawSport.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ')[0] || (category !== 'sports' ? category : 'sports'));
+            const sportLabel = sportKey === 'football' ? 'Football' : (rawSport || (category === 'sports' ? 'Sports' : category));
+            const searchable = `${m.title || ''} ${m.description || ''} ${m.content || ''} ${sportLabel} ${id}`.toLowerCase();
+            return `
+            <article data-admin-sports-market data-sport="${esc(sportKey)}" data-status="${esc(String(m.status || '').toLowerCase())}" data-search="${esc(searchable)}" id="market-card-${esc(id)}" style="background:linear-gradient(145deg,#11151b,#080a0d);border:1px solid #27313a;border-radius:14px;padding:18px;margin-bottom:14px;box-shadow:0 10px 26px rgba(0,0,0,.18);">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px;">
+                    <div style="min-width:0;">
+                        <div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:8px;">
+                            <span style="font-size:.68rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#07130e;background:#00e887;padding:5px 8px;border-radius:999px;">${esc(sportLabel)}</span>
+                            <span style="font-size:.68rem;font-weight:700;text-transform:uppercase;color:#c2ccd5;background:#202731;padding:5px 8px;border-radius:999px;">${esc(m.status || 'unknown')}</span>
+                        </div>
+                        <div style="font-size:.72rem;color:#77818d;font-family:monospace;overflow-wrap:anywhere;">${esc(id)}</div>
                     </div>
-                    <div>
-                        <label style="font-size:0.6rem; color:gray; text-transform:uppercase; letter-spacing:1px;">Type</label>
-                        <select id="edit-media-type-${m.id}" style="width:100%; padding:12px; background:#111; border:1px solid #333; color:white; border-radius:8px; margin-top:4px;">
-                            <option value="auto" ${!m.media_type || m.media_type === 'auto' ? 'selected' : ''}>Auto Detect</option>
+                    <button onclick="deleteMarket('${esc(id)}')" title="Delete sports market" style="background:#301819;color:#ff8585;border:1px solid #5b2b2c;border-radius:8px;padding:8px 10px;cursor:pointer;">Delete</button>
+                </div>
+                <label style="display:block;margin-bottom:12px;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Market question
+                    <input id="edit-title-${esc(id)}" value="${esc(m.title)}" style="width:100%;box-sizing:border-box;padding:12px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;font-weight:700;">
+                </label>
+                <label style="display:block;margin-bottom:12px;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Description / context
+                    <textarea id="edit-content-${esc(id)}" style="width:100%;box-sizing:border-box;padding:12px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;min-height:86px;resize:vertical;">${esc(m.content || m.description)}</textarea>
+                </label>
+                <div style="display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:10px;margin-bottom:14px;">
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Media URL
+                        <input id="edit-media-${esc(id)}" value="${esc(m.media_url)}" placeholder="Image, video, or YouTube URL" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Media type
+                        <select id="edit-media-type-${esc(id)}" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                            <option value="auto" ${!m.media_type || m.media_type === 'auto' ? 'selected' : ''}>Auto</option>
                             <option value="image" ${m.media_type === 'image' ? 'selected' : ''}>Image</option>
                             <option value="video" ${m.media_type === 'video' ? 'selected' : ''}>Video</option>
                             <option value="youtube" ${m.media_type === 'youtube' ? 'selected' : ''}>YouTube</option>
                         </select>
-                    </div>
+                    </label>
                 </div>
-                <button onclick="saveMarketChange('${m.id}', this)" class="btn-primary" style="width:100%; margin-bottom:20px;">💾 Save Changes</button>
-
-                <div style="margin-top:15px; border-top:1px solid #222; padding-top:15px;">
-                    <label style="font-size:0.7rem; color:#888; display:block; margin-bottom:5px;">⚖️ SETTLE MARKET (YES/NO)</label>
-                    <div style="display:flex; gap:12px; align-items:center;">
-                        <input id="settle-result-${m.id}" placeholder="Outcome (e.g. YES)" style="flex:1; padding:12px; background:#111; border:1px solid #333; color:white; border-radius:8px;">
-                        <button onclick="adminSettleMarket('${m.id}', this)" class="btn-approve" style="padding:12px 20px;">Settle Market</button>
-                    </div>
+                <button onclick="saveMarketChange('${esc(id)}', this)" class="btn-primary" style="width:100%;padding:12px;">Save sports market</button>
+                <div style="margin-top:16px;border-top:1px solid #252c34;padding-top:14px;">
+                    <label style="display:block;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:7px;">Settle market
+                        <input id="settle-result-${esc(id)}" placeholder="Winning side (e.g. HOME, AWAY, DRAW, YES)" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                    <button onclick="adminSettleMarket('${esc(id)}', this)" class="btn-approve" style="width:100%;padding:11px;">Settle sports market</button>
                 </div>
-            </div>
-        `).join('');
-
+            </article>`;
+        }).join('') + '<p data-sports-empty style="display:none;text-align:center;color:#71767b;padding:22px;">No sports markets match these filters.</p>';
+        filterAdminSportsMarkets();
     } catch (err) {
-        console.error("Market load failed:", err);
-        container.innerHTML = `<p style="color:#ff7777;text-align:center;">Could not load markets: ${esc(err.message || 'Request failed')}</p>`;
+        console.error('Sports markets load failed:', err);
+        container.innerHTML = `<p style="color:#ff7777;text-align:center;padding:20px;">Could not load sports markets: ${esc(err.message || 'Request failed')}</p>`;
     }
-
     loadPendingSettlements();
 }
 
-async function deleteMarket(id) {
+function filterAdminSportsMarkets() {
+    const container = document.getElementById('adminMarketList');
+    if (!container) return;
+    const sport = document.getElementById('adminSportFilter')?.value || 'all';
+    const status = document.getElementById('adminMarketStatusFilter')?.value || 'all';
+    const query = (document.getElementById('adminSportsSearch')?.value || '').trim().toLowerCase();
+    const cards = [...container.querySelectorAll('[data-admin-sports-market]')];
+    let visible = 0;
+    for (const card of cards) {
+        const key = card.dataset.sport || 'sports';
+        const sportMatch = sport === 'all' || (sport === 'other' ? !['football','basketball','nba','nfl','baseball','hockey','rugby','cricket','tennis','mma','afl','f1','golf','volleyball','handball'].includes(key) : key === sport || (sport === 'basketball' && key === 'nba'));
+        const statusMatch = status === 'all' || card.dataset.status === status;
+        const textMatch = !query || (card.dataset.search || '').includes(query);
+        const show = sportMatch && statusMatch && textMatch;
+        card.style.display = show ? '' : 'none';
+        if (show) visible++;
+    }
+    const empty = container.querySelector('[data-sports-empty]');
+    if (empty) empty.style.display = visible ? 'none' : '';
+}async function deleteMarket(id) {
     if (!await window.showAppConfirm("Delete market?", { title: 'Delete market', danger: true, confirmLabel: 'Delete market' })) return;
 
     try {

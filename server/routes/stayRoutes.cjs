@@ -144,7 +144,7 @@ function createStayApiRouter(deps) {
       const co = String(req.query.check_out || '').slice(0, 10);
       if (!validDate(ci) || !validDate(co) || nights(ci, co) < 1)
         return res.status(400).json({ success: false, message: 'Invalid dates' });
-      const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND payment_status IN ('paid','pending') AND check_in < ? AND check_out > ? LIMIT 1`, [req.params.id, co, ci]);
+      const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND (payment_status = 'paid' OR (payment_status = 'pending' AND created_at >= NOW() - INTERVAL '15 minutes')) AND check_in < ? AND check_out > ? LIMIT 1`, [req.params.id, co, ci]);
       if (clash) return res.json({ success: true, available: false, status: 'BOOKED', message: 'Already booked for selected dates' });
       return res.json({ success: true, available: true, status: 'AVAILABLE' });
     } catch (e) { res.status(500).json({ success: false, message: 'Availability check failed' }); }
@@ -169,7 +169,7 @@ function createStayApiRouter(deps) {
       const out = await deps.withTransaction(async () => {
         const prop = await dbGet(`SELECT * FROM properties WHERE id = ? FOR UPDATE`, [Number(b.property_id)]);
         if (!prop || Number(prop.is_active) !== 1) throw Object.assign(new Error('Property unavailable'), { status: 404 });
-        const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND payment_status IN ('paid','pending') AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [prop.id, co, ci]);
+        const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND (payment_status = 'paid' OR (payment_status = 'pending' AND created_at >= NOW() - INTERVAL '15 minutes')) AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [prop.id, co, ci]);
         if (clash) throw Object.assign(new Error('Already booked for selected dates'), { status: 409 });
         const n = nights(ci, co);
         const total = Math.round(n * Number(prop.price_per_night || 0) * 100) / 100;
@@ -287,11 +287,14 @@ function createStayApiRouter(deps) {
   });
   async function applyStatus(id, st) {
     return deps.withTransaction(async () => {
+      const initial = await dbGet(`SELECT property_id FROM bookings WHERE id = ? LIMIT 1`, [id]);
+      if (!initial) throw Object.assign(new Error('Booking not found'), { status: 404 });
+      await dbGet(`SELECT id FROM properties WHERE id = ? FOR UPDATE`, [initial.property_id]);
       const ex = await dbGet(`SELECT * FROM bookings WHERE id = ? FOR UPDATE`, [id]);
       if (!ex) throw Object.assign(new Error('Booking not found'), { status: 404 });
       if (st === 'paid') {
-        const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND id <> ? AND payment_status = 'paid' AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [ex.property_id, ex.id, ex.check_out, ex.check_in]);
-        if (clash) throw Object.assign(new Error('Overlaps a paid booking'), { status: 409 });
+        const clash = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND id <> ? AND (payment_status = 'paid' OR (payment_status = 'pending' AND created_at >= NOW() - INTERVAL '15 minutes')) AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [ex.property_id, ex.id, ex.check_out, ex.check_in]);
+        if (clash) throw Object.assign(new Error('Overlaps an active booking hold or paid booking'), { status: 409 });
         const pin = ex.check_in_pin || genPin();
         try { return await dbGet(`UPDATE bookings SET payment_status='paid', check_in_pin=? WHERE id=? RETURNING *`, [pin, id]); }
         catch (e) { await dbRun(`UPDATE bookings SET payment_status='paid', check_in_pin=? WHERE id=?`, [pin, id]); return dbGet(`SELECT * FROM bookings WHERE id=?`, [id]); }

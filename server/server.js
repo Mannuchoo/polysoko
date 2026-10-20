@@ -2927,7 +2927,7 @@ const emitBalance = (phone) => {
 };
 
 const emitMarkets = () => {
-    const sql = `SELECT * FROM markets WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open','live','upcoming') ORDER BY category ASC, title ASC`;
+    const sql = `SELECT * FROM markets WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open','live','upcoming') AND COALESCE(event_end_time,startTime) > NOW() ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
         if (err) return console.error("❌ DB Error:", err.message);
         const markets = (rows || []).map(normalizeMarketRow);
@@ -5855,14 +5855,23 @@ app.post('/api/stkcallback', async (req, res) => {
             let bookingPaid = null;
             let alreadyPaid = false;
             await withTransaction(async () => {
-                const booking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? FOR UPDATE`, [reference]);
+                const initialBooking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? LIMIT 1`, [reference]);
                 await dbRun(`UPDATE transactions SET status = 'completed', mpesa_receipt = ?, internal_id = ? WHERE id = ? AND status = 'pending'`, [mpesaId, `STAY:${reference}:${internalTxnId}`, tx.id]);
-                if (booking && booking.payment_status === 'paid') { alreadyPaid = true; return; }
-                if (!booking || !Number.isFinite(paidAmount) || !mpesaId || Math.round(Number(booking.total_price)) !== creditedAmount || booking.payment_status === 'cancelled') {
+                if (!initialBooking) {
                     await dbRun(`UPDATE transactions SET status = 'needs_review' WHERE id = ?`, [tx.id]);
                     return;
                 }
-                const conflict = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND id <> ? AND payment_status = 'paid' AND check_in < ? AND check_out > ? LIMIT 1`, [booking.property_id, booking.id, booking.check_out, booking.check_in]);
+                // Serialize payment confirmation with new bookings for this unit.
+                // New reservations take this same property-row lock before checking dates.
+                await dbGet(`SELECT id FROM properties WHERE id = ? FOR UPDATE`, [initialBooking.property_id]);
+                const booking = await dbGet(`SELECT * FROM bookings WHERE booking_reference = ? FOR UPDATE`, [reference]);
+                if (booking && booking.payment_status === 'paid') { alreadyPaid = true; return; }
+                const holdExpired = booking?.payment_status === 'pending' && new Date(booking.created_at).getTime() < Date.now() - 15 * 60 * 1000;
+                if (!booking || !Number.isFinite(paidAmount) || !mpesaId || Math.round(Number(booking.total_price)) !== creditedAmount || booking.payment_status !== 'pending' || holdExpired) {
+                    await dbRun(`UPDATE transactions SET status = 'needs_review' WHERE id = ?`, [tx.id]);
+                    return;
+                }
+                const conflict = await dbGet(`SELECT id FROM bookings WHERE property_id = ? AND id <> ? AND (payment_status = 'paid' OR (payment_status = 'pending' AND created_at >= NOW() - INTERVAL '15 minutes')) AND check_in < ? AND check_out > ? LIMIT 1 FOR UPDATE`, [booking.property_id, booking.id, booking.check_out, booking.check_in]);
                 if (conflict) {
                     await dbRun(`UPDATE transactions SET status = 'needs_review' WHERE id = ?`, [tx.id]);
                     return;
@@ -6150,6 +6159,15 @@ app.get('/api/admin/all-markets', authenticateAdmin, (req, res) => {
         if (err) return res.status(500).json({ success: false, message: "Database error" });
         res.json({ success: true, markets: rows || [] });
     });
+});
+app.get('/api/admin/sports-markets', authenticateAdmin, async (_req, res) => {
+    try {
+        const markets = await dbAll(`SELECT * FROM markets WHERE ${SPORTS_MARKET_SQL} ORDER BY timestamp DESC, title ASC`);
+        res.json({ success: true, markets: markets || [] });
+    } catch (err) {
+        console.error('[admin] sports markets load failed:', err.message);
+        res.status(500).json({ success: false, message: 'Could not load sports markets.' });
+    }
 });
 app.get('/api/admin/all-active-bets', authenticateAdmin, async (req, res) => {
     try {
@@ -6607,8 +6625,14 @@ app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
         const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL} AND status IN ('pending','draft','open','upcoming','live','closed','suspended')`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Market not found' });
 
-        const nextStatus = ['pending', 'draft'].includes(String(market.status).toLowerCase()) ? 'open' : market.status;
+        const deadline = market.event_end_time || market.startTime;
+        const deadlineMs = deadline ? new Date(deadline).getTime() : NaN;
+        if (!Number.isFinite(deadlineMs) || deadlineMs <= Date.now()) {
+            return res.status(400).json({ success: false, message: 'Add a valid future deadline before approving this market.' });
+        }
+        const nextStatus = String(market.status).toLowerCase() === 'live' ? 'live' : 'open';
         await dbRun(`UPDATE markets SET status=?, admin_verified=1 WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [nextStatus, marketId]);
+        const publishedMarket = normalizeMarketRow(await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]));
 
         // Send Email to Creator
         if (market.creator) {
@@ -6634,7 +6658,7 @@ app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
         }
 
         emitMarkets();
-        res.json({ success: true });
+        res.json({ success: true, market: publishedMarket });
     } catch (e) {
         res.status(500).json({ success: false });
     }
@@ -7258,6 +7282,7 @@ app.get('/api/admin/suspended-markets', authenticateAdmin, async (req, res) => {
             SELECT m.*
             FROM markets m
             WHERE m.status = 'suspended' AND m.settled = 0
+              AND (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
               AND EXISTS (SELECT 1 FROM bets b WHERE b.market_id = m.id AND b.status = 'active')
             ORDER BY m.startTime ASC NULLS LAST, m.id ASC
         `);

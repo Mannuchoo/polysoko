@@ -648,6 +648,15 @@ window.approveMarket = async function(marketId) {
     try {
         const res = await apiFetch('admin/approve-market', { method: 'POST', body: { marketId } });
         if (!res?.success) return showToast(res?.message || 'Approval failed', 'red');
+        if (res.market && window.state) {
+            const updated = window.state.allMarkets || [];
+            const next = updated.filter(market => String(market.id) !== String(res.market.id));
+            next.push(res.market);
+            window.state.allMarkets = next;
+            window.allMarketsSource = next;
+            if (typeof window.syncMarketMap === 'function') window.syncMarketMap(next);
+            window.applyStateAndRender?.();
+        }
         document.querySelectorAll('[data-pending-market-id]').forEach(row => {
             if (row.dataset.pendingMarketId === String(marketId)) row.remove();
         });
