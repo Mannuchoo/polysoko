@@ -1040,6 +1040,21 @@ button, input, select {
     </div>
 
     <!-- 👑 MY ACCOUNT CENTER -->
+<div id="aiMarketReviewSection" class="admin-section">
+    <div class="stat-card">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px;">
+            <div>
+                <h2 class="mu-text">Market Verification</h2>
+                <p class="sub">Every unverified market stays hidden from users until an admin reviews its title and display preview.</p>
+            </div>
+            <button onclick="loadAiGeneratedMarkets()" class="btn-primary" style="padding:9px 14px;">Refresh</button>
+        </div>
+        <div id="aiGeneratedMarketsContainer" style="display:grid;gap:12px;">
+            <div style="text-align:center;padding:30px;color:#666;">Loading markets awaiting verification...</div>
+        </div>
+    </div>
+</div>
+
 <div id="adminAccountSection" class="admin-section active">
     <div class="stat-card">
         <div style="text-align:center; margin-bottom:30px;">
@@ -1069,6 +1084,10 @@ button, input, select {
             <button onclick="showSection('marketApprovalsSection'); loadPendingMarkets();">
                 <div style="font-size:1.8rem;">⭐</div>
                 <span>Approvals</span>
+            </button>
+            <button onclick="showSection('aiMarketReviewSection')" style="border-color:#9b7cff;">
+                <div style="font-size:1.8rem;">🛡️</div>
+                <span>Market Verification</span>
             </button>
             <button onclick="showSection('treasurySection'); loadAdminTreasury();">
                 <div style="font-size:1.8rem;">🏦</div>
@@ -1401,9 +1420,10 @@ socket.on('connect', () => {
 
 socket.on('newMarketPending', (data) => {
     console.log("🆕 New market submission received:", data.title);
-    if (document.getElementById('marketApprovalsSection').classList.contains('active')) {
+    if (document.getElementById('marketApprovalsSection')?.classList.contains('active')) {
         loadPendingMarkets();
     }
+    if (document.getElementById('aiMarketReviewSection')?.classList.contains('active')) loadAiGeneratedMarkets();
 });
 socket.on('stay_booking', (data) => {
     const toast = document.createElement('div');
@@ -1615,6 +1635,7 @@ window.showSection = function(id, btn, options = {}) {
         if (id === 'betsSection') loadGlobalActiveBets();
         if (id === 'transactionsSection') loadTransactions();
         if (id === 'marketApprovalsSection') loadPendingMarkets();
+        if (id === 'aiMarketReviewSection') loadAiGeneratedMarkets();
         if (id === 'marketsSection') loadAdminMarkets();
         if (id === 'activityLogsSection') loadActivityLogs();
         if (id === 'staySection' && typeof loadStayAdmin === 'function') loadStayAdmin();
@@ -1955,6 +1976,7 @@ async function initAdminAfterLogin() {
     if (lastView === 'usersSection') startupLoads.push(loadAdminUsers());
     if (lastView === 'marketsSection') startupLoads.push(loadAdminMarkets());
     if (lastView === 'marketApprovalsSection') startupLoads.push(loadPendingMarkets());
+    if (lastView === 'aiMarketReviewSection') startupLoads.push(loadAiGeneratedMarkets());
     if (lastView === 'activityLogsSection') startupLoads.push(loadActivityLogs());
     await Promise.allSettled(startupLoads);
 }
@@ -2131,12 +2153,97 @@ async function loadPendingMarkets() {
     }
 }
 
+async function loadAiGeneratedMarkets() {
+    const container = document.getElementById('aiGeneratedMarketsContainer');
+    if (!container) return;
+    container.innerHTML = '<div style="text-align:center;padding:20px;color:#666;">Loading markets awaiting verification...</div>';
+    try {
+        const data = await API.get('/admin/market-review');
+        if (!data?.success) throw new Error(data?.message || 'Unable to load markets awaiting verification.');
+        const markets = data.markets || [];
+        if (!markets.length) {
+            container.innerHTML = '<div style="text-align:center;padding:30px;color:#666;">No markets are waiting for verification.</div>';
+            return;
+        }
+        container.innerHTML = markets.map(m => {
+            let source = {};
+            try { source = typeof m.content === 'string' ? JSON.parse(m.content) : (m.content || {}); } catch {}
+            const deadline = m.event_end_time || m.eventEndTime || m.startTime || m.starttime;
+            const deadlineLabel = deadline && Number.isFinite(new Date(deadline).getTime()) ? new Date(deadline).toLocaleString() : 'Not provided';
+            const imageUrl = m.image_url || (m.media_type !== 'video' ? m.media_url : '');
+            const videoUrl = m.video_url || (m.media_type === 'video' ? m.media_url : '');
+            const sourceType = Number(m.ai_generated) === 1 ? 'AI GENERATED' : (m.creator ? 'CREATOR SUBMISSION' : 'API / SYSTEM FEED');
+            return `
+                <article id="review-market-${esc(m.id)}" style="background:#101216;border:1px solid #55428a;border-radius:12px;padding:16px;">
+                    <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
+                        <div>
+                            <h3 style="margin:0;color:#e2d8ff;line-height:1.45;">${esc(m.title || '(untitled market)')}</h3>
+                            <div style="color:#a99bc9;font-size:.75rem;margin-top:6px;">${esc(sourceType)} · AWAITING ADMIN CONFIRMATION</div>
+                            <div style="color:#a99bc9;font-size:.75rem;margin-top:6px;">${esc(m.category || 'general').toUpperCase()} · ${sourceType} · ${esc(m.status || 'draft').toUpperCase()}</div>
+                        </div>
+                        <span style="background:#332750;color:#e2d8ff;padding:5px 8px;border-radius:6px;font-size:.7rem;white-space:nowrap;">AWAITING REVIEW</span>
+                    </div>
+                    <div style="margin-top:14px;padding:12px;background:#08090b;border:1px solid #292d34;border-radius:8px;color:#c6c8cc;font-size:.85rem;line-height:1.5;">
+                        <div style="color:#00e887;font-size:.7rem;font-weight:700;letter-spacing:.08em;margin-bottom:7px;">USER DISPLAY PREVIEW</div>
+                        <div style="font-size:1.05rem;font-weight:700;color:white;">${esc(m.title || '(untitled market)')}</div>
+                        <div style="margin-top:8px;color:#ddd;">${esc(m.description || 'No description provided')}</div>
+                        <div style="margin-top:7px;"><b style="color:#aaa;">Sides:</b> ${esc(m.sideA || 'YES')} / ${esc(m.sideB || 'NO')} &nbsp; <b style="color:#aaa;">Odds:</b> ${Number(m.oddsA || 1.9).toFixed(2)} / ${Number(m.oddsB || 1.9).toFixed(2)}</div>
+                        <div style="margin-top:6px;"><b style="color:#aaa;">Category:</b> ${esc(m.category || 'general')} &nbsp; <b style="color:#aaa;">Closes:</b> ${esc(deadlineLabel)}</div>
+                        ${source.sourceTitle ? `<div style="margin-top:6px;"><b style="color:#aaa;">Source article:</b> ${esc(source.sourceTitle)}</div>` : ''}
+                        ${source.sourceUrl ? `<a href="${esc(source.sourceUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:6px;color:#91caff;">Open source</a>` : ''}
+                    </div>
+                    ${imageUrl ? `<img src="${esc(imageUrl)}" alt="Market image" loading="lazy" style="display:block;max-width:100%;max-height:260px;object-fit:contain;margin-top:12px;border-radius:8px;">` : ''}
+                    ${videoUrl ? `<a href="${esc(videoUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:10px;color:#91caff;">Open attached video</a>` : ''}
+                    <div style="display:flex;gap:10px;margin-top:14px;">
+                        <button onclick="editUnverifiedMarket('${esc(m.id)}')" class="btn-primary" style="flex:1;">Edit</button>
+                        <button onclick="approveMarket('${esc(m.id)}')" class="btn-approve" style="flex:1;">Approve &amp; Publish</button>
+                        <button onclick="rejectMarket('${esc(m.id)}')" class="btn-no" style="flex:1;">Delete</button>
+                    </div>
+                </article>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error('AI market review load failed:', e);
+        container.innerHTML = `<div style="text-align:center;padding:24px;color:#ff8080;">${esc(e.message || 'Could not load AI market drafts.')}</div>`;
+    }
+}
+
+async function editUnverifiedMarket(marketId) {
+    const card = document.getElementById(`review-market-${marketId}`);
+    if (!card || card.querySelector('[data-market-edit]')) return;
+    const data = await API.get(`/admin/market/${encodeURIComponent(marketId)}`);
+    if (!data?.success) return alert(data?.message || 'Could not load market details.');
+    const m = data.market;
+    const form = document.createElement('div');
+    form.dataset.marketEdit = 'true';
+    form.style.cssText = 'display:grid;gap:8px;margin-top:12px;padding:12px;background:#08090b;border-radius:8px;';
+    const field = (label, value, key, type='text') => `<label style="color:#aaa;font-size:.8rem;">${label}<input data-key="${key}" type="${type}" value="${esc(value || '')}" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:9px;background:#15171b;border:1px solid #444;color:white;border-radius:6px;"></label>`;
+    const deadline = m.event_end_time || m.startTime || '';
+    const deadlineInput = deadline && Number.isFinite(new Date(deadline).getTime()) ? new Date(deadline).toISOString().slice(0, 16) : '';
+    form.innerHTML = field('Title shown to users', m.title, 'title') + field('Description / resolution criteria', m.description, 'description') + field('Category', m.category, 'category') + field('Side A label', m.sideA || 'YES', 'sideA') + field('Side B label', m.sideB || 'NO', 'sideB') + field('Exact deadline', deadlineInput, 'deadline', 'datetime-local') + field('Image URL', m.image_url || (m.media_type !== 'video' ? m.media_url : ''), 'imageUrl') + field('Video URL', m.video_url || (m.media_type === 'video' ? m.media_url : ''), 'videoUrl') + '<div style="display:flex;gap:8px;"><button type="button" class="btn-primary" data-save style="flex:1;">Save changes</button><button type="button" class="btn-no" data-cancel>Cancel</button></div>';
+    card.appendChild(form);
+    form.querySelector('[data-cancel]').onclick = () => form.remove();
+    form.querySelector('[data-save]').onclick = async () => {
+        const payload = { marketId };
+        form.querySelectorAll('[data-key]').forEach(el => payload[el.dataset.key] = el.value.trim());
+        if (!payload.deadline) return alert('Enter the exact market deadline.');
+        const saved = await API.post('/admin/edit-unverified-market', payload);
+        if (!saved?.success) return alert(saved?.message || 'Could not save edits.');
+        loadAiGeneratedMarkets();
+    };
+}
+
+function refreshVisibleMarketApprovalQueues() {
+    if (document.getElementById('aiMarketReviewSection')?.classList.contains('active')) loadAiGeneratedMarkets();
+    if (document.getElementById('marketApprovalsSection')?.classList.contains('active')) loadPendingMarkets();
+}
+
 async function approveMarket(marketId) {
     try {
         const data = await API.post('/admin/approve-market', { marketId });
         if (data.success) {
             alert('Market approved!');
-            loadPendingMarkets();
+            refreshVisibleMarketApprovalQueues();
         } else {
             alert(data.message || 'Failed to approve');
         }
@@ -2146,18 +2253,18 @@ async function approveMarket(marketId) {
 }
 
 async function rejectMarket(marketId) {
-    if (!await window.showAppConfirm('Are you sure you want to reject this market?', { title: 'Reject market', danger: true, confirmLabel: 'Reject' })) return;
+    if (!await window.showAppConfirm('Delete this unverified market? Markets with bet history will be archived and any active bets refunded.', { title: 'Delete unverified market', danger: true, confirmLabel: 'Delete' })) return;
     
     try {
         const data = await API.post('/admin/reject-market', { marketId });
         if (data.success) {
-            alert('Market rejected');
-            loadPendingMarkets();
+            alert(data.message || (data.deleted ? 'Market deleted.' : 'Market removed from review.'));
+            refreshVisibleMarketApprovalQueues();
         } else {
             alert(data.message || 'Failed to reject');
         }
     } catch (e) {
-        alert('Error rejecting market');
+        alert('Error removing market from review');
     }
 }
 

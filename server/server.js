@@ -1777,7 +1777,7 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         `SELECT *
          FROM markets
          WHERE (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
-           AND status IN ('open','upcoming','live')
+           AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
            AND COALESCE(event_end_time, startTime, timestamp) > NOW()
          ORDER BY timestamp DESC
          LIMIT ?`,
@@ -2547,7 +2547,7 @@ db.serialize(() => {
         oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0,
         league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
         media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
-        creator TEXT,
+        creator TEXT, ai_generated INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0,
         url TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
     )`);
@@ -2631,6 +2631,7 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'image_url', 'TEXT');
     addColumnSafely('markets', 'video_url', 'TEXT');
     addColumnSafely('markets', 'content', 'TEXT');  
+    addColumnSafely('markets', 'admin_verified', 'INTEGER DEFAULT 0');
     addColumnSafely('transactions', 'odds', 'REAL');
     addColumnSafely('transactions', 'settled_amount', 'REAL');
     addColumnSafely('transactions', 'potential_payout', 'REAL');
@@ -2675,6 +2676,7 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     };
     global.addActivityLog = addActivityLog;
     addColumnSafely('markets', 'creator', 'TEXT');
+    addColumnSafely('markets', 'ai_generated', 'INTEGER DEFAULT 0');
     addColumnSafely('markets', 'url', 'TEXT');
     addColumnSafely('markets', 'is_boosted', 'INTEGER DEFAULT 0');
 
@@ -2879,7 +2881,7 @@ const emitBalance = (phone) => {
 };
 
 const emitMarkets = () => {
-    const sql = `SELECT * FROM markets WHERE status IN ('open','live','upcoming','pending') ORDER BY category ASC, title ASC`;
+    const sql = `SELECT * FROM markets WHERE COALESCE(admin_verified,0)=1 AND status IN ('open','live','upcoming') ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
         if (err) return console.error("❌ DB Error:", err.message);
         const markets = (rows || []).map(normalizeMarketRow);
@@ -2907,12 +2909,13 @@ app.post('/api/markets/generate-from-news', authenticateAdmin, async (req, res) 
             sourceUrl: req.body?.article?.url || req.body?.url || null
         });
         await dbRun(
-            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator)
-             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?)`,
+            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator, ai_generated)
+             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?, 1)`,
             [id, generated.title, generated.resolutionCriteria, content, generated.deadlineAt, generated.deadlineAt,
                 generated.imageUrl || generated.videoUrl, generated.videoUrl ? 'video' : 'image', generated.imageUrl, generated.videoUrl, req.user.phone]
         );
-        res.status(201).json({ success: true, market: { id, ...generated, status: 'draft', category: 'news', sideA: 'YES', sideB: 'NO' } });
+        emitAdminEvent('newMarketPending', { id, title: generated.title, creator: req.user.phone, status: 'draft', ai_generated: true });
+        res.status(201).json({ success: true, market: { id, ...generated, status: 'draft', ai_generated: true, category: 'news', sideA: 'YES', sideB: 'NO' } });
     } catch (error) {
         console.error('[market-generator] failed:', error.message);
         const status = /required|deadline|future date|Yes\/No|missing|definitive/i.test(error.message) ? 400 : 502;
@@ -4297,7 +4300,7 @@ app.get('/api/markets/preview', async (req, res) => {
     try {
         const rows = await dbAll(
             `SELECT * FROM markets
-             WHERE status IN ('open', 'upcoming', 'live')
+             WHERE COALESCE(admin_verified,0)=1 AND status IN ('open', 'upcoming', 'live')
                AND NOT (
                     (category='sports' OR category='football' OR id LIKE 'sp_%' OR id LIKE 'fb_%')
                     AND (
@@ -4356,7 +4359,7 @@ const marketsRouteHandler = async (req, res) => {
         const rows = await dbAll(
             `SELECT *
              FROM markets
-             WHERE status IN ('open', 'upcoming', 'live')
+             WHERE COALESCE(admin_verified,0)=1 AND status IN ('open', 'upcoming', 'live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (
                      startTime IS NULL
@@ -4581,12 +4584,12 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
 
     try {
         const market = await dbGet(
-            `SELECT id, title, sideA, sideB, oddsA, oddsB, home_volume, away_volume
+            `SELECT id, title, sideA, sideB, oddsA, oddsB, home_volume, away_volume, admin_verified
              FROM markets
              WHERE id=?`,
             [marketId]
         );
-        if (!market) return res.status(404).json({ success: false, message: "Market not found" });
+        if (!market || Number(market.admin_verified || 0) !== 1) return res.status(404).json({ success: false, message: "Market not found" });
 
         const rows = await dbAll(
             `SELECT picked AS side, odds, COUNT(*) AS orders, SUM(amount) AS volume
@@ -4648,7 +4651,7 @@ app.get('/api/sports/categories', async (req, res) => {
         const activeFootball = await dbGet(
             `SELECT COUNT(*) AS count FROM markets
              WHERE left(id, 3) = 'fb_'
-               AND status IN ('open','upcoming','live')
+               AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
                AND sideA IS NOT NULL AND sideB IS NOT NULL
@@ -4670,7 +4673,7 @@ app.get('/api/sports/categories', async (req, res) => {
             recoveredFootballMarkets = await dbAll(
                 `SELECT * FROM markets
                  WHERE left(id, 3) = 'fb_'
-                   AND status IN ('open','upcoming','live')
+                   AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
                    AND COALESCE(event_end_time, startTime) > NOW()
                    AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
                    AND sideA IS NOT NULL AND sideB IS NOT NULL
@@ -4690,7 +4693,7 @@ app.get('/api/sports/categories', async (req, res) => {
                 END AS sport,
                 COUNT(*) AS count
              FROM markets
-             WHERE ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
+             WHERE COALESCE(admin_verified,0)=1 AND ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
                AND status IN ('open', 'upcoming', 'live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (
@@ -4738,7 +4741,7 @@ app.post('/api/admin/sync-sports', authenticateAdmin, async (req, res) => {
                 COUNT(*) AS count
             FROM markets
             WHERE ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
-              AND status IN ('open','upcoming','live')
+              AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
             GROUP BY
                 CASE
                     WHEN id LIKE 'fb_%' THEN 'Football'
@@ -5455,9 +5458,8 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
     try {
         const market = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: "Market not found" });
-
         const bettableStatuses = ['open', 'upcoming'];
-        if (!market.status || !bettableStatuses.includes(market.status.toLowerCase())) {
+        if (Number(market.admin_verified || 0) !== 1 || !market.status || !bettableStatuses.includes(market.status.toLowerCase())) {
             return res.status(400).json({ success: false, message: "This market is closed." });
         }
 
@@ -6504,10 +6506,11 @@ app.post('/api/admin/reject-withdraw', authenticateAdmin, async (req, res) => {
 app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
     const { marketId } = req.body;
     try {
-        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND status IN ('pending','draft')`, [marketId]);
+        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND status IN ('pending','draft','open','upcoming','live','closed','suspended')`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Market not found' });
 
-        await dbRun(`UPDATE markets SET status='open' WHERE id=?`, [marketId]);
+        const nextStatus = ['pending', 'draft'].includes(String(market.status).toLowerCase()) ? 'open' : market.status;
+        await dbRun(`UPDATE markets SET status=?, admin_verified=1 WHERE id=? AND COALESCE(admin_verified,0)=0`, [nextStatus, marketId]);
 
         // Send Email to Creator
         if (market.creator) {
@@ -6546,7 +6549,7 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
             SELECT m.id, m.title, m.creator, m.category, u.name as creator_name, u.email as creator_email
             FROM markets m
             JOIN users u ON m.creator = u.phone
-            WHERE m.status = 'pending' AND u.is_upgraded = 1
+            WHERE m.status = 'pending' AND COALESCE(m.admin_verified,0)=1 AND u.is_upgraded = 1
         `);
 
         if (!pendingEliteMarkets || pendingEliteMarkets.length === 0) {
@@ -6596,8 +6599,21 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
 app.post('/api/admin/reject-market', authenticateAdmin, async (req, res) => {
     const { marketId } = req.body;
     try {
-        await dbRun(`DELETE FROM markets WHERE id=? AND status IN ('pending','draft')`, [marketId]);
-        res.json({ success: true });
+        const market = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+        if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });
+        const bets = await dbGet(`SELECT COUNT(*) AS count FROM transactions WHERE market_id=? AND type='bet'`, [marketId]);
+        const betRows = await dbGet(`SELECT COUNT(*) AS count FROM bets WHERE market_id=?`, [marketId]);
+        if (Number(bets?.count || 0) > 0 || Number(betRows?.count || 0) > 0) {
+            const active = await dbGet(`SELECT COUNT(*) AS count FROM transactions WHERE market_id=? AND type='bet' AND status='active'`, [marketId]);
+            const activeBetRows = await dbGet(`SELECT COUNT(*) AS count FROM bets WHERE market_id=? AND status='active'`, [marketId]);
+            if (Number(active?.count || 0) > 0) await cancelMarket(marketId, 'ADMIN_REJECTED');
+            else if (Number(activeBetRows?.count || 0) > 0) return res.status(409).json({ success: false, message: 'Active bet history is missing matching transactions, so the market cannot be safely refunded or deleted.' });
+            else await dbRun(`UPDATE markets SET status='cancelled', settled=1 WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+            return res.json({ success: true, archived: true, message: 'Market archived to preserve bet history; active bets were refunded.' });
+        }
+        await dbRun(`DELETE FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+        emitMarkets();
+        res.json({ success: true, deleted: true });
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
@@ -7031,7 +7047,9 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                 SELECT m.*, u.name as creator_name 
                 FROM markets m 
                 LEFT JOIN users u ON m.creator = u.phone 
-                WHERE m.status IN ('pending','draft')
+                WHERE COALESCE(m.admin_verified,0)=0
+                  AND m.status IN ('draft','pending','open','upcoming','live','closed','suspended')
+                  AND COALESCE(m.settled,0)=0
             `);
 
             Object.assign(statsData, {
@@ -7059,12 +7077,54 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
             SELECT m.*, m.creator as creator_phone, u.name as creator_name 
             FROM markets m 
             LEFT JOIN users u ON m.creator = u.phone 
-            WHERE m.status IN ('pending','draft')
+            WHERE m.status='pending' AND COALESCE(m.admin_verified,0)=1
         `);
         res.json({ success: true, markets });
     } catch (e) {
         console.error("❌ Error fetching pending markets:", e);
         res.status(500).json({ success: false, message: "Database error fetching markets" });
+    }
+});
+
+app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticateAdmin, async (req, res) => {
+    try {
+        const markets = await dbAll(`
+            SELECT m.*, m.creator as creator_phone, u.name as creator_name
+            FROM markets m
+            LEFT JOIN users u ON m.creator = u.phone
+            WHERE COALESCE(m.admin_verified,0)=0
+              AND m.status IN ('draft','pending','open','upcoming','live','closed','suspended')
+              AND COALESCE(m.settled,0)=0
+            ORDER BY m.timestamp ASC, m.id ASC
+        `);
+        res.json({ success: true, markets: markets || [] });
+    } catch (e) {
+        console.error('[admin] market review load failed:', e.message);
+        res.status(500).json({ success: false, message: 'Unable to load markets awaiting verification.' });
+    }
+});
+
+app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res) => {
+    const { marketId, title, description, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
+    if (!marketId || !String(title || '').trim()) return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
+    try {
+        const market = await dbGet(`SELECT id, content, event_start_time FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+        if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });
+        const cleanImage = imageUrl ? String(imageUrl).trim() : null;
+        const cleanVideo = videoUrl ? String(videoUrl).trim() : null;
+        const mediaUrl = cleanVideo || cleanImage;
+        const mediaType = cleanVideo ? 'video' : (cleanImage ? 'image' : null);
+        const due = deadline ? new Date(deadline) : null;
+        if (deadline && !Number.isFinite(due.getTime())) return res.status(400).json({ success: false, message: 'Deadline must be a valid date and time.' });
+        await dbRun(
+            `UPDATE markets SET title=?, description=?, category=?, event_end_time=COALESCE(?,event_end_time), startTime=COALESCE(?,startTime), media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=? WHERE id=? AND COALESCE(admin_verified,0)=0`,
+            [String(title).trim(), description ?? '', category || 'general', due?.toISOString() || null, due?.toISOString() || null, mediaUrl, mediaType, cleanImage, cleanVideo, sideA || 'YES', sideB || 'NO', marketId]
+        );
+        emitMarkets();
+        res.json({ success: true });
+    } catch (e) {
+        console.error('[admin] unverified market edit failed:', e.message);
+        res.status(500).json({ success: false, message: 'Could not save market changes.' });
     }
 });
 
@@ -7372,8 +7432,19 @@ app.get('/api/news/everything', async (req, res) => {
     try {
         const force = req.query.refresh === '1' || req.query.refresh === 'true';
         const processedMarkets = await syncNewsApiMarkets({ force, limit: 500 });
+        const ids = (processedMarkets || []).map(market => market.id).filter(Boolean);
+        const visibleRows = ids.length ? await dbAll(
+            `SELECT * FROM markets WHERE id IN (${ids.map(() => '?').join(',')}) AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')`,
+            ids
+        ) : [];
+        const visibleMarkets = (visibleRows || []).map(row => {
+            const market = normalizeMarketRow(row);
+            const headline = extractContentField(market.content, 'Headline') || market.rawHeadline || market.title;
+            const classification = classifyNewsArticle(headline, market.description || market.content);
+            return buildNewsMarket({ ...market, category: classification.category, sideA: classification.sideA, sideB: classification.sideB });
+        });
         emitMarkets();
-        res.json({ success: true, articles: processedMarkets, markets: processedMarkets });
+        res.json({ success: true, articles: visibleMarkets, markets: visibleMarkets });
     } catch (error) {
         console.error("❌ Aggregator Error:", error.response?.data || error.message);
         try {
@@ -7381,7 +7452,7 @@ app.get('/api/news/everything', async (req, res) => {
                 `SELECT * FROM markets
                  WHERE category IN ('news','tech','politics')
                    AND (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
-                   AND status IN ('open','upcoming','live')
+                   AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
                    AND COALESCE(event_end_time, startTime, timestamp) > NOW()
                  ORDER BY timestamp DESC LIMIT 500`
             );
