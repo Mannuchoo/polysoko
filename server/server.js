@@ -1679,7 +1679,7 @@ async function normalizeNewsArticle(article) {
         image_url: generated.imageUrl,
         video_url: generated.videoUrl,
         category: classification.category,
-        country: sourceName || 'GLOBAL',
+        country: article.country || sourceName || 'GLOBAL',
         source: sourceName || 'GLOBAL',
         sideA: classification.sideA,
         sideB: classification.sideB,
@@ -1749,8 +1749,26 @@ function extractRssItemField(item, field) {
     return match ? decodeRssXml(match[1]) : '';
 }
 
+function extractRssItemMedia(item) {
+    const tags = String(item || '').match(/<(?:media:content|media:thumbnail|enclosure)\b[^>]*>/gi) || [];
+    let imageUrl = null;
+    let videoUrl = null;
+    for (const tag of tags) {
+        const url = tag.match(/\b(?:url|href)=["']([^"']+)["']/i)?.[1];
+        if (!url) continue;
+        const type = tag.match(/\btype=["']([^"']+)["']/i)?.[1] || '';
+        if (/video|\.mp4(?:$|\?)/i.test(type + ' ' + url)) videoUrl ||= url;
+        else imageUrl ||= url;
+    }
+    return { imageUrl, videoUrl };
+}
+
 async function syncRssNewsMarkets(limit = 500) {
     const feeds = [
+        // Local Kenya reporting is prioritized so it is still included when
+        // international RSS feeds fill a limited refresh batch.
+        { url: 'https://nation.africa/kenya/rss.xml', source: 'Nation Africa', local: true },
+        { url: 'https://www.standardmedia.co.ke/rss/kenya.php', source: 'The Standard Kenya', local: true },
         { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC News' },
         { url: 'https://feeds.bbci.co.uk/news/politics/rss.xml', source: 'BBC News' },
         { url: 'https://feeds.bbci.co.uk/news/technology/rss.xml', source: 'BBC News' },
@@ -1777,6 +1795,7 @@ async function syncRssNewsMarkets(limit = 500) {
             const link = extractRssItemField(item, 'link');
             const description = extractRssItemField(item, 'description');
             const publishedAt = extractRssItemField(item, 'pubDate') || new Date().toISOString();
+            const media = extractRssItemMedia(item);
             if (!title || !link || seen.has(link)) continue;
             seen.add(link);
             let market;
@@ -1784,8 +1803,11 @@ async function syncRssNewsMarkets(limit = 500) {
                 title,
                 description,
                 url: link,
+                image: media.imageUrl,
+                videoUrl: media.videoUrl,
                 publishedAt: Number.isFinite(Date.parse(publishedAt)) ? new Date(publishedAt).toISOString() : new Date().toISOString(),
-                source: feed.source
+                source: feed.source,
+                country: feed.local ? 'Kenya' : undefined
             }); } catch (error) {
                 console.warn(`[news] Gemini rejected RSS headline "${title}": ${error.message}`);
                 continue;

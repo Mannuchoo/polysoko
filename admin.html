@@ -2120,7 +2120,7 @@ async function loadPendingMarkets() {
         }
         
         container.innerHTML = markets.map(m => `
-            <div style="background:#1a1b23; border:1px solid #333; border-radius:12px; padding:15px;">
+            <div id="pending-market-${esc(m.id)}" style="background:#1a1b23; border:1px solid #333; border-radius:12px; padding:15px;">
                 <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:10px;">
                     <div>
                         <h3 style="margin:0; color:#00ff88;">${esc(m.title)}</h3>
@@ -2292,8 +2292,18 @@ async function approveMarket(marketId) {
     try {
         const data = await API.post('/admin/approve-market', { marketId });
         if (data.success) {
-            alert('Market approved!');
-            refreshVisibleMarketApprovalQueues();
+            const card = document.getElementById(`pending-market-${marketId}`) || document.getElementById(`review-market-${marketId}`);
+            const container = card?.parentElement;
+            card?.remove();
+            if (container && !container.querySelector('[id^="pending-market-"], [id^="review-market-"]')) {
+                container.innerHTML = '<div style="text-align:center;padding:30px;color:#666;">No markets are waiting for verification.</div>';
+            }
+            const notice = document.createElement('div');
+            notice.setAttribute('role', 'status');
+            notice.textContent = 'Market approved and published.';
+            notice.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:100000;color:#07140d;background:#00e887;padding:12px 18px;border-radius:8px;font-weight:700;';
+            document.body.appendChild(notice);
+            setTimeout(() => notice.remove(), 3500);
         } else {
             alert(data.message || 'Failed to approve');
         }

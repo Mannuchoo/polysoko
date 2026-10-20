@@ -445,7 +445,7 @@ window.openAdminPanel = async function() {
                             <h4 style="color:#ffaa00; font-size:0.7rem; margin-bottom:10px;">PENDING APPROVALS</h4>
                             <div style="max-height:150px; overflow-y:auto; border:1px solid #222; border-radius:8px; background:#000;">
                                 ${res.pendingMarkets.map(m => `
-                                    <div style="padding:10px; border-bottom:1px solid #222; display:flex; justify-content:space-between; align-items:center;">
+                                    <div data-pending-market-id="${sanitize(m.id)}" style="padding:10px; border-bottom:1px solid #222; display:flex; justify-content:space-between; align-items:center;">
                                         <div style="font-size:0.75rem; color:white;">${sanitize(m.title)} <br><small style="color:#555">by ${sanitize(m.creator_name || m.creator)}</small></div>
                                         <div style="display:flex; gap:5px;">
                                             <button onclick="approveMarket('${m.id}')" style="background:#00ff88; color:black; border:none; padding:4px 8px; border-radius:4px; font-size:0.65rem; font-weight:bold; cursor:pointer;">Approve</button>
@@ -647,11 +647,11 @@ window.adminRewardReferral = async function() {
 window.approveMarket = async function(marketId) {
     try {
         const res = await apiFetch('admin/approve-market', { method: 'POST', body: { marketId } });
-        if (res.success) {
-            showToast("Market Approved & Creator Notified");
-            document.getElementById('adminModal').remove();
-            window.openAdminPanel();
-        }
+        if (!res?.success) return showToast(res?.message || 'Approval failed', 'red');
+        document.querySelectorAll('[data-pending-market-id]').forEach(row => {
+            if (row.dataset.pendingMarketId === String(marketId)) row.remove();
+        });
+        showToast('Market approved and creator notified');
     } catch(e) { alert("Approval failed"); }
 };
 
@@ -668,13 +668,14 @@ window.rejectMarket = async function(marketId) {
 
 window.openAdminMarketEditor = async function() {
     try {
+        const sanitize = (text) => window.escapeHtml ? window.escapeHtml(text) : String(text || '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
         const res = await apiFetch('admin/all-markets');
         if (!res?.success) return alert('Unable to load markets for editing.');
 
         const marketsHtml = res.markets.map(m => `
-            <div style="padding:12px; border-bottom:1px solid #222; display:flex; justify-content:space-between; align-items:center; gap:10px;">
+            <div data-market-editor-row="${sanitize(m.id)}" style="padding:12px; border-bottom:1px solid #222; display:flex; justify-content:space-between; align-items:center; gap:10px;">
                 <div style="flex:1; min-width:0;">
-                    <div style="color:#fff; font-size:0.9rem; font-weight:700;">${m.title || '(untitled market)'}</div>
+                    <div data-market-editor-title style="color:#fff; font-size:0.9rem; font-weight:700;">${sanitize(m.title || '(untitled market)')}</div>
                     <div style="color:#888; font-size:0.75rem; margin-top:4px;">${(m.category || 'general').toUpperCase()} • ${m.status || 'unknown'}</div>
                 </div>
                 <button onclick="window.openMarketEditModal('${m.id}')" style="background:#00d1ff; color:black; border:none; padding:8px 12px; border-radius:8px; font-size:0.75rem; font-weight:800; cursor:pointer;">Edit</button>
@@ -799,9 +800,10 @@ window.saveMarketEdits = async function(marketId) {
         }
         statusEl.innerText = 'Market updated successfully.';
         showToast('Market saved successfully');
+        const editorRow = [...document.querySelectorAll('[data-market-editor-row]')].find(row => row.dataset.marketEditorRow === String(marketId));
+        if (editorRow) editorRow.querySelector('[data-market-editor-title]').textContent = title;
         document.getElementById('marketRephraseModal')?.remove();
         document.getElementById('marketEditorModal')?.remove();
-        window.openAdminPanel();
     } catch (err) {
         console.error(err);
         statusEl.innerText = 'Save failed. Check console.';
