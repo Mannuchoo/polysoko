@@ -9,7 +9,7 @@ export function createBotRouter({ dbAll, authenticate }) {
     if (message.length > 2000) return res.status(400).json({ success: false, message: 'Message must be 2,000 characters or fewer.' });
     try {
       const result = await processUserBotMessage({ message, history: req.body?.history, dbAll });
-      return res.json({ success: true, engine: 'groq', model: result.model, reply: result.reply });
+      return res.json({ success: true, engine: result.provider.toLowerCase(), model: result.model, reply: result.reply });
     } catch (error) {
       console.error('[sokobot] request failed:', error.message);
       const missingKey = error.message === 'GROQ_API_KEY is not configured.';

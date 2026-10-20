@@ -3,12 +3,25 @@ import OpenAI from 'openai';
 // Groq retired the previous Llama default for developer-tier projects in
 // August 2026. Keep this on a currently supported model unless overridden.
 const DEFAULT_MODEL = 'openai/gpt-oss-120b';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 let groqClient;
+let geminiClient;
 function getGroqClient() {
   const apiKey = String(process.env.GROQ_API_KEY || '').trim();
   if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
   if (!groqClient) groqClient = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' });
   return groqClient;
+}
+function getGeminiClient() {
+  const apiKey = String(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) throw new Error('Gemini chat fallback is not configured.');
+  if (!geminiClient) {
+    geminiClient = new OpenAI({
+      apiKey,
+      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+    });
+  }
+  return geminiClient;
 }
 const MARKET_VISIBILITY = `
   status IN ('open', 'upcoming', 'live') AND COALESCE(settled, 0)=0
@@ -54,7 +67,6 @@ const marketTools = [
 const systemPrompt = `You are PolySoko AI, also known as PolySoko Bot, the PolySoko prediction market assistant. Help users understand the platform and find markets using the supplied market tools. When discussing a market, use its exact title, category, Yes price when available, and trading volume; never invent market data or claim an outcome is certain. High-risk prices are informational, not financial advice or guaranteed payouts. Do not place bets, promise account actions, or request passwords, OTPs, payment details, or private keys. Keep responses concise and friendly. If a user asks for trending or high-odds/high-risk markets, call the matching tool.`;
 
 export async function processUserBotMessage({ message, history = [], dbAll }) {
-  const client = getGroqClient();
   const safeHistory = Array.isArray(history) ? history.slice(-8).map(item => ({
     role: item?.role === 'assistant' ? 'assistant' : 'user',
     content: String(item?.text || item?.content || '').slice(0, 1000)
@@ -63,26 +75,60 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
   const messages = [{ role: 'system', content: systemPrompt }, ...safeHistory, { role: 'user', content: String(message).slice(0, 2000) }];
   const toolHandlers = { getHighRiskMarkets: () => getHighRiskMarkets(dbAll), getTrendingMarkets: () => getTrendingMarkets(dbAll) };
 
-  for (let turn = 0; turn < 4; turn++) {
-    const payload = await client.chat.completions.create({
-      model: process.env.GROQ_MODEL || DEFAULT_MODEL,
-      messages,
-      tools: marketTools,
-      tool_choice: 'auto',
-      temperature: 0.3,
-      max_tokens: 600
-    }, { timeout: 25000 });
-    const choice = payload.choices?.[0];
-    if (!choice?.message) throw new Error('Groq returned an empty chat response.');
-    messages.push(choice.message);
-    const calls = choice.message.tool_calls || [];
-    if (!calls.length) return { reply: String(choice.message.content || '').trim(), model: payload.model || process.env.GROQ_MODEL || DEFAULT_MODEL };
-    for (const call of calls) {
-      const name = call.function?.name;
-      const handler = toolHandlers[name];
-      const result = handler ? await handler() : { error: 'Unknown market tool.' };
-      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+  const runProvider = async ({ client, model, provider }) => {
+    // Each provider gets a fresh conversation because an interrupted tool call
+    // from the first provider cannot be resumed by the fallback provider.
+    const providerMessages = messages.map(item => ({ ...item }));
+    for (let turn = 0; turn < 4; turn++) {
+      const payload = await client.chat.completions.create({
+        model,
+        messages: providerMessages,
+        tools: marketTools,
+        tool_choice: 'auto',
+        temperature: 0.3,
+        max_tokens: 600
+      }, { timeout: 25000 });
+      const choice = payload.choices?.[0];
+      if (!choice?.message) throw new Error(`${provider} returned an empty chat response.`);
+      providerMessages.push(choice.message);
+      const calls = choice.message.tool_calls || [];
+      if (!calls.length) {
+        const reply = String(choice.message.content || '').trim();
+        if (!reply) throw new Error(`${provider} returned an empty chat response.`);
+        return { reply, model: payload.model || model, provider };
+      }
+      for (const call of calls) {
+        const name = call.function?.name;
+        const handler = toolHandlers[name];
+        const result = handler ? await handler() : { error: 'Unknown market tool.' };
+        providerMessages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+      }
     }
+    throw new Error(`${provider} could not finish the market lookup.`);
+  };
+
+  let groqError;
+  try {
+    return await runProvider({
+      client: getGroqClient(),
+      model: String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim(),
+      provider: 'Groq'
+    });
+  } catch (error) {
+    groqError = error;
+    console.warn('[sokobot] Groq unavailable; trying Gemini fallback:', error.message);
   }
-  throw new Error('SokoBot could not finish the market lookup. Please try again.');
+
+  try {
+    return await runProvider({
+      client: getGeminiClient(),
+      model: String(process.env.GEMINI_CHAT_MODEL || DEFAULT_GEMINI_MODEL).trim(),
+      provider: 'Gemini'
+    });
+  } catch (geminiError) {
+    console.error('[sokobot] Gemini fallback failed:', geminiError.message);
+    const error = new Error('Both Groq and Gemini chat providers are unavailable.');
+    error.cause = { groq: groqError, gemini: geminiError };
+    throw error;
+  }
 }

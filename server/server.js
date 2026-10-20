@@ -2672,7 +2672,14 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'content', 'TEXT');  
     addColumnSafely('markets', 'admin_verified', 'INTEGER DEFAULT 0');
     addColumnSafely('markets', 'ai_headline_generated', 'INTEGER DEFAULT 0');
-    addColumnSafely('markets', 'headline_version', 'INTEGER DEFAULT 0');
+    addColumnSafely('markets', 'headline_version', 'INTEGER DEFAULT 0', () => db.run(
+        `UPDATE markets SET headline_version=2
+         WHERE id LIKE 'news-%' AND COALESCE(ai_headline_generated,0)=1
+           AND COALESCE(admin_verified,0)=1 AND COALESCE(headline_version,0)<2`,
+        (err) => {
+            if (err) console.error('[markets] verified strict news headline migration failed:', err.message);
+        }
+    ));
     addColumnSafely('markets', 'settled_at', 'DATETIME', () => db.run(
         `UPDATE markets
          SET settled_at=COALESCE(settled_at, event_end_time, startTime, timestamp, CURRENT_TIMESTAMP)
@@ -2955,8 +2962,8 @@ app.post('/api/markets/generate-from-news', authenticateAdmin, async (req, res) 
             sourceUrl: req.body?.article?.url || req.body?.url || null
         });
         await dbRun(
-            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator, ai_generated, ai_headline_generated)
-             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?, 1, 1)`,
+            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator, ai_generated, ai_headline_generated, headline_version)
+             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?, 1, 1, 2)`,
             [id, generated.title, generated.resolutionCriteria, content, generated.deadlineAt, generated.deadlineAt,
                 generated.imageUrl || generated.videoUrl, generated.videoUrl ? 'video' : 'image', generated.imageUrl, generated.videoUrl, req.user.phone]
         );
@@ -7264,7 +7271,7 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
         const mediaType = finalVideo ? 'video' : (finalImage ? 'image' : null);
         const content = `Action/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nDeadline: ${generated.deadlineAt}\nResolution: ${generated.resolutionCriteria}`;
         await dbRun(
-            `UPDATE markets SET title=?, description=?, content=?, category=?, event_end_time=?, startTime=?, media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=?, ai_headline_generated=1, status='draft' WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`,
+            `UPDATE markets SET title=?, description=?, content=?, category=?, event_end_time=?, startTime=?, media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=?, ai_headline_generated=1, headline_version=2, status='draft' WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`,
             [generated.title, generated.resolutionCriteria, content, category || 'general', generated.deadlineAt, generated.deadlineAt, mediaUrl, mediaType, finalImage, finalVideo, sideA || 'YES', sideB || 'NO', marketId]
         );
         const updatedMarket = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
