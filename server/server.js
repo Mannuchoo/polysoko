@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
-import { generateMarketFromNews, formatStrictMarketTitle } from './src/services/marketGenerator.js';
+import { generateMarketFromNews } from './src/services/marketGenerator.js';
 import { fileURLToPath } from 'url'; // For __dirname fix
 import { dirname, join } from 'path';
 
@@ -888,6 +888,14 @@ function normalizeMarketRow(market) {
     };
 }
 
+const SPORTS_MARKET_SQL = "(LOWER(COALESCE(category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(sport,'')) <> '' OR id LIKE 'sp_%' OR id LIKE 'fb_%' OR country='Football')";
+const AI_HEADLINE_MARKET_SQL = "(id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' AND id NOT LIKE 'tmdb_%' AND id NOT LIKE 'crypto_%' AND id NOT LIKE 'env_%' OR COALESCE(ai_headline_generated,0)=1)";
+const isSportsMarket = market => {
+    const category = String(market?.category || '').toLowerCase();
+    return ['sports', 'football', 'soccer'].includes(category) || Boolean(String(market?.sport || '').trim()) ||
+        /^(sp_|fb_)/i.test(String(market?.id || '')) || String(market?.country || '').toLowerCase() === 'football';
+};
+
 // --- JWT SECRET RESOLUTION -------------------------------------------------
 // Sessions are stateless JWTs, so the signing secret must stay identical across
 // every process restart. Previously the secret was read straight from
@@ -1163,19 +1171,10 @@ const personaConfig = personaRaw.split(/\r?\n/).reduce((acc, line) => {
     return acc;
 }, { keywords: [], instructions: '', tone: 'High-Energy', role: 'Elite Analyst' });
 
-function addNewsMarketDeadline(question, value) {
-    const timestamp = Date.parse(value || '');
-    if (!Number.isFinite(timestamp)) return question;
-    if (/\b(?:by|before|within|until|today|tomorrow|this (?:week|month|year)|next (?:week|month|year)|20\d{2})\b/i.test(question)) return question;
-    const deadline = new Intl.DateTimeFormat('en-GB', {
-        day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Africa/Nairobi'
-    }).format(new Date(timestamp));
-    const accuracyFallback = question.match(/^Is this headline accurate:\s*(.+)\?$/i);
-    if (accuracyFallback) return `Will the claim ${accuracyFallback[1]} be verified by ${deadline}?`;
-    return question.replace(/\?$/, ` by ${deadline}?`);
-}
-
 function buildNewsQuestion(headline) {
+    // Frozen: automated market titles must be generated and validated by Gemini.
+    return null;
+    /* legacy local headline builder retained temporarily for source compatibility */
     const clean = String(headline || '')
         .replace(/\s+-\s+[^-]+$/, '')
         .replace(/\[[^\]]+\]/g, '')
@@ -1642,7 +1641,7 @@ function classifyNewsArticle(title, content = '') {
     return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'news' };
 }
 
-function normalizeNewsArticle(article) {
+async function normalizeNewsArticle(article) {
     const rawHeadline = String(article?.title || '').replace(/\s+-\s+[^-]+$/, '').replace(/\s+/g, ' ').trim();
     if (!rawHeadline || rawHeadline === '[Removed]') return null;
 
@@ -1652,32 +1651,45 @@ function normalizeNewsArticle(article) {
     const publishedAt = article.publishedAt || article.published_at || article.published || new Date().toISOString();
     const hash = crypto.createHash('md5').update(`${rawHeadline}|${sourceName || ''}|${publishedAt}`).digest('hex');
     const expiresAt = new Date(Date.now() + classification.expiryHours * 60 * 60 * 1000).toISOString();
-    const market = buildNewsMarket({
-        id: `${classification.prefix}_${hash}`,
+    const id = `${classification.prefix}_${hash}`;
+    const existing = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime) > NOW()`, [id]);
+    if (existing) return { ...normalizeMarketRow(existing), _persisted: true };
+    const generated = await generateMarketFromNews({
         title: rawHeadline,
-        description: content,
-        content: `Headline: ${rawHeadline}\nDescription: ${content}`,
+        body: content,
+        requiredDeadline: expiresAt,
         media_url: article.urlToImage || article.image || article.media_url || null,
-        media_type: 'image',
+        imageUrl: article.urlToImage || article.image || article.media_url || null,
+        videoUrl: article.videoUrl || article.video_url || null
+    });
+    return {
+        id,
+        title: generated.title,
+        description: generated.resolutionCriteria,
+        content: `Headline: ${rawHeadline}\nDescription: ${content}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
+        media_url: generated.imageUrl || generated.videoUrl || null,
+        media_type: generated.videoUrl ? 'video' : 'image',
+        image_url: generated.imageUrl,
+        video_url: generated.videoUrl,
         category: classification.category,
         country: sourceName || 'GLOBAL',
         source: sourceName || 'GLOBAL',
         sideA: classification.sideA,
         sideB: classification.sideB,
         url: article.url || article.link || null,
-        startTime: expiresAt,
+        startTime: generated.deadlineAt,
         event_start_time: publishedAt,
-        event_end_time: expiresAt,
-        status: 'open'
-    });
-    market.rawHeadline = rawHeadline;
-    return market;
+        event_end_time: generated.deadlineAt,
+        status: 'draft',
+        rawHeadline,
+        ai_headline_generated: 1
+    };
 }
 
 async function saveNewsMarket(market) {
     await dbRun(
-        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, image_url, video_url, ai_headline_generated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             title=excluded.title,
             description=excluded.description,
@@ -1693,8 +1705,12 @@ async function saveNewsMarket(market) {
             event_end_time=excluded.event_end_time,
             status=excluded.status,
             url=excluded.url,
+            image_url=excluded.image_url,
+            video_url=excluded.video_url,
+            ai_headline_generated=1,
+            admin_verified=0,
             timestamp=CURRENT_TIMESTAMP`,
-        [market.id, market.title, market.description, market.content, market.media_url, market.media_type, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time || new Date().toISOString(), market.event_end_time || market.startTime, market.status, market.url]
+        [market.id, market.title, market.description, market.content, market.media_url, market.media_type, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time || new Date().toISOString(), market.event_end_time || market.startTime, market.status, market.url, market.image_url || null, market.video_url || null, 1]
     );
 }
 
@@ -1754,15 +1770,19 @@ async function syncRssNewsMarkets(limit = 500) {
             const publishedAt = extractRssItemField(item, 'pubDate') || new Date().toISOString();
             if (!title || !link || seen.has(link)) continue;
             seen.add(link);
-            const market = normalizeNewsArticle({
+            let market;
+            try { market = await normalizeNewsArticle({
                 title,
                 description,
                 url: link,
                 publishedAt: Number.isFinite(Date.parse(publishedAt)) ? new Date(publishedAt).toISOString() : new Date().toISOString(),
                 source: feed.source
-            });
+            }); } catch (error) {
+                console.warn(`[news] Gemini rejected RSS headline "${title}": ${error.message}`);
+                continue;
+            }
             if (!market) continue;
-            await saveNewsMarket(market);
+            if (!market._persisted) await saveNewsMarket(market);
             markets.push(market);
             if (markets.length >= limit) return markets;
         }
@@ -1777,7 +1797,7 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         `SELECT *
          FROM markets
          WHERE (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
-           AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
+           AND COALESCE(admin_verified,0)=1 AND COALESCE(ai_headline_generated,0)=1 AND status IN ('open','upcoming','live')
            AND COALESCE(event_end_time, startTime, timestamp) > NOW()
          ORDER BY timestamp DESC
          LIMIT ?`,
@@ -1855,10 +1875,15 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     for (const article of articles) {
         // normalizeNewsArticle runs the article's own headline through
         // buildNewsQuestion and retains the source headline for display.
-        const market = normalizeNewsArticle(article);
+        let market;
+        try { market = await normalizeNewsArticle(article); }
+        catch (error) {
+            console.warn(`[news] Gemini rejected headline "${article.title || ''}": ${error.message}`);
+            continue;
+        }
         if (!market || seen.has(market.id)) continue;
         seen.add(market.id);
-        await saveNewsMarket(market);
+        if (!market._persisted) await saveNewsMarket(market);
         processedMarkets.push(market);
         if (processedMarkets.length >= limit) break;
     }
@@ -1919,19 +1944,10 @@ async function syncTmdbMarkets() {
                 const title = item.title || item.name || item.original_name || item.original_title || 'Unnamed';
                 const idSource = `${endpoint.path}_${item.id || title}`;
                 const hash = crypto.createHash('md5').update(idSource).digest('hex');
+                const marketId = `tmdb_${endpoint.categorySuffix}_${hash}`;
+                const existing = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [marketId]);
+                if (existing) continue;
                 const listName = endpoint.path.replace(/^\//, '').replace(/\//g, ' ');
-                const actionEvent = endpoint.path.includes('upcoming')
-                    ? 'Remain listed among upcoming releases'
-                    : endpoint.path.includes('top_rated')
-                        ? 'Remain among the top-rated titles'
-                        : endpoint.path.includes('popular')
-                            ? 'Remain among the most popular titles'
-                            : endpoint.path.includes('now_playing')
-                                ? 'Remain among current theatrical releases'
-                                : endpoint.path.includes('/search/')
-                                    ? 'Remain in the named TMDB search results'
-                                    : 'Remain among weekly trending titles';
-
                 const overview = item.overview || item.description || `TMDB entry for ${title}.`;
                 const mediaUrl = item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null;
                 const detailUrl = item.id ? `${endpoint.categorySuffix === 'tv' ? 'https://www.themoviedb.org/tv' : 'https://www.themoviedb.org/movie'}/${item.id}` : null;
@@ -1944,27 +1960,33 @@ async function syncTmdbMarkets() {
                     `Vote Count: ${item.vote_count ?? 'N/A'}`,
                     `Overview: ${overview}`
                 ].join('\n');
-
-                const condition = `TMDB ${listName} list`;
+                let generated;
+                try {
+                    generated = await generateMarketFromNews({ title, body: `${content}\nCurrent TMDB list: ${listName}. Resolve by checking whether this title is present in that exact TMDB list at the trusted deadline.`, requiredDeadline: expiryTime, imageUrl: mediaUrl });
+                } catch (error) {
+                    console.warn(`[tmdb] Gemini rejected ${title}: ${error.message}`);
+                    continue;
+                }
                 const market = {
-                    id: `tmdb_${endpoint.categorySuffix}_${hash}`,
-                    title: formatStrictMarketTitle({ actionEvent, subject: title, condition, deadlineAt: expiryTime }),
-                    description: overview,
-                    content: `${content}\nAction/Event: ${actionEvent}\nSubject: ${title}\nCondition: ${condition}\nExact deadline: ${expiryTime}\nResolution criteria: Resolve YES if the title appears in the specified TMDB result list at the exact deadline; otherwise resolve NO.`,
+                    id: marketId,
+                    title: generated.title,
+                    description: generated.resolutionCriteria,
+                    content: `${content}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
                     media_url: mediaUrl,
                     media_type: 'image',
                     category: 'movies',
                     country: 'TMDB',
                     sideA: 'YES',
                     sideB: 'NO',
-                    startTime: expiryTime,
+                    startTime: generated.deadlineAt,
                     event_start_time: new Date().toISOString(),
-                    event_end_time: expiryTime,
-                    status: 'open',
+                    event_end_time: generated.deadlineAt,
+                    status: 'draft',
+                    ai_headline_generated: 1,
                     url: item.homepage || detailUrl
                 };
 
-                await dbRun(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url) VALUES (?, ?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, category=excluded.category, country=excluded.country, sideA=excluded.sideA, sideB=excluded.sideB, startTime=excluded.startTime, event_start_time=excluded.event_start_time, event_end_time=excluded.event_end_time, status=excluded.status, url=excluded.url, timestamp=CURRENT_TIMESTAMP`,
+                await dbRun(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, ai_headline_generated) VALUES (?, ?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, category=excluded.category, country=excluded.country, sideA=excluded.sideA, sideB=excluded.sideB, startTime=excluded.startTime, event_start_time=excluded.event_start_time, event_end_time=excluded.event_end_time, status='draft', url=excluded.url, ai_headline_generated=1, admin_verified=0, timestamp=CURRENT_TIMESTAMP`,
                     [market.id, market.title, market.description, market.content, market.media_url, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time, market.event_end_time, market.status, market.url]);
             }
         }
@@ -2115,22 +2137,7 @@ function buildLocalAIReply({ engine = '', messages = null, promptText = '' } = {
 
     if (!text) return null;
 
-    if (engine === 'headline-bot') {
-        return buildNewsQuestion(text);
-    }
-
-    if (engine === 'market-editor' || /rewrite|rephrase|sharper|clearer/i.test(text)) {
-        const titleMatch = text.match(/TITLE:\s*([^\n]+)/i);
-        const descMatch = text.match(/DESCRIPTION:\s*([\s\S]+)/i);
-        const title = buildNewsQuestion(titleMatch?.[1] || original || 'Market update');
-        const description = cleanMarketDescription(descMatch?.[1] || title);
-        return JSON.stringify({ title, description });
-    }
-
-    if (/generate.*prediction market|current price|24h change/i.test(text)) {
-        const coin = text.match(/for\s+([A-Za-z0-9 .'-]+)\s+\(/i)?.[1]?.trim() || 'this asset';
-        return polishMarketTitle(`Can ${coin} close higher today?`);
-    }
+    if (engine === 'headline-bot' || engine === 'market-editor' || /rewrite|rephrase|sharper|clearer|generate.*prediction market|current price|24h change/i.test(text)) return null;
 
     if (lower.includes('avatar') || lower.includes('profile picture') || lower.includes('photo')) {
         return 'Open Profile, choose a PNG, JPG, WebP, or GIF under 5MB, then press Save. If the old photo stays visible, refresh once after the save because browsers can cache images.';
@@ -2547,7 +2554,7 @@ db.serialize(() => {
         oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0,
         league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
         media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
-        creator TEXT, ai_generated INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0,
+        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0,
         url TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
     )`);
@@ -2632,6 +2639,7 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'video_url', 'TEXT');
     addColumnSafely('markets', 'content', 'TEXT');  
     addColumnSafely('markets', 'admin_verified', 'INTEGER DEFAULT 0');
+    addColumnSafely('markets', 'ai_headline_generated', 'INTEGER DEFAULT 0');
     addColumnSafely('transactions', 'odds', 'REAL');
     addColumnSafely('transactions', 'settled_amount', 'REAL');
     addColumnSafely('transactions', 'potential_payout', 'REAL');
@@ -2881,7 +2889,7 @@ const emitBalance = (phone) => {
 };
 
 const emitMarkets = () => {
-    const sql = `SELECT * FROM markets WHERE COALESCE(admin_verified,0)=1 AND status IN ('open','live','upcoming') ORDER BY category ASC, title ASC`;
+    const sql = `SELECT * FROM markets WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open','live','upcoming') ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
         if (err) return console.error("❌ DB Error:", err.message);
         const markets = (rows || []).map(normalizeMarketRow);
@@ -2909,8 +2917,8 @@ app.post('/api/markets/generate-from-news', authenticateAdmin, async (req, res) 
             sourceUrl: req.body?.article?.url || req.body?.url || null
         });
         await dbRun(
-            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator, ai_generated)
-             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?, 1)`,
+            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator, ai_generated, ai_headline_generated)
+             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?, 1, 1)`,
             [id, generated.title, generated.resolutionCriteria, content, generated.deadlineAt, generated.deadlineAt,
                 generated.imageUrl || generated.videoUrl, generated.videoUrl ? 'video' : 'image', generated.imageUrl, generated.videoUrl, req.user.phone]
         );
@@ -3513,23 +3521,46 @@ const syncSportsMarkets = async () => {
                     }
                 ];
                 for (const m of marketVariants) {
+                    const eventRules = {
+                        rain: `Measurable precipitation occurs in ${town.name} on ${forecast.date}. Resolve using WeatherAPI historical observations.`,
+                        temp: `The WeatherAPI recorded daily maximum temperature in ${town.name} reaches at least 35 C on ${forecast.date}.`,
+                        wind: `The WeatherAPI recorded daily maximum wind speed in ${town.name} reaches at least 50 kph on ${forecast.date}.`,
+                        alert: `WeatherAPI records an official severe-weather, tsunami, or flood warning for ${town.name} on ${forecast.date}.`
+                    };
+                    const eventType = String(m.id).split('_').pop();
+                    const deadlineAt = new Date(`${forecast.date}T23:59:59.999Z`).toISOString();
+                    const existing = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [m.id]);
+                    if (existing) continue;
+                    let generated;
+                    try {
+                        generated = await generateMarketFromNews({ title: `Weather forecast in ${town.name}`, body: `${m.desc} Exact test: ${eventRules[eventType] || ''} Resolution source: WeatherAPI.`, requiredDeadline: deadlineAt });
+                    } catch (error) {
+                        console.warn(`[weather] Gemini rejected ${town.name} ${eventType}: ${error.message}`);
+                        continue;
+                    }
                     await dbRun(
-                        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, status) 
-                         VALUES (?, ?, ?, ?, ?, 'image', 'weather', ?, 'YES', 'NO', ?, 'open')
+                        `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, ai_headline_generated)
+                         VALUES (?, ?, ?, ?, ?, 'image', 'weather', ?, 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', 1)
                          ON CONFLICT(id) DO UPDATE SET 
-                            title=excluded.title, 
+                            title=excluded.title,
                             description=excluded.description, 
                             content=excluded.content, 
                             media_url=excluded.media_url, 
+                            startTime=excluded.startTime,
+                            event_end_time=excluded.event_end_time,
+                            status='draft',
+                            ai_headline_generated=1,
+                            admin_verified=0,
                             timestamp=CURRENT_TIMESTAMP`,
                         [
                             m.id, 
-                            m.title, 
-                            m.desc, 
-                            m.desc, 
+                            generated.title,
+                            generated.resolutionCriteria,
+                            `${m.desc}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
                             forecast.icon, 
                             town.name.toLowerCase(), 
-                            forecast.date
+                            generated.deadlineAt,
+                            generated.deadlineAt
                         ]
                     );
                 }
@@ -4189,19 +4220,22 @@ const syncAllMarkets = async () => {
         const expiryTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
         for (const coin of coins) {
-            const marketId = `crypto_${coin.id}_${marketDate}`;            
-            
-            // Fallback values
+            const marketId = `crypto_${coin.id}_${marketDate}`;
+            const existing = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [marketId]);
+            if (existing) continue;
             const targetPrice = `$${(coin.current_price * 1.02).toFixed(2)}`;
-            const actionEvent = `Reach or exceed ${targetPrice}`;
-            const condition = 'CoinGecko USD spot price';
-            const title = formatStrictMarketTitle({ actionEvent, subject: coin.name, condition, deadlineAt: expiryTime });
-            let description = `${coin.name} is trading at $${coin.current_price?.toLocaleString()}. 24h change: ${Number(coin.price_change_percentage_24h || 0).toFixed(2)}%.`;
-            description += `\nTarget: ${targetPrice}\nAction/Event: ${actionEvent}\nSubject: ${coin.name}\nCondition: ${condition}\nExact deadline: ${expiryTime}\nResolution criteria: Resolve YES if CoinGecko records the coin's USD spot price at or above ${targetPrice} at the exact deadline; otherwise resolve NO.`;
+            const body = `${coin.name} is trading at $${coin.current_price?.toLocaleString()}. 24h change: ${Number(coin.price_change_percentage_24h || 0).toFixed(2)}%. Market action: reach or exceed ${targetPrice}. Resolution source: CoinGecko USD spot price at the exact deadline.`;
+            let generated;
+            try { generated = await generateMarketFromNews({ title: `${coin.name} USD price market`, body, requiredDeadline: expiryTime, imageUrl: coin.image || '' }); }
+            catch (error) {
+                console.warn(`[crypto] Gemini rejected ${coin.name}: ${error.message}`);
+                continue;
+            }
+            const description = `${body}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`;
 
             await dbRun(
-            `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url)
-                 VALUES (?, ?, ?, ?, ?, 'image', 'crypto', 'Global', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'open', ?)
+            `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, image_url, ai_headline_generated)
+                 VALUES (?, ?, ?, ?, ?, 'image', 'crypto', 'Global', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, 1)
                  ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     description=excluded.description,
@@ -4215,18 +4249,22 @@ const syncAllMarkets = async () => {
                     startTime=excluded.startTime,
                     event_start_time=CURRENT_TIMESTAMP,
                     event_end_time=excluded.event_end_time,
-                    status=excluded.status,
+                    status='draft',
                     url=excluded.url,
+                    image_url=excluded.image_url,
+                    ai_headline_generated=1,
+                    admin_verified=0,
                     timestamp=CURRENT_TIMESTAMP`,
                 [
                     marketId,
-                    title,
+                    generated.title,
                     description,
                     description,
                     coin.image || '',
                     expiryTime,
                     expiryTime,
-                    `https://www.coingecko.com/en/coins/${coin.id}`
+                    `https://www.coingecko.com/en/coins/${coin.id}`,
+                    coin.image || ''
                 ]
             );
         }
@@ -4300,7 +4338,7 @@ app.get('/api/markets/preview', async (req, res) => {
     try {
         const rows = await dbAll(
             `SELECT * FROM markets
-             WHERE COALESCE(admin_verified,0)=1 AND status IN ('open', 'upcoming', 'live')
+             WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open', 'upcoming', 'live')
                AND NOT (
                     (category='sports' OR category='football' OR id LIKE 'sp_%' OR id LIKE 'fb_%')
                     AND (
@@ -4359,7 +4397,7 @@ const marketsRouteHandler = async (req, res) => {
         const rows = await dbAll(
             `SELECT *
              FROM markets
-             WHERE COALESCE(admin_verified,0)=1 AND status IN ('open', 'upcoming', 'live')
+             WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open', 'upcoming', 'live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (
                      startTime IS NULL
@@ -4589,7 +4627,7 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
              WHERE id=?`,
             [marketId]
         );
-        if (!market || Number(market.admin_verified || 0) !== 1) return res.status(404).json({ success: false, message: "Market not found" });
+        if (!market || (Number(market.admin_verified || 0) !== 1 && !isSportsMarket(market))) return res.status(404).json({ success: false, message: "Market not found" });
 
         const rows = await dbAll(
             `SELECT picked AS side, odds, COUNT(*) AS orders, SUM(amount) AS volume
@@ -4651,7 +4689,7 @@ app.get('/api/sports/categories', async (req, res) => {
         const activeFootball = await dbGet(
             `SELECT COUNT(*) AS count FROM markets
              WHERE left(id, 3) = 'fb_'
-               AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
+               AND status IN ('open','upcoming','live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
                AND sideA IS NOT NULL AND sideB IS NOT NULL
@@ -4673,7 +4711,7 @@ app.get('/api/sports/categories', async (req, res) => {
             recoveredFootballMarkets = await dbAll(
                 `SELECT * FROM markets
                  WHERE left(id, 3) = 'fb_'
-                   AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
+                   AND status IN ('open','upcoming','live')
                    AND COALESCE(event_end_time, startTime) > NOW()
                    AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
                    AND sideA IS NOT NULL AND sideB IS NOT NULL
@@ -4693,7 +4731,7 @@ app.get('/api/sports/categories', async (req, res) => {
                 END AS sport,
                 COUNT(*) AS count
              FROM markets
-             WHERE COALESCE(admin_verified,0)=1 AND ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
+             WHERE ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
                AND status IN ('open', 'upcoming', 'live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (
@@ -4741,7 +4779,7 @@ app.post('/api/admin/sync-sports', authenticateAdmin, async (req, res) => {
                 COUNT(*) AS count
             FROM markets
             WHERE ((category='sports') OR id LIKE 'sp_%' OR id LIKE 'fb_%')
-              AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
+              AND status IN ('open','upcoming','live')
             GROUP BY
                 CASE
                     WHEN id LIKE 'fb_%' THEN 'Football'
@@ -5185,26 +5223,36 @@ app.post('/api/user/submit-market', authenticate, async (req, res) => {
             return res.status(403).json({ success: false, message: 'Not authorized to create markets' });
         }
 
+        let finalTitle = String(title || '').trim();
+        let finalDescription = description || '';
+        let aiHeadlineGenerated = 0;
+        if (!isSportsMarket({ category })) {
+            const generated = await generateMarketFromNews({ title: finalTitle, body: finalDescription || finalTitle, requiredDeadline: marketTime.toISOString(), imageUrl: media_url, videoUrl: media_type === 'video' ? media_url : null });
+            finalTitle = generated.title;
+            finalDescription = `${finalDescription}\nResolution criteria: ${generated.resolutionCriteria}`.trim();
+            aiHeadlineGenerated = 1;
+        }
+
         const id = `user_${Date.now()}`;
         const isAutoOpen = (user.role === 'admin');
-        const status = isAutoOpen ? 'open' : 'pending';
+        const status = aiHeadlineGenerated ? 'draft' : (isAutoOpen ? 'open' : 'pending');
 
-        await dbRun(`INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, status, creator, media_url, media_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, title, description || '', description || '', category || 'misc', sideA || 'YES', sideB || 'NO', startTime || new Date().toISOString(), status, req.user.phone, media_url || null, media_type || 'auto']);
+        await dbRun(`INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_end_time, status, creator, media_url, media_type, image_url, video_url, ai_headline_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, finalTitle, finalDescription, finalDescription, category || 'misc', sideA || 'YES', sideB || 'NO', startTime, startTime, status, req.user.phone, media_url || null, media_type || 'auto', media_type === 'image' ? media_url : null, media_type === 'video' ? media_url : null, aiHeadlineGenerated]);
 
-        if (isAutoOpen) {
+        if (isAutoOpen && !aiHeadlineGenerated) {
             emitMarkets();
             try {
                 const creator = await dbGet(`SELECT email, name FROM users WHERE phone=?`, [req.user.phone]);
                 if (creator && creator.email) {
-                    sendPolyMail(creator.email, `Your Market is LIVE: ${title}`, `<div style="font-family:sans-serif;padding:20px;color:#333;"><h2>Hi ${creator.name || ''},</h2><p>Your market "${title}" is now live on PolySoko. Good luck!</p></div>`);
+                    sendPolyMail(creator.email, `Your Market is LIVE: ${finalTitle}`, `<div style="font-family:sans-serif;padding:20px;color:#333;"><h2>Hi ${creator.name || ''},</h2><p>Your market "${finalTitle}" is now live on PolySoko. Good luck!</p></div>`);
                 }
             } catch (e) { console.warn('Email send failed for auto-open market', e.message); }
 
             res.json({ success: true, message: 'Market created and is live' });
         } else {
-            emitAdminEvent('newMarketPending', { id, title, creator: req.user.phone });
-            res.json({ success: true, message: 'Market submitted for review' });
+            emitAdminEvent('newMarketPending', { id, title: finalTitle, creator: req.user.phone, ai_generated: Boolean(aiHeadlineGenerated) });
+            res.json({ success: true, message: aiHeadlineGenerated ? 'Market generated and submitted for admin verification.' : 'Market submitted for review' });
         }
     } catch (e) {
         console.error('Create market error:', e);
@@ -5219,14 +5267,24 @@ app.post('/api/admin/create-market', authenticateAdmin, async (req, res) => {
         if (!startTime || !Number.isFinite(marketTime.getTime()) || marketTime <= new Date()) {
             return res.status(400).json({ success: false, message: 'Choose a valid future market close or event time.' });
         }
+        let finalTitle = String(title || '').trim();
+        let finalDescription = description || '';
+        let aiHeadlineGenerated = 0;
+        if (!isSportsMarket({ category })) {
+            const generated = await generateMarketFromNews({ title: finalTitle, body: finalDescription || finalTitle, requiredDeadline: marketTime.toISOString(), imageUrl: media_url, videoUrl: media_type === 'video' ? media_url : null });
+            finalTitle = generated.title;
+            finalDescription = `${finalDescription}\nResolution criteria: ${generated.resolutionCriteria}`.trim();
+            aiHeadlineGenerated = 1;
+        }
         const id = `m_${Date.now()}`;
         await dbRun(
-            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, status, media_url, media_type, creator)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-            [id, title, description || '', description || '', category || 'misc', sideA || 'YES', sideB || 'NO', startTime || new Date().toISOString(), media_url || null, media_type || 'auto', req.user.phone]
+            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_end_time, status, media_url, media_type, creator, image_url, video_url, ai_headline_generated)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, finalTitle, finalDescription, finalDescription, category || 'misc', sideA || 'YES', sideB || 'NO', startTime, startTime, aiHeadlineGenerated ? 'draft' : 'open', media_url || null, media_type || 'auto', req.user.phone, media_type === 'image' ? media_url : null, media_type === 'video' ? media_url : null, aiHeadlineGenerated]
         );
         emitMarkets();
-        res.json({ success: true, message: 'Market created successfully' });
+        if (aiHeadlineGenerated) emitAdminEvent('newMarketPending', { id, title: finalTitle, creator: req.user.phone, ai_generated: true });
+        res.json({ success: true, message: aiHeadlineGenerated ? 'Market generated and submitted for admin verification.' : 'Market created successfully' });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
@@ -5459,7 +5517,7 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         const market = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: "Market not found" });
         const bettableStatuses = ['open', 'upcoming'];
-        if (Number(market.admin_verified || 0) !== 1 || !market.status || !bettableStatuses.includes(market.status.toLowerCase())) {
+        if ((Number(market.admin_verified || 0) !== 1 && !isSportsMarket(market)) || !market.status || !bettableStatuses.includes(market.status.toLowerCase())) {
             return res.status(400).json({ success: false, message: "This market is closed." });
         }
 
@@ -6506,11 +6564,11 @@ app.post('/api/admin/reject-withdraw', authenticateAdmin, async (req, res) => {
 app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
     const { marketId } = req.body;
     try {
-        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND status IN ('pending','draft','open','upcoming','live','closed','suspended')`, [marketId]);
+        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL} AND status IN ('pending','draft','open','upcoming','live','closed','suspended')`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Market not found' });
 
         const nextStatus = ['pending', 'draft'].includes(String(market.status).toLowerCase()) ? 'open' : market.status;
-        await dbRun(`UPDATE markets SET status=?, admin_verified=1 WHERE id=? AND COALESCE(admin_verified,0)=0`, [nextStatus, marketId]);
+        await dbRun(`UPDATE markets SET status=?, admin_verified=1 WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [nextStatus, marketId]);
 
         // Send Email to Creator
         if (market.creator) {
@@ -6599,7 +6657,7 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
 app.post('/api/admin/reject-market', authenticateAdmin, async (req, res) => {
     const { marketId } = req.body;
     try {
-        const market = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });
         const bets = await dbGet(`SELECT COUNT(*) AS count FROM transactions WHERE market_id=? AND type='bet'`, [marketId]);
         const betRows = await dbGet(`SELECT COUNT(*) AS count FROM bets WHERE market_id=?`, [marketId]);
@@ -6608,10 +6666,10 @@ app.post('/api/admin/reject-market', authenticateAdmin, async (req, res) => {
             const activeBetRows = await dbGet(`SELECT COUNT(*) AS count FROM bets WHERE market_id=? AND status='active'`, [marketId]);
             if (Number(active?.count || 0) > 0) await cancelMarket(marketId, 'ADMIN_REJECTED');
             else if (Number(activeBetRows?.count || 0) > 0) return res.status(409).json({ success: false, message: 'Active bet history is missing matching transactions, so the market cannot be safely refunded or deleted.' });
-            else await dbRun(`UPDATE markets SET status='cancelled', settled=1 WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+            else await dbRun(`UPDATE markets SET status='cancelled', settled=1 WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
             return res.json({ success: true, archived: true, message: 'Market archived to preserve bet history; active bets were refunded.' });
         }
-        await dbRun(`DELETE FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+        await dbRun(`DELETE FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
         emitMarkets();
         res.json({ success: true, deleted: true });
     } catch (e) { res.status(500).json({ success: false }); }
@@ -7021,6 +7079,7 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                     SELECT id, title, category, oddsA, oddsB, status, home_volume, away_volume, is_boosted
                     FROM markets
                     WHERE is_boosted = 1 AND status IN ('open','upcoming','live')
+                      AND (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL})
                     ORDER BY startTime ASC
                     LIMIT 10
                 `, []);
@@ -7048,6 +7107,7 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                 FROM markets m 
                 LEFT JOIN users u ON m.creator = u.phone 
                 WHERE COALESCE(m.admin_verified,0)=0
+                  AND NOT (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
                   AND m.status IN ('draft','pending','open','upcoming','live','closed','suspended')
                   AND COALESCE(m.settled,0)=0
             `);
@@ -7078,6 +7138,7 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
             FROM markets m 
             LEFT JOIN users u ON m.creator = u.phone 
             WHERE m.status='pending' AND COALESCE(m.admin_verified,0)=1
+              AND NOT (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
         `);
         res.json({ success: true, markets });
     } catch (e) {
@@ -7093,6 +7154,7 @@ app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticat
             FROM markets m
             LEFT JOIN users u ON m.creator = u.phone
             WHERE COALESCE(m.admin_verified,0)=0
+              AND NOT (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
               AND m.status IN ('draft','pending','open','upcoming','live','closed','suspended')
               AND COALESCE(m.settled,0)=0
             ORDER BY m.timestamp ASC, m.id ASC
@@ -7108,23 +7170,36 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
     const { marketId, title, description, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
     if (!marketId || !String(title || '').trim()) return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
     try {
-        const market = await dbGet(`SELECT id, content, event_start_time FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0`, [marketId]);
+        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });
         const cleanImage = imageUrl ? String(imageUrl).trim() : null;
         const cleanVideo = videoUrl ? String(videoUrl).trim() : null;
-        const mediaUrl = cleanVideo || cleanImage;
-        const mediaType = cleanVideo ? 'video' : (cleanImage ? 'image' : null);
-        const due = deadline ? new Date(deadline) : null;
-        if (deadline && !Number.isFinite(due.getTime())) return res.status(400).json({ success: false, message: 'Deadline must be a valid date and time.' });
+        if (!deadline) return res.status(400).json({ success: false, message: 'Enter a future deadline before saving.' });
+        const due = new Date(deadline);
+        if (!Number.isFinite(due.getTime())) return res.status(400).json({ success: false, message: 'Enter a valid date and time.' });
+        if (due.getTime() <= Date.now()) return res.status(400).json({ success: false, message: 'This deadline has passed. Choose a future date and time, then save again.' });
+        const generated = await generateMarketFromNews({
+            title: String(title).trim(),
+            body: String(description || title).trim(),
+            requiredDeadline: due.toISOString(),
+            imageUrl: cleanImage,
+            videoUrl: cleanVideo
+        });
+        const finalImage = generated.imageUrl;
+        const finalVideo = generated.videoUrl;
+        const mediaUrl = finalVideo || finalImage;
+        const mediaType = finalVideo ? 'video' : (finalImage ? 'image' : null);
+        const content = `Action/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nDeadline: ${generated.deadlineAt}\nResolution: ${generated.resolutionCriteria}`;
         await dbRun(
-            `UPDATE markets SET title=?, description=?, category=?, event_end_time=COALESCE(?,event_end_time), startTime=COALESCE(?,startTime), media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=? WHERE id=? AND COALESCE(admin_verified,0)=0`,
-            [String(title).trim(), description ?? '', category || 'general', due?.toISOString() || null, due?.toISOString() || null, mediaUrl, mediaType, cleanImage, cleanVideo, sideA || 'YES', sideB || 'NO', marketId]
+            `UPDATE markets SET title=?, description=?, content=?, category=?, event_end_time=?, startTime=?, media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=?, ai_headline_generated=1, status='draft' WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`,
+            [generated.title, generated.resolutionCriteria, content, category || 'general', generated.deadlineAt, generated.deadlineAt, mediaUrl, mediaType, finalImage, finalVideo, sideA || 'YES', sideB || 'NO', marketId]
         );
+        const updatedMarket = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
         emitMarkets();
-        res.json({ success: true });
+        res.json({ success: true, market: normalizeMarketRow(updatedMarket) });
     } catch (e) {
         console.error('[admin] unverified market edit failed:', e.message);
-        res.status(500).json({ success: false, message: 'Could not save market changes.' });
+        res.status(e.message?.includes('GOOGLE_API_KEY') ? 503 : 400).json({ success: false, message: e.message?.includes('GOOGLE_API_KEY') ? 'Headline verification is unavailable because Gemini is not configured.' : `Market was not saved: ${e.message}` });
     }
 });
 
@@ -7387,12 +7462,12 @@ app.get('/api/football/details/:id', async (req, res) => {
         if (Array.isArray(relatedNews) && relatedNews.length) {
             for (const article of relatedNews) {
                 try {
-                    const newsMarket = normalizeNewsArticle({
+                    const newsMarket = await normalizeNewsArticle({
                         ...article,
                         source: article.source || 'API-FOOTBALL',
                         publishedAt: article.publishedAt || new Date().toISOString()
                     });
-                    if (newsMarket) await saveNewsMarket(newsMarket);
+                    if (newsMarket && !newsMarket._persisted) await saveNewsMarket(newsMarket);
                 } catch (e) {
                     console.warn('Failed to persist related match news:', e.message);
                 }
@@ -7434,7 +7509,7 @@ app.get('/api/news/everything', async (req, res) => {
         const processedMarkets = await syncNewsApiMarkets({ force, limit: 500 });
         const ids = (processedMarkets || []).map(market => market.id).filter(Boolean);
         const visibleRows = ids.length ? await dbAll(
-            `SELECT * FROM markets WHERE id IN (${ids.map(() => '?').join(',')}) AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')`,
+            `SELECT * FROM markets WHERE id IN (${ids.map(() => '?').join(',')}) AND COALESCE(admin_verified,0)=1 AND COALESCE(ai_headline_generated,0)=1 AND status IN ('open','upcoming','live')`,
             ids
         ) : [];
         const visibleMarkets = (visibleRows || []).map(row => {
@@ -7452,7 +7527,7 @@ app.get('/api/news/everything', async (req, res) => {
                 `SELECT * FROM markets
                  WHERE category IN ('news','tech','politics')
                    AND (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
-                   AND COALESCE(admin_verified,0)=1 AND status IN ('open','upcoming','live')
+                   AND COALESCE(admin_verified,0)=1 AND COALESCE(ai_headline_generated,0)=1 AND status IN ('open','upcoming','live')
                    AND COALESCE(event_end_time, startTime, timestamp) > NOW()
                  ORDER BY timestamp DESC LIMIT 500`
             );
@@ -7476,12 +7551,10 @@ function buildNewsMarket(market) {
     const rawTitle = String(extractContentField(processed.content, 'Headline') || processed.rawHeadline || processed.title || processed.description || '').trim();
     const cleanHeadline = rawTitle.replace(/\s+-\s+[^-]+$/, '').replace(/\s+/g, ' ').trim();
     const deadline = processed.event_end_time || processed.eventEndTime || processed.startTime || processed.starttime;
-    const marketQuestion = addNewsMarketDeadline(buildNewsQuestion(cleanHeadline), deadline);
     processed.rawHeadline = cleanHeadline;
     processed.displayHeadline = cleanHeadline;
-    processed.title = marketQuestion;
-    processed.betQuestion = marketQuestion;
-    processed.persona_script = processed.persona_script || buildPersonaInsight(marketQuestion);
+    processed.betQuestion = processed.title;
+    processed.persona_script = processed.persona_script || buildPersonaInsight(processed.title);
     processed.sideA = processed.sideA || 'YES';
     processed.sideB = processed.sideB || 'NO';
     processed.status = processed.status || 'open';
@@ -7531,6 +7604,9 @@ function rebuildGeneratedNewsHeadlineFromRow(row) {
 }
 
 async function repairGeneratedMarketTitles() {
+    // Frozen: startup repairs must never synthesize or rewrite market headlines.
+    return;
+    /* legacy repair code retained temporarily for source compatibility */
     try {
         const rows = await dbAll(
             `SELECT id, title, description, content
@@ -7839,7 +7915,6 @@ const startServer = async () => {
     const runStartupRepairs = async () => {
         try {
             await repairSportsMarketMetadata();
-            await repairGeneratedMarketTitles();
         } catch (err) {
             console.error('Startup schema repair failed (serving anyway):', err.message);
         }
