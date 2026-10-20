@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
+import { generateMarketFromNews, formatStrictMarketTitle } from './src/services/marketGenerator.js';
 import { fileURLToPath } from 'url'; // For __dirname fix
 import { dirname, join } from 'path';
 
@@ -1875,8 +1876,8 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
 }
 
 async function syncTmdbMarkets() {
-    if (!process.env.TMDB_API_KEY) {
-        console.warn('TMDB API key is not configured. Skipping TMDB market sync.');
+    if (!process.env.TMDB_API_KEY && !process.env.TMDB_READ_ACCESS_TOKEN) {
+        console.warn('TMDB_API_KEY or TMDB_READ_ACCESS_TOKEN is not configured. Skipping TMDB market sync.');
         return;
     }
 
@@ -1914,21 +1915,22 @@ async function syncTmdbMarkets() {
             const items = Array.isArray(response.data?.results) ? response.data.results.slice(0, endpoint.limit) : [];
             const expiryTime = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
 
-            items.forEach((item) => {
+            for (const item of items) {
                 const title = item.title || item.name || item.original_name || item.original_title || 'Unnamed';
                 const idSource = `${endpoint.path}_${item.id || title}`;
                 const hash = crypto.createHash('md5').update(idSource).digest('hex');
-                const rawHeadline = endpoint.path.includes('trending')
-                    ? `${title} is trending on TMDB right now`
-                    : endpoint.path.includes('upcoming')
-                        ? `${title} is an upcoming TMDB release`
+                const listName = endpoint.path.replace(/^\//, '').replace(/\//g, ' ');
+                const actionEvent = endpoint.path.includes('upcoming')
+                    ? 'Remain listed among upcoming releases'
+                    : endpoint.path.includes('top_rated')
+                        ? 'Remain among the top-rated titles'
                         : endpoint.path.includes('popular')
-                            ? `${title} is one of TMDB's most popular titles`
-                            : endpoint.path.includes('top_rated')
-                                ? `${title} is a top rated TMDB title`
+                            ? 'Remain among the most popular titles'
+                            : endpoint.path.includes('now_playing')
+                                ? 'Remain among current theatrical releases'
                                 : endpoint.path.includes('/search/')
-                                    ? `${title} is getting award attention on TMDB`
-                                    : `${title} is featured on TMDB`; 
+                                    ? 'Remain in the named TMDB search results'
+                                    : 'Remain among weekly trending titles';
 
                 const overview = item.overview || item.description || `TMDB entry for ${title}.`;
                 const mediaUrl = item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null;
@@ -1943,29 +1945,33 @@ async function syncTmdbMarkets() {
                     `Overview: ${overview}`
                 ].join('\n');
 
-                const market = buildNewsMarket({
+                const condition = `TMDB ${listName} list`;
+                const market = {
                     id: `tmdb_${endpoint.categorySuffix}_${hash}`,
-                    title: rawHeadline,
+                    title: formatStrictMarketTitle({ actionEvent, subject: title, condition, deadlineAt: expiryTime }),
                     description: overview,
-                    content,
+                    content: `${content}\nAction/Event: ${actionEvent}\nSubject: ${title}\nCondition: ${condition}\nExact deadline: ${expiryTime}\nResolution criteria: Resolve YES if the title appears in the specified TMDB result list at the exact deadline; otherwise resolve NO.`,
                     media_url: mediaUrl,
                     media_type: 'image',
-                    category: 'tech',
+                    category: 'movies',
                     country: 'TMDB',
-                    startTime: expiryTime,
-                    url: item.homepage || detailUrl,
-                    status: 'open',
                     sideA: 'YES',
-                    sideB: 'NO'
-                });
+                    sideB: 'NO',
+                    startTime: expiryTime,
+                    event_start_time: new Date().toISOString(),
+                    event_end_time: expiryTime,
+                    status: 'open',
+                    url: item.homepage || detailUrl
+                };
 
-                db.run(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, status, url) VALUES (?, ?, ?, ?, ?, 'image', 'tech', ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, category=excluded.category, country=excluded.country, sideA=excluded.sideA, sideB=excluded.sideB, startTime=excluded.startTime, status=excluded.status, url=excluded.url, timestamp=CURRENT_TIMESTAMP`,
-                    [market.id, market.title, market.description, market.content, market.media_url, market.country, market.sideA, market.sideB, market.startTime, market.status, market.url]);
-            });
+                await dbRun(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url) VALUES (?, ?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, category=excluded.category, country=excluded.country, sideA=excluded.sideA, sideB=excluded.sideB, startTime=excluded.startTime, event_start_time=excluded.event_start_time, event_end_time=excluded.event_end_time, status=excluded.status, url=excluded.url, timestamp=CURRENT_TIMESTAMP`,
+                    [market.id, market.title, market.description, market.content, market.media_url, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time, market.event_end_time, market.status, market.url]);
+            }
         }
     } catch (e) {
         console.error('TMDB sync error:', e.message);
     }
+    emitMarkets();
 }
 
 // --- MAILER ---
@@ -2540,7 +2546,7 @@ db.serialize(() => {
         id TEXT PRIMARY KEY, title TEXT, description TEXT, category TEXT, sideA TEXT, sideB TEXT, 
         oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0,
         league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
-        media_url TEXT, media_type TEXT, content TEXT,
+        media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
         creator TEXT,
         url TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
@@ -2622,6 +2628,8 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'settled', 'INTEGER DEFAULT 0');
     addColumnSafely('markets', 'media_url', 'TEXT');    
     addColumnSafely('markets', 'media_type', 'TEXT');   
+    addColumnSafely('markets', 'image_url', 'TEXT');
+    addColumnSafely('markets', 'video_url', 'TEXT');
     addColumnSafely('markets', 'content', 'TEXT');  
     addColumnSafely('transactions', 'odds', 'REAL');
     addColumnSafely('transactions', 'settled_amount', 'REAL');
@@ -2888,6 +2896,30 @@ const emitMarkets = () => {
 };
 
 // --- NOTIFICATION ROUTES ---
+app.post('/api/markets/generate-from-news', authenticateAdmin, async (req, res) => {
+    try {
+        const generated = await generateMarketFromNews(req.body?.article || req.body);
+        const id = `news-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const content = JSON.stringify({
+            headline: generated.title,
+            resolutionCriteria: generated.resolutionCriteria,
+            sourceTitle: req.body?.article?.title || req.body?.title || null,
+            sourceUrl: req.body?.article?.url || req.body?.url || null
+        });
+        await dbRun(
+            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_start_time, event_end_time, status, media_url, media_type, image_url, video_url, creator)
+             VALUES (?, ?, ?, ?, 'news', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'draft', ?, ?, ?, ?, ?)`,
+            [id, generated.title, generated.resolutionCriteria, content, generated.deadlineAt, generated.deadlineAt,
+                generated.imageUrl || generated.videoUrl, generated.videoUrl ? 'video' : 'image', generated.imageUrl, generated.videoUrl, req.user.phone]
+        );
+        res.status(201).json({ success: true, market: { id, ...generated, status: 'draft', category: 'news', sideA: 'YES', sideB: 'NO' } });
+    } catch (error) {
+        console.error('[market-generator] failed:', error.message);
+        const status = /required|deadline|future date|Yes\/No|missing|definitive/i.test(error.message) ? 400 : 502;
+        res.status(status).json({ success: false, message: error.message || 'Could not generate market from news.' });
+    }
+});
+
 app.get('/api/notifications', authenticate, async (req, res) => {
     try {
         const notes = await dbAll(
@@ -4139,34 +4171,34 @@ const syncAllMarkets = async () => {
     try {
         // Widen the slice (previously top-10) so the crypto tab and the guest
         // preview have plenty of markets to display.
-        const cryptoRes = await axios.get('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=25&page=1&sparkline=false&price_change_percentage=24h');
+        const coinGeckoKey = process.env.COINGECKO_PRO_API_KEY || process.env.COINGECKO_API_KEY || process.env.COINGECKO_DEMO_API_KEY;
+        const isCoinGeckoPro = Boolean(process.env.COINGECKO_PRO_API_KEY);
+        const coinGeckoUrl = `${isCoinGeckoPro ? 'https://pro-api.coingecko.com' : 'https://api.coingecko.com'}/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=25&page=1&sparkline=false&price_change_percentage=24h`;
+        const cryptoRes = await axios.get(coinGeckoUrl, {
+            headers: coinGeckoKey ? { [isCoinGeckoPro ? 'x-cg-pro-api-key' : 'x-cg-demo-api-key']: coinGeckoKey } : {}
+        });
 
         // BNB sits comfortably inside the top-25 by market cap so it is always
         // synced; dropping pegged assets frees the remaining slots for real coins.
         const coins = (cryptoRes.data || []).filter((coin) => coin?.id && !NON_PREDICTABLE_COINS.has(String(coin.id).toLowerCase()));
 
         const marketDate = formatNairobiDate();
-        const expiryTime = new Date(new Date().setHours(23, 59, 59, 999)).toISOString();
+        const expiryTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
         for (const coin of coins) {
             const marketId = `crypto_${coin.id}_${marketDate}`;            
             
             // Fallback values
-            let title = `Can ${coin.name} hit $${(coin.current_price * 1.02).toFixed(2)} today?`;
+            const targetPrice = `$${(coin.current_price * 1.02).toFixed(2)}`;
+            const actionEvent = `Reach or exceed ${targetPrice}`;
+            const condition = 'CoinGecko USD spot price';
+            const title = formatStrictMarketTitle({ actionEvent, subject: coin.name, condition, deadlineAt: expiryTime });
             let description = `${coin.name} is trading at $${coin.current_price?.toLocaleString()}. 24h change: ${Number(coin.price_change_percentage_24h || 0).toFixed(2)}%.`;
-
-            // Try AI title generation
-            try {
-                const aiPrompt = `Generate a catchy prediction market question for ${coin.name} (Current Price: $${coin.current_price}, 24h Change: ${coin.price_change_percentage_24h}%). Keep it under 10 words. Format as a question.`;
-                const aiRes = await callAI({ engine: 'gemini', promptText: aiPrompt, suppressErrors: true });
-                if (aiRes?.text) title = polishMarketTitle(aiRes.text.replace(/"/g, '').trim());
-            } catch (aiErr) {
-                console.warn(`Crypto title fallback for ${coin.id}:`, aiErr.message);
-            }
+            description += `\nTarget: ${targetPrice}\nAction/Event: ${actionEvent}\nSubject: ${coin.name}\nCondition: ${condition}\nExact deadline: ${expiryTime}\nResolution criteria: Resolve YES if CoinGecko records the coin's USD spot price at or above ${targetPrice} at the exact deadline; otherwise resolve NO.`;
 
             await dbRun(
-                `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, status, url)
-                 VALUES (?, ?, ?, ?, ?, 'image', 'crypto', 'Global', 'YES', 'NO', ?, 'open', ?)
+            `INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url)
+                 VALUES (?, ?, ?, ?, ?, 'image', 'crypto', 'Global', 'YES', 'NO', ?, CURRENT_TIMESTAMP, ?, 'open', ?)
                  ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     description=excluded.description,
@@ -4178,6 +4210,8 @@ const syncAllMarkets = async () => {
                     sideA=excluded.sideA,
                     sideB=excluded.sideB,
                     startTime=excluded.startTime,
+                    event_start_time=CURRENT_TIMESTAMP,
+                    event_end_time=excluded.event_end_time,
                     status=excluded.status,
                     url=excluded.url,
                     timestamp=CURRENT_TIMESTAMP`,
@@ -4187,6 +4221,7 @@ const syncAllMarkets = async () => {
                     description,
                     description,
                     coin.image || '',
+                    expiryTime,
                     expiryTime,
                     `https://www.coingecko.com/en/coins/${coin.id}`
                 ]
@@ -4284,7 +4319,7 @@ app.get('/api/markets/preview', async (req, res) => {
 
         // Serve a few markets per category instead of a single one, so guests see
         // a full, scrollable preview rather than one lonely card per section.
-        const wanted = ['sports', 'crypto', 'news', 'weather', 'politics', 'tech', 'football'];
+        const wanted = ['sports', 'crypto', 'movies', 'news', 'weather', 'politics', 'tech', 'football'];
         const perCategoryLimit = 3;
         const byCategory = new Map(wanted.map((category) => [category, []]));
 
@@ -6469,7 +6504,7 @@ app.post('/api/admin/reject-withdraw', authenticateAdmin, async (req, res) => {
 app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
     const { marketId } = req.body;
     try {
-        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND status='pending'`, [marketId]);
+        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND status IN ('pending','draft')`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Market not found' });
 
         await dbRun(`UPDATE markets SET status='open' WHERE id=?`, [marketId]);
@@ -6561,7 +6596,7 @@ app.post('/api/admin/bulk-approve-elite-markets', authenticateAdmin, async (req,
 app.post('/api/admin/reject-market', authenticateAdmin, async (req, res) => {
     const { marketId } = req.body;
     try {
-        await dbRun(`DELETE FROM markets WHERE id=? AND status='pending'`, [marketId]);
+        await dbRun(`DELETE FROM markets WHERE id=? AND status IN ('pending','draft')`, [marketId]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false }); }
 });
@@ -6996,7 +7031,7 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                 SELECT m.*, u.name as creator_name 
                 FROM markets m 
                 LEFT JOIN users u ON m.creator = u.phone 
-                WHERE m.status='pending'
+                WHERE m.status IN ('pending','draft')
             `);
 
             Object.assign(statsData, {
@@ -7024,7 +7059,7 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
             SELECT m.*, m.creator as creator_phone, u.name as creator_name 
             FROM markets m 
             LEFT JOIN users u ON m.creator = u.phone 
-            WHERE m.status='pending'
+            WHERE m.status IN ('pending','draft')
         `);
         res.json({ success: true, markets });
     } catch (e) {
@@ -7447,6 +7482,7 @@ async function repairGeneratedMarketTitles() {
 
         let repaired = 0;
         for (const row of rows) {
+            if (/^tmdb_/i.test(String(row.id || '')) && String(row.title || '').split(' | ').length === 4) continue;
             const headline = rebuildTmdbHeadlineFromRow(row) || rebuildGeneratedNewsHeadlineFromRow(row);
             const repairedTitle = headline
                 ? buildNewsQuestion(headline)
@@ -7753,6 +7789,7 @@ const startServer = async () => {
             runSafely('fixMissingMarketTimes', fixMissingMarketTimes);
             runSafely('cleanupOutdatedMarkets', cleanupOutdatedMarkets);
             runSafely('syncAllMarkets', syncAllMarkets);
+            runSafely('syncTmdbMarkets', syncTmdbMarkets);
             runSafely('syncFootballMarkets', syncFootballMarkets);
             runSafely('syncSportsMarkets', syncSportsMarkets);
             runSafely('syncNewsApiMarkets', async () => {
@@ -7765,6 +7802,7 @@ const startServer = async () => {
             runSafely('runSuspendedMarketSettlement', runSuspendedMarketSettlement);
             runSafely('syncWeatherMarkets', syncWeatherMarkets);
             setInterval(syncAllMarkets, 3600000);
+            setInterval(() => runSafely('syncTmdbMarkets', syncTmdbMarkets), 6 * 60 * 60 * 1000);
             // Keep API-Sports free-tier usage below its daily request limit.
             setInterval(syncFootballMarkets, 3 * 60 * 60 * 1000);
             setInterval(syncSportsMarkets, 6 * 60 * 60 * 1000);

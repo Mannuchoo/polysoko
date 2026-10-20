@@ -344,8 +344,9 @@ function renderFilteredMarkets() {
     // an arbitrary spot far down the list).
     const live = allMarkets.filter(m => m.status === 'live');
     const crypto = allMarkets.filter(m => m.status !== 'live' && isCryptoMarket(m));
+    const movies = allMarkets.filter(m => m.status !== 'live' && normalizeCategory(m.category) === 'movies');
     const news = allMarkets.filter(m => isNewsLikeMarket(m));
-    const upcoming = allMarkets.filter(m => m.status !== 'live' && !isNewsLikeMarket(m) && !isCryptoMarket(m))
+    const upcoming = allMarkets.filter(m => m.status !== 'live' && !isNewsLikeMarket(m) && !isCryptoMarket(m) && normalizeCategory(m.category) !== 'movies')
         .sort((a, b) => (a.country || "Z").localeCompare(b.country || "Z"));
 
     let html = "";
@@ -368,6 +369,11 @@ function renderFilteredMarkets() {
             .slice()
             .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")))
             .forEach(m => html += createMarketCard(m));
+    }
+
+    if (movies.length > 0) {
+        html += `<div class="main-category-label" style="color:#b8a3ff;font-weight:800;padding:20px 0 10px 0;">🎬 MOVIES &amp; FILMS</div>`;
+        movies.forEach(m => html += createMarketCard(m));
     }
 
     // 3. Render News Feed (compact cards only; expanded feed loads on demand)
@@ -408,8 +414,9 @@ function renderFilteredMarkets() {
         });
     }
 
-    if (!allMarkets.length && ['news', 'politics', 'tech'].includes(state.category)) {
-        html += `<div class="empty-state" style="padding:24px;">No ${escapeHtml(state.category)} headlines are available right now.</div>`;
+    if (!allMarkets.length && ['news', 'politics', 'tech', 'movies'].includes(state.category)) {
+        const emptyLabel = state.category === 'movies' ? 'movies and films' : `${escapeHtml(state.category)} headlines`;
+        html += `<div class="empty-state" style="padding:24px;">No ${emptyLabel} are available right now.</div>`;
     }
     mainGrid.innerHTML = html || `<div style="padding:20px;">No markets found. Searching for elite aura...</div>`;
 }
@@ -548,6 +555,7 @@ function createMarketCard(m) {
     const isSports = isSportsMarket(m);
     const isNews = isNewsLikeMarket(m);
     const isCrypto = isCryptoMarket(m);
+    const isMovies = normalizeCategory(m.category) === 'movies';
     const sourceHeadline = isNews ? String(m.displayHeadline || m.rawHeadline || '').trim() : '';
     const titleFallback = m.sideA && m.sideB ? `${m.sideA} vs ${m.sideB}` : "";
     const rawDisplayTitle = isNews ? (m.betQuestion || m.title) : (m.title || titleFallback);
@@ -565,10 +573,12 @@ function createMarketCard(m) {
         // Crypto markets carry no league/source, so label them with the coin
         // itself (e.g. "BNB") instead of a meaningless "GLOBAL" tag.
         badgeText = (coinLabelFor(m) || 'CRYPTO').toUpperCase();
+    } else if (isMovies) {
+        badgeText = 'MOVIES & FILMS';
     } else {
         badgeText = (m.league || m.source || "GLOBAL").toUpperCase();
     }
-    let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : (isCrypto ? "#f0b90b" : "#888"));
+    let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : (isCrypto ? "#f0b90b" : (isMovies ? "#b8a3ff" : "#888")));
     const boostBadge = Number(m.is_boosted) === 1 ? `<span style="background: rgba(255, 214, 0, 0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); padding:4px 10px; border-radius:999px; font-size:0.68rem; font-weight:700;">BOOSTED +10%</span>` : '';
 
     // For news items we show a compact card; full content only in modal
@@ -869,15 +879,16 @@ function getYouTubeEmbedUrl(url) {
 }
 
 function renderMarketMedia(m) {
-    const url = (m.media_url || "").trim();
-    if (!url) return "";
+    const legacyMedia = (m.media_url || '').trim();
+    const legacyLooksVideo = (m.media_type || '').toLowerCase() === 'video' || /\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(legacyMedia);
+    const imageUrl = (m.image_url || (!legacyLooksVideo ? legacyMedia : '') || "").trim();
+    const videoUrl = (m.video_url || (legacyLooksVideo ? legacyMedia : '') || "").trim();
+    if (!imageUrl && !videoUrl) return "";
 
-    const safeUrl = escapeHtml(url);
-    const type = (m.media_type || "").toLowerCase();
-    const youtubeEmbed = getYouTubeEmbedUrl(url);
-
-    if (youtubeEmbed) {
-        return `
+    const renderVideo = (url) => {
+        const safeUrl = escapeHtml(url);
+        const youtubeEmbed = getYouTubeEmbedUrl(url);
+        if (youtubeEmbed) return `
             <div class="market-media market-media-video">
                 <iframe
                     src="${escapeHtml(youtubeEmbed)}"
@@ -888,19 +899,19 @@ function renderMarketMedia(m) {
                 </iframe>
             </div>
         `;
-    }
-
-    const looksVideo = type === "video" || /\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(url);
-    if (looksVideo) {
         return `
             <video class="market-media" controls playsinline preload="metadata">
                 <source src="${safeUrl}">
                 Your browser cannot play this video.
             </video>
         `;
-    }
-
-    return `<img class="market-media" src="${safeUrl}" alt="Market media" loading="lazy">`;
+    };
+    return `
+        <div class="market-media-stack">
+            ${imageUrl ? `<img class="market-media" src="${escapeHtml(imageUrl)}" alt="Market news" loading="lazy">` : ''}
+            ${videoUrl ? renderVideo(videoUrl) : ''}
+        </div>
+    `;
 }
 
 function renderMarketLiveInfo(m) {

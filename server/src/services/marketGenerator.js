@@ -1,0 +1,126 @@
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+
+const OUTPUT_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    subject: { type: 'STRING' },
+    actionEvent: { type: 'STRING' },
+    condition: { type: 'STRING', description: 'A specific source, metric, venue, or context needed to resolve this event.' },
+    deadline: { type: 'STRING', description: 'An explicit future calendar date in YYYY-MM-DD format.' },
+    resolutionCriteria: { type: 'STRING' },
+    imageUrl: { type: 'STRING', description: 'Use an empty string when there is no supported image URL.' },
+    videoUrl: { type: 'STRING', description: 'Use an empty string when there is no supported video URL.' }
+  },
+  required: ['subject', 'actionEvent', 'condition', 'deadline', 'resolutionCriteria', 'imageUrl', 'videoUrl']
+};
+
+const clean = value => typeof value === 'string' ? value.trim() : '';
+
+function validHttpUrl(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateDeadline(value, now = new Date()) {
+  const deadline = clean(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
+    throw new Error('The generated market must include an explicit deadline in YYYY-MM-DD format.');
+  }
+  const parsed = new Date(`${deadline}T23:59:59.999Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== deadline || parsed <= now) {
+    throw new Error('The generated market deadline must be a valid future date.');
+  }
+  return { date: deadline, timestamp: parsed.toISOString() };
+}
+
+function formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt }) {
+  const fields = [actionEvent, subject, condition, deadlineAt].map(value => clean(value));
+  if (fields.some(value => !value)) throw new Error('Strict market title requires action/event, subject, condition, and exact deadline.');
+  if (/\b(might|could|possibly|perhaps|likely|unlikely|depends)\b/i.test(fields.slice(0, 3).join(' '))) {
+    throw new Error('The generated market is not a definitive Yes/No outcome.');
+  }
+  return fields.join(' | ');
+}
+
+export async function generateMarketFromNews(rawArticleData) {
+  if (!process.env.GOOGLE_API_KEY) throw new Error('GOOGLE_API_KEY is not configured.');
+  const article = rawArticleData && typeof rawArticleData === 'object' ? rawArticleData : {};
+  const title = clean(article.title || article.headline);
+  const body = clean(article.body || article.content || article.description);
+  if (!title || !body) throw new Error('News payload must include a title and body.');
+
+  const media = article.media && typeof article.media === 'object' ? article.media : {};
+  const suppliedImage = validHttpUrl(article.imageUrl || article.image_url || article.urlToImage || media.imageUrl || media.image_url);
+  const suppliedVideo = validHttpUrl(article.videoUrl || article.video_url || media.videoUrl || media.video_url || media.embedUrl);
+  const prompt = `Extract one objectively resolvable prediction market from this news article. Use only facts supported by the article. The deadline must be a specific future calendar date as YYYY-MM-DD. If the source does not support a valid future deadline, return an empty deadline. Condition must name the relevant context or resolution source; do not leave it empty. Resolution criteria must define a single observable Yes/No rule and source/event. Do not make up media links; return supplied media URLs only.\n\nArticle title: ${title}\nArticle body: ${body}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
+
+  let result;
+  let lastError;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GOOGLE_API_KEY)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json',
+            responseSchema: OUTPUT_SCHEMA
+          }
+        })
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        const error = new Error(`Gemini API request failed (${response.status}): ${detail.slice(0, 500)}`);
+        if ([400, 404].includes(response.status)) { lastError = error; continue; }
+        throw error;
+      }
+      const payload = await response.json();
+      const text = payload.candidates?.[0]?.content?.parts?.map(part => part.text || '').join('');
+      if (!text) throw new Error('Gemini returned an empty structured response.');
+      result = JSON.parse(text);
+      break;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof SyntaxError) break;
+      if (String(error.message).includes('(400)') || String(error.message).includes('(404)')) continue;
+      throw error;
+    }
+  }
+  if (!result) throw lastError || new Error('Gemini could not generate a market.');
+
+  const subject = clean(result.subject);
+  const actionEvent = clean(result.actionEvent);
+  const condition = clean(result.condition);
+  const resolutionCriteria = clean(result.resolutionCriteria);
+  if (!subject || !actionEvent || !condition || !resolutionCriteria) {
+    throw new Error('Gemini output is missing an action event, subject, condition, or resolution criteria.');
+  }
+  if (resolutionCriteria.length < 15 || /\b(might|could|possibly|perhaps|likely|unlikely|depends)\b/i.test(resolutionCriteria)) {
+    throw new Error('The generated resolution rule must settle to a definitive Yes or No.');
+  }
+  const deadline = validateDeadline(result.deadline);
+  const imageUrl = suppliedImage || validHttpUrl(result.imageUrl);
+  const videoUrl = suppliedVideo || validHttpUrl(result.videoUrl);
+
+  return {
+    title: formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt: deadline.timestamp }),
+    subject,
+    actionEvent,
+    condition,
+    deadline: deadline.date,
+    deadlineAt: deadline.timestamp,
+    resolutionCriteria,
+    imageUrl,
+    videoUrl
+  };
+}
+
+export { validateDeadline };
+export { formatStrictMarketTitle };
