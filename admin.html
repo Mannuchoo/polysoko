@@ -2714,6 +2714,28 @@ async function loadAdminMarkets() {
                         </select>
                     </label>
                 </div>
+                <div style="display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:10px;margin-bottom:14px;">
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Home side
+                        <input id="edit-sideA-${esc(id)}" value="${esc(m.sideA || '')}" placeholder="Arsenal" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Draw side
+                        <input id="edit-sideC-${esc(id)}" value="${esc(m.sideC || '')}" placeholder="Draw" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Away side
+                        <input id="edit-sideB-${esc(id)}" value="${esc(m.sideB || '')}" placeholder="Chelsea" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:10px;margin-bottom:14px;">
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Home odds
+                        <input id="edit-oddsA-${esc(id)}" type="number" step="0.01" min="1.01" value="${Number(m.oddsA || 1.9).toFixed(2)}" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Draw odds
+                        <input id="edit-oddsC-${esc(id)}" type="number" step="0.01" min="1.01" value="${m.oddsC ? Number(m.oddsC).toFixed(2) : ''}" placeholder="3.40" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">Away odds
+                        <input id="edit-oddsB-${esc(id)}" type="number" step="0.01" min="1.01" value="${Number(m.oddsB || 1.9).toFixed(2)}" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                    </label>
+                </div>
                 <button onclick="saveMarketChange('${esc(id)}', this)" class="btn-primary" style="width:100%;padding:12px;">Save sports market</button>
                 <div style="margin-top:16px;border-top:1px solid #252c34;padding-top:14px;">
                     <label style="display:block;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:7px;">Settle market
@@ -2765,13 +2787,21 @@ async function saveMarketChange(id, btn) {
     btn.innerText = "Saving...";
     btn.disabled = true;
 
+    const readValue = (elementId) => document.getElementById(elementId)?.value ?? null;
+
     try {
         await API.post('/admin/update-market', {
             id,
             title: document.getElementById(`edit-title-${id}`).value,
             content: document.getElementById(`edit-content-${id}`).value,
             media_url: document.getElementById(`edit-media-${id}`).value,
-            media_type: document.getElementById(`edit-media-type-${id}`).value
+            media_type: document.getElementById(`edit-media-type-${id}`).value,
+            sideA: readValue(`edit-sideA-${id}`),
+            sideB: readValue(`edit-sideB-${id}`),
+            sideC: readValue(`edit-sideC-${id}`),
+            oddsA: readValue(`edit-oddsA-${id}`),
+            oddsB: readValue(`edit-oddsB-${id}`),
+            oddsC: readValue(`edit-oddsC-${id}`)
         });
 
         btn.innerText = "✅ Saved";
@@ -2901,7 +2931,7 @@ async function loadGlobalActiveBets() {
                     <td>
                         ${b.status === 'active' ? `
                             <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                                <button class="btn-primary" style="padding:8px 10px; font-size:0.72rem;" onclick="adminSettleBet('${jsArg(b.id)}', '${jsArg(b.sideA || 'YES')}', '${jsArg(b.sideB || 'NO')}')">Settle</button>
+                                <button class="btn-primary" style="padding:8px 10px; font-size:0.72rem;" onclick="adminSettleBet('${jsArg(b.id)}', '${jsArg(b.sideA || 'YES')}', '${jsArg(b.sideB || 'NO')}', '${jsArg(b.sideC || '')}')">Settle</button>
                                 <button style="padding:8px 10px; font-size:0.72rem; border-radius:8px; border:1px solid #ff4444; background:rgba(255,68,68,0.1); color:#ff9b9b; cursor:pointer;" onclick="adminCancelBet('${jsArg(b.id)}')">Cancel</button>
                             </div>
                         ` : `<span style="color:#777;">No action</span>`}
@@ -2915,8 +2945,15 @@ async function loadGlobalActiveBets() {
     }
 }
 
-async function adminSettleBet(betId, sideA = 'YES', sideB = 'NO') {
-    const result = await window.showAppPrompt(`Winning result for bet #${betId}? Use ${sideA}, ${sideB}, YES, NO, HOME, AWAY, DRAW, or CANCEL.`, '', { title: `Settle bet #${betId}` });
+async function adminSettleBet(betId, sideA = 'YES', sideB = 'NO', sideC = '') {
+    // A three-way sports market settles on one of its own outcomes, so the
+    // draw is offered whenever the market has one.
+    const outcomes = [sideA, sideB, sideC].filter(Boolean);
+    const result = await window.showAppPrompt(
+        `Winning result for bet #${betId}? Use ${outcomes.join(', ')}, YES, NO, HOME, AWAY, DRAW, or CANCEL.`,
+        '',
+        { title: `Settle bet #${betId}` }
+    );
     if (!result) return;
     if (!await window.showAppConfirm(`Settle bet #${betId} using result ${result.toUpperCase()}?`, { title: 'Confirm bet settlement', confirmLabel: 'Settle bet' })) return;
 

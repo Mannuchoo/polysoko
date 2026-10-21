@@ -1,4 +1,7 @@
-const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+// The free tier allows 20 requests per day per model, so several models are
+// listed: when one model runs dry the next one still serves the request.
+// gemini-2.0-flash was retired and now answers 404, so it is not listed here.
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview'];
 
 const OUTPUT_SCHEMA = {
   type: 'OBJECT',
@@ -61,7 +64,10 @@ function formatStrictMarketTitle({ subject, actionEvent, condition, deadlineAt }
 }
 
 export async function generateMarketFromNews(rawArticleData) {
-  if (!process.env.GOOGLE_API_KEY) throw new Error('GOOGLE_API_KEY is not configured.');
+  // GEMINI_API_KEY is the documented name; GOOGLE_API_KEY is accepted as an
+  // alias so either variable configures the generator.
+  const apiKey = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured.');
   const article = rawArticleData && typeof rawArticleData === 'object' ? rawArticleData : {};
   const title = clean(article.title || article.headline);
   const body = clean(article.body || article.content || article.description);
@@ -78,7 +84,7 @@ export async function generateMarketFromNews(rawArticleData) {
   let lastError;
   for (const model of GEMINI_MODELS) {
     try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GOOGLE_API_KEY)}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -93,7 +99,9 @@ export async function generateMarketFromNews(rawArticleData) {
       if (!response.ok) {
         const detail = await response.text();
         const error = new Error(`Gemini API request failed (${response.status}): ${detail.slice(0, 500)}`);
-        if ([400, 404].includes(response.status)) { lastError = error; continue; }
+        // 400/404 mean the model is unusable; 429 means its daily quota is
+        // spent. Both cases mean the next model in the list should try.
+        if ([400, 404, 429].includes(response.status)) { lastError = error; continue; }
         throw error;
       }
       const payload = await response.json();
@@ -104,7 +112,7 @@ export async function generateMarketFromNews(rawArticleData) {
     } catch (error) {
       lastError = error;
       if (error instanceof SyntaxError) break;
-      if (String(error.message).includes('(400)') || String(error.message).includes('(404)')) continue;
+      if (String(error.message).includes('(400)') || String(error.message).includes('(404)') || String(error.message).includes('(429)')) continue;
       throw error;
     }
   }

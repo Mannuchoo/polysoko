@@ -60,3 +60,8 @@ site/
 # ---- Runtime backups ----
 server/backups/
 
+# ---- Local scratch scripts ----
+# Throwaway diagnostics and checks that are run by hand and are not part of
+# the deployed application.
+scratch/
+

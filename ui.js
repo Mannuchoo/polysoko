@@ -57,6 +57,83 @@ function getMarketSide(market, side) {
     return market?.[side] ?? market?.[lowerKey] ?? '';
 }
 
+// --- THREE-WAY SPORTS MARKETS -----------------------------------------------
+//
+// A football fixture settles on three outcomes, so its market exposes three
+// buttons: the home team, a draw, and the away team. Every other market
+// keeps the binary YES/NO model. A market qualifies for the three-way model
+// when it names a draw side and prices it.
+
+const THREE_WAY_SIDE_KEYS = ['HOME', 'DRAW', 'AWAY'];
+
+function marketSupportsDraw(market) {
+    const label = String(getMarketSide(market, 'sideC') || '').trim();
+    const odds = Number(getMarketSide(market, 'oddsC') || 0);
+    return Boolean(label) && Number.isFinite(odds) && odds > 1;
+}
+
+function isThreeWayMarket(market) {
+    return Boolean(market) && marketSupportsDraw(market);
+}
+
+// The outcomes a market exposes, in display order. Each entry carries the
+// side key the server understands, the label to show and the price.
+function getMarketOutcomes(market) {
+    if (!isThreeWayMarket(market)) {
+        return [
+            { key: 'YES', label: 'Yes', odds: Number(getMarketSide(market, 'oddsA') || 1.9) },
+            { key: 'NO', label: 'No', odds: Number(getMarketSide(market, 'oddsB') || 1.9) }
+        ];
+    }
+    return [
+        { key: 'HOME', label: String(getMarketSide(market, 'sideA') || 'Home').trim(), odds: Number(getMarketSide(market, 'oddsA') || 1.9) },
+        { key: 'DRAW', label: String(getMarketSide(market, 'sideC') || 'Draw').trim(), odds: Number(getMarketSide(market, 'oddsC') || 1.9) },
+        { key: 'AWAY', label: String(getMarketSide(market, 'sideB') || 'Away').trim(), odds: Number(getMarketSide(market, 'oddsB') || 1.9) }
+    ];
+}
+
+// The colour a side is drawn in. Home is green, the draw is amber and away is
+// red, so a three-way bar reads the same way as the two-way one.
+function outcomeAccent(key) {
+    if (key === 'DRAW') return '#ffc857';
+    if (key === 'AWAY' || key === 'NO') return '#ff6b6b';
+    return '#00ff88';
+}
+
+// Escapes a value for use inside an inline JS string in an HTML attribute.
+function jsArg(value) {
+    return String(value == null ? '' : value)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e');
+}
+
+// The betting buttons for a market. A three-way sports market shows the two
+// teams and the draw; every other market shows YES and NO. The pick sent to
+// the server is the outcome key, which the server maps back to the market's
+// own labels.
+function renderOutcomeButtons(market, { compact = false } = {}) {
+    const outcomes = getMarketOutcomes(market);
+    const id = jsArg(market?.id || '');
+    const title = jsArg(market?.title || market?.betQuestion || 'Market');
+
+    const buttons = outcomes.map(outcome => {
+        const accent = outcomeAccent(outcome.key);
+        const label = escapeHtml(outcome.label);
+        const odds = Number(outcome.odds);
+        const price = Number.isFinite(odds) && odds > 0 ? ` (${odds.toFixed(2)})` : '';
+        return `
+        <button class="bet-btn" data-id="${escapeHtml(market?.id || '')}" data-choice="${escapeHtml(outcome.key)}" data-title="${escapeHtml(title)}"
+                onclick="event.stopPropagation(); openBetModal('${id}', '${title}', '${outcome.key}')"
+                style="flex:1; min-width:0; color:${accent}; border-color:${accent}33; background:${accent}14;">
+            ${label}${compact ? '' : price}
+        </button>`;
+    }).join('');
+
+    return `<div class="betting-row" style="display:flex; gap:8px; margin-top:15px;">${buttons}</div>`;
+}
+
 function isInvalidSportsMarket(m) {
     const cat = normalizeCategory(m?.category);
     const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
@@ -276,7 +353,7 @@ function renderTrending() {
         .sort((a, b) => {
             // Rank live, high volume, and current tech/news markets first.
             const score = (m) => {
-                const vol = Number(m.home_volume || m.away_volume || m.volume || m.total_volume || 0);
+                const vol = marketTotalVolume(m);
                 const maxOdds = Math.max(Number(m.oddsA || 0), Number(m.oddsB || 0));
                 const category = getMarketDisplayCategory(m);
                 const isTopical = ['news', 'politics', 'tech'].includes(category) ? 30000 : 0;
@@ -291,24 +368,12 @@ function renderTrending() {
         }); // Removed .slice() to make it "endless"
 
     container.innerHTML = top.map(m => {
-        const safeTitle = (m.title || "").replace(/'/g, "\\'");
         return `
         <div class="ongoing-card" data-id="${m.id}" onclick="openTrendingMarket('${m.id}')">
             <div class="category-tag">🔥 HOT</div>
             <div class="ongoing-title">${escapeHtml(m.title || m.betQuestion || 'Market')}</div>
 
-            <div class="betting-row">
-                <button class="bet-btn btn-yes" 
-                    data-id="${m.id}" 
-                    data-choice="Yes" 
-                    data-title="${safeTitle}"
-                    onclick="event.stopPropagation(); openBetModal('${m.id}', '${safeTitle}', 'Yes')">YES</button>
-                <button class="bet-btn btn-no" 
-                    data-id="${m.id}" 
-                    data-choice="No" 
-                    data-title="${safeTitle}"
-                    onclick="event.stopPropagation(); openBetModal('${m.id}', '${safeTitle}', 'No')">NO</button>
-            </div>
+            ${renderOutcomeButtons(m, { compact: true })}
         </div>
     `}).join('');
 }
@@ -634,47 +699,87 @@ function createMarketCard(m) {
         ${sparkline || ''}
     </div>
 
-    <div class="betting-row" style="display: flex; gap: 8px; margin-top: 15px;">
-        <button class="bet-btn btn-yes" onclick="event.stopPropagation(); openBetModal('${m.id}', '${safeTitle}', 'Yes')">
-                    YES ${m.oddsA ? `(${m.oddsA})` : ''} 
-        </button>
-        <button class="bet-btn btn-no" onclick="event.stopPropagation(); openBetModal('${m.id}', '${safeTitle}', 'No')">
-            NO ${m.oddsB ? `(${m.oddsB})` : ''}
-        </button>
-    </div>
+    ${renderOutcomeButtons(m)}
     ${renderPolymarketBar(m)}
 </div>
 `;
 }
 
+// The implied probability of every outcome on a market, as whole percents
+// that add up to 100. A three-way market reports home/draw/away; a binary
+// one reports yes/no.
 function getMarketImpliedProbabilities(market) {
-    const yesOdds = Number(market.oddsA || market.odds_yes || market.yes_odds || 1.9);
-    const noOdds = Number(market.oddsB || market.odds_no || market.no_odds || 1.9);
-    if (yesOdds <= 0 || noOdds <= 0) return { yes: 50, no: 50 };
+    const outcomes = getMarketOutcomes(market);
 
-    const yesValue = 1 / yesOdds;
-    const noValue = 1 / noOdds;
-    const total = yesValue + noValue;
-    const yes = Math.max(5, Math.min(95, Math.round((yesValue / total) * 100)));
-    const no = 100 - yes;
+    let total = 0;
+    const values = outcomes.map(outcome => {
+        const odds = Number(outcome.odds);
+        const value = Number.isFinite(odds) && odds > 0 ? 1 / odds : 0;
+        total += value;
+        return { ...outcome, value };
+    });
+    if (!(total > 0)) {
+        const even = Math.floor(100 / values.length);
+        return Object.fromEntries(values.map(v => [v.key, even]));
+    }
 
-    return { yes, no };
+    // Round each outcome, then hand the rounding difference to the largest
+    // one so the bars always add up to exactly 100.
+    const probabilities = {};
+    let assigned = 0;
+    let leader = values[0];
+    for (const outcome of values) {
+        const percent = Math.max(2, Math.min(96, Math.round((outcome.value / total) * 100)));
+        probabilities[outcome.key] = percent;
+        assigned += percent;
+        if (outcome.value > leader.value) leader = outcome;
+    }
+    probabilities[leader.key] += 100 - assigned;
+
+    return probabilities;
+}
+
+// A horizontal bar split across the market's outcomes.
+function renderOutcomeBar(market, { height = 10, radius = '999px' } = {}) {
+    const outcomes = getMarketOutcomes(market);
+    const probabilities = getMarketImpliedProbabilities(market);
+
+    const segments = outcomes.map(outcome => {
+        const percent = Math.max(0, Number(probabilities[outcome.key] || 0));
+        const accent = outcomeAccent(outcome.key);
+        return `<div style="width:${percent}%; background: ${accent};"></div>`;
+    }).join('');
+
+    const legend = outcomes.map(outcome => {
+        const percent = Math.max(0, Number(probabilities[outcome.key] || 0));
+        return `<span style="color:${outcomeAccent(outcome.key)};">${escapeHtml(outcome.label)} ${percent}%</span>`;
+    }).join('');
+
+    return `
+        <div style="display:flex; justify-content:space-between; gap:8px; font-size:0.72rem; color:#bbb; margin-bottom:6px; flex-wrap:wrap;">
+            ${legend}
+        </div>
+        <div style="height:${height}px; border-radius:${radius}; overflow:hidden; background:#111; display:flex;">
+            ${segments}
+        </div>
+    `;
+}
+
+function marketTotalVolume(market) {
+    return Number(
+        (market?.home_volume || 0) +
+        (market?.draw_volume || 0) +
+        (market?.away_volume || 0) ||
+        market?.volume || market?.total_volume || 0
+    );
 }
 
 function renderPolymarketBar(market) {
-    const { yes, no } = getMarketImpliedProbabilities(market);
-    const volume = Number(market.home_volume || market.away_volume || market.volume || market.total_volume || 0);
+    const volume = marketTotalVolume(market);
 
     return `
         <div style="margin-top: 14px;">
-            <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:#bbb; margin-bottom:6px;">
-                <span>YES ${yes}%</span>
-                <span>NO ${no}%</span>
-            </div>
-            <div style="height:10px; border-radius:999px; overflow:hidden; background:#111; display:flex;">
-                <div style="width:${yes}%; background: linear-gradient(90deg, #00ff88, #00d17a);"></div> 
-                <div style="width:${no}%; background: linear-gradient(90deg, #ff4d4d, #d12020);"></div>
-            </div>
+            ${renderOutcomeBar(market)}
             ${volume ? `<div style="font-size:0.7rem; color:#777; margin-top:8px;">Volume: sKES ${volume.toFixed(0)}</div>` : ''}
         </div>
     `;
@@ -731,16 +836,25 @@ async function loadOrderBook(marketId) {
         const data = await apiFetch(`markets/${marketId}/order-book`);
         if (!data?.success) throw new Error(data?.message || "Order book unavailable");
 
-        const yesLabel = escapeHtml(data.market?.sideA || 'YES');
-        const noLabel = escapeHtml(data.market?.sideB || 'NO');
-        const yesVolume = Number(data.orderBook?.yes?.volume || 0);
-        const noVolume = Number(data.orderBook?.no?.volume || 0);
-        const totalVolume = yesVolume + noVolume;
+        // A three-way sports market reports home/draw/away buckets; every
+        // other market keeps the legacy yes/no buckets.
+        const isThreeWay = Boolean(data.market?.sideC) && Array.isArray(data.orderBook?.home);
+        const sides = isThreeWay
+            ? [
+                { label: data.market?.sideA || 'Home', key: 'home', accent: '#00ff88' },
+                { label: data.market?.sideC || 'Draw', key: 'draw', accent: '#ffc857' },
+                { label: data.market?.sideB || 'Away', key: 'away', accent: '#ff6b6b' }
+            ]
+            : [
+                { label: data.market?.sideA || 'YES', key: 'yes', accent: '#00ff88' },
+                { label: data.market?.sideB || 'NO', key: 'no', accent: '#ff6b6b' }
+            ];
+
+        const totalVolume = sides.reduce((sum, side) => sum + Number(data.orderBook?.[side.key]?.volume || 0), 0);
 
         container.innerHTML = `
-            <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px;">
-                ${renderOrderBookSide(yesLabel, data.orderBook?.yes, '#00ff88')}
-                ${renderOrderBookSide(noLabel, data.orderBook?.no, '#ff6b6b')}
+            <div style="display:grid; grid-template-columns: repeat(${sides.length}, minmax(0, 1fr)); gap:12px;">
+                ${sides.map(side => renderOrderBookSide(escapeHtml(side.label), data.orderBook?.[side.key], side.accent)).join('')}
             </div>
             <div style="display:flex; justify-content:space-between; gap:10px; margin-top:10px; padding-top:10px; border-top:1px solid #1f2937; color:#9ca3af; font-size:0.76rem;">
                 <span>Total active depth</span>
@@ -754,36 +868,37 @@ async function loadOrderBook(marketId) {
 }
 
 function renderProbabilityChart(market) {
-    const { yes, no } = getMarketImpliedProbabilities(market);
-    const volume = Number(market.home_volume || market.away_volume || market.volume || market.total_volume || 0);
+    const volume = marketTotalVolume(market);
+    const outcomes = getMarketOutcomes(market);
+    const probabilities = getMarketImpliedProbabilities(market);
+    // "Confidence" reads the favourite's share of the market.
+    const leader = outcomes.reduce((best, outcome) => {
+        const percent = Number(probabilities[outcome.key] || 0);
+        return percent > best.percent ? { percent, outcome } : best;
+    }, { percent: 0, outcome: null });
 
     return `
         <div style="margin: 18px 0 8px; padding: 14px; border: 1px solid #222; border-radius: 12px; background: rgba(255,255,255,0.02);">
-            <div style="display:flex; justify-content:space-between; font-size:0.76rem; color:#bbb; margin-bottom:8px;">
-                <span>YES ${yes}%</span>
-                <span>NO ${no}%</span>
-            </div>
-            <div style="height:10px; background:#111; border-radius:999px; overflow:hidden; display:flex;">
-                <div style="width:${yes}%; background: linear-gradient(90deg, #00ff88, #00d17a);"></div> 
-                <div style="width:${no}%; background: linear-gradient(90deg, #ff4d4d, #d12020);"></div>
-            </div>
+            ${renderOutcomeBar(market)}
             <div style="display:flex; justify-content:space-between; margin-top:10px; font-size:0.72rem; color:#777;">
                 <span>Volume: sKES ${volume.toFixed(0)}</span>
-                <span>Confidence: ${Math.max(1, yes)}%</span>
+                <span>Confidence: ${Math.max(1, leader.percent)}%</span>
             </div>
         </div>
     `;
 }
 
 function renderMiniProbBar(market) {
-    const { yes, no } = getMarketImpliedProbabilities(market);
+    const outcomes = getMarketOutcomes(market);
+    const probabilities = getMarketImpliedProbabilities(market);
+    const legend = outcomes.map(outcome => `${outcome.label} ${Number(probabilities[outcome.key] || 0)}%`).join(' • ');
+
     return `
         <div style="margin-top:8px;">
             <div style="height:8px; border-radius:999px; overflow:hidden; background:#0b0c10; display:flex; width:120px;">
-                <div style="width:${yes}%; background: linear-gradient(90deg, #00ff88, #00d17a);"></div> 
-                <div style="width:${no}%; background: linear-gradient(90deg, #ff4d4d, #d12020);"></div>
+                ${outcomes.map(outcome => `<div style="width:${Math.max(0, Number(probabilities[outcome.key] || 0))}%; background: ${outcomeAccent(outcome.key)};"></div>`).join('')}
             </div>
-            <div style="font-size:0.7rem; color:#777; margin-top:6px;">YES ${yes}% • NO ${no}%</div>
+            <div style="font-size:0.7rem; color:#777; margin-top:6px;">${escapeHtml(legend)}</div>
         </div>
     `;
 }
@@ -1495,10 +1610,12 @@ function renderNewsModal(m, media = "") {
             <div class="betting-section" style="margin-bottom: 25px;">
                 <div style="color: #888; font-size: 0.7rem; font-weight: 700; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Place Your Prediction</div>
                 <div class="betting-row" style="display:flex; gap:12px; margin-bottom: 0;">
-                    <button class="bet-btn btn-yes" style="flex:1; padding: 18px; font-weight: 800; font-size: 1rem; background: linear-gradient(135deg, rgba(0,255,136,0.2) 0%, rgba(0,200,100,0.1) 100%); border: 1px solid rgba(0,255,136,0.4); color: #00ff88; border-radius: 10px; cursor: pointer; transition: all 0.2s ease;"
-                        data-id="${escapeHtml(m.id)}" data-choice="Yes" data-title="${safeTitle}" onmouseover="this.style.background='linear-gradient(135deg, rgba(0,255,136,0.35) 0%, rgba(0,200,100,0.2) 100%)'; this.style.boxShadow='0 0 15px rgba(0,255,136,0.3)'" onmouseout="this.style.background='linear-gradient(135deg, rgba(0,255,136,0.2) 0%, rgba(0,200,100,0.1) 100%)'; this.style.boxShadow='none'">YES</button>
-                    <button class="bet-btn btn-no" style="flex:1; padding: 18px; font-weight: 800; font-size: 1rem; background: linear-gradient(135deg, rgba(255,77,79,0.2) 0%, rgba(200,50,50,0.1) 100%); border: 1px solid rgba(255,77,79,0.4); color: #ff6b6b; border-radius: 10px; cursor: pointer; transition: all 0.2s ease;"
-                        data-id="${escapeHtml(m.id)}" data-choice="No" data-title="${safeTitle}" onmouseover="this.style.background='linear-gradient(135deg, rgba(255,77,79,0.35) 0%, rgba(200,50,50,0.2) 100%)'; this.style.boxShadow='0 0 15px rgba(255,77,79,0.3)'" onmouseout="this.style.background='linear-gradient(135deg, rgba(255,77,79,0.2) 0%, rgba(200,50,50,0.1) 100%)'; this.style.boxShadow='none'">NO</button>
+                    ${getMarketOutcomes(m).map(outcome => {
+                        const accent = outcomeAccent(outcome.key);
+                        return `
+                        <button class="bet-btn" style="flex:1; min-width:0; padding: 18px; font-weight: 800; font-size: 1rem; background:${accent}22; border: 1px solid ${accent}66; color:${accent}; border-radius: 10px; cursor: pointer; transition: all 0.2s ease;"
+                            data-id="${escapeHtml(m.id)}" data-choice="${escapeHtml(outcome.key)}" data-title="${safeTitle}">${escapeHtml(outcome.label)}</button>`;
+                    }).join('')}
                 </div>
             </div>
 
@@ -1538,12 +1655,15 @@ function renderDefaultModal(m, info, media) {
         <div id="persona-transmission-container"></div>
 
         <div class="betting-row" style="display:flex; gap:10px; margin: 20px 0;">
-            <button class="bet-btn btn-yes" style="flex:1" data-id="${escapeHtml(m.id)}" data-choice="Yes" data-title="${safeTitle}">
-                YES ${m.oddsA ? `(${m.oddsA})` : ''}
-            </button>
-            <button class="bet-btn btn-no" style="flex:1" data-id="${escapeHtml(m.id)}" data-choice="No" data-title="${safeTitle}">
-                NO ${m.oddsB ? `(${m.oddsB})` : ''}
-            </button>
+            ${getMarketOutcomes(m).map(outcome => {
+                const accent = outcomeAccent(outcome.key);
+                const odds = Number(outcome.odds);
+                return `
+                <button class="bet-btn" style="flex:1; min-width:0; color:${accent}; border-color:${accent}44; background:${accent}18;"
+                    data-id="${escapeHtml(m.id)}" data-choice="${escapeHtml(outcome.key)}" data-title="${safeTitle}">
+                    ${escapeHtml(outcome.label)}${Number.isFinite(odds) && odds > 0 ? ` (${odds.toFixed(2)})` : ''}
+                </button>`;
+            }).join('')}
         </div>
 
         <div id="match-center-container"></div>
@@ -1702,8 +1822,14 @@ window.openBetModal = function (marketId, title, pick) {
     const titleEl = document.getElementById('modal-market-title');
     const pickEl = document.getElementById('modal-pick-display');
 
+    // Show the outcome's own label (the team name on a sports market) rather
+    // than the internal key.
+    const market = window.marketMap?.[marketId];
+    const outcome = market ? getMarketOutcomes(market).find(item => item.key === pick) : null;
+    const pickLabel = outcome ? outcome.label : pick;
+
     if (titleEl) titleEl.innerText = pendingBet.title;
-    if (pickEl) pickEl.innerText = `Your Pick: ${pick}`;
+    if (pickEl) pickEl.innerText = `Your Pick: ${pickLabel}`;
 
     const input = document.getElementById('bet-amount-input');
     if (input) input.value = 10;

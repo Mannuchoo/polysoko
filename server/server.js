@@ -4,6 +4,22 @@ import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
 import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
 import { createBotRouter } from './src/routes/bot.js';
+import { fetchFootballOdds, oddsForFixture } from './src/services/footballOdds.js';
+import { FixtureDataCache, footballRequest } from './src/services/footballApiClient.js';
+import { priceMarket } from './src/services/oddsEngine.js';
+import {
+    DEFAULT_DRAW_LABEL,
+    isVoidingDraw,
+    isWinningBinarySide,
+    isWinningSide,
+    marketSideKeys,
+    resolveSideKey,
+    settlementOutcome,
+    sideLabel,
+    sideOdds,
+    supportsDraw,
+    volumeColumnForSide
+} from './src/services/threeWayMarket.js';
 import { fileURLToPath } from 'url'; // For __dirname fix
 import { dirname, join } from 'path';
 
@@ -189,7 +205,10 @@ const SETTLEMENT_BACKLOG_LIMIT = Number.isFinite(Number(process.env.SETTLEMENT_B
 const SETTLEMENT_SUSPENDED_LIMIT = Number.isFinite(Number(process.env.SETTLEMENT_SUSPENDED_LIMIT))
     ? Math.max(1, Number(process.env.SETTLEMENT_SUSPENDED_LIMIT))
     : 1;    // max api-sports calls per suspended-market sweep run
-const DEFAULT_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+// gemini-2.0-flash and gemini-2.0-flash-lite were retired and now answer 404.
+// The free tier allows 20 requests per day per model, so several live models
+// are listed to keep working when one model's quota runs out.
+const DEFAULT_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview'];
 // AfricasTalking validates its credentials at construction time and throws
 // ("Username can't be blank") when AT_USERNAME / AT_API_KEY are absent. That throw
 // happened at module scope, so the process died before binding a port and Railway
@@ -882,8 +901,11 @@ function normalizeMarketRow(market) {
         startTime: market.startTime ?? market.starttime,
         sideA: market.sideA ?? market.sidea,
         sideB: market.sideB ?? market.sideb,
+        sideC: market.sideC ?? market.sidec ?? null,
         oddsA: market.oddsA ?? market.oddsa,
         oddsB: market.oddsB ?? market.oddsb,
+        oddsC: market.oddsC ?? market.oddsc ?? null,
+        draw_volume: Number(market.draw_volume || 0),
         // PostgreSQL returns BIGINT values as strings (including "0"), which
         // JavaScript treats as truthy. Normalize this flag for UI consumers.
         is_boosted: Number(market.is_boosted) === 1 ? 1 : 0
@@ -896,6 +918,38 @@ const isSportsMarket = market => {
     const category = String(market?.category || '').toLowerCase();
     return ['sports', 'football', 'soccer'].includes(category) || Boolean(String(market?.sport || '').trim()) ||
         /^(sp_|fb_)/i.test(String(market?.id || '')) || String(market?.country || '').toLowerCase() === 'football';
+};
+
+// The price a market falls back to when it has no bookmaker anchor: even
+// money with the house margin already on it.
+const DEFAULT_ANCHOR_ODDS = 1.90;
+
+// Reads the bookmaker's 1X2 price out of the `odds_anchor` column. The
+// column holds a JSON object like {"HOME":2.10,"DRAW":3.40,"AWAY":3.60}; a
+// market without one simply has no prior and starts from even money.
+const parseOddsAnchor = value => {
+    if (!value) return {};
+    let parsed = value;
+    if (typeof value === 'string') {
+        const text = value.trim();
+        if (!text) return {};
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            return {};
+        }
+    }
+    if (!parsed || typeof parsed !== 'object') return {};
+
+    const anchor = {};
+    for (const [key, odds] of Object.entries(parsed)) {
+        const upper = String(key).toUpperCase();
+        const numeric = Number(odds);
+        if (!['HOME', 'DRAW', 'AWAY'].includes(upper)) continue;
+        if (!Number.isFinite(numeric) || numeric <= 1) continue;
+        anchor[upper] = numeric;
+    }
+    return anchor;
 };
 
 // --- JWT SECRET RESOLUTION -------------------------------------------------
@@ -2105,6 +2159,13 @@ async function callGemini(promptText, opts = {}) {
                     break;
                 }
                 if (status === 429) {
+                    const detail = String(err?.response?.data?.error?.message || '');
+                    // A daily free-tier quota does not clear by waiting a few
+                    // seconds, so move to the next model instead of retrying.
+                    if (detail.includes('Quota exceeded') || detail.includes('exceeded your current quota')) {
+                        console.warn(`Gemini model ${model} hit its daily quota; trying the next model.`);
+                        break;
+                    }
                     attempt++;
                     const delay = 300 * Math.pow(2, attempt);
                     await new Promise(r => setTimeout(r, delay));
@@ -2582,8 +2643,9 @@ db.serialize(() => {
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS markets (
-        id TEXT PRIMARY KEY, title TEXT, description TEXT, category TEXT, sideA TEXT, sideB TEXT, 
-        oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0,
+        id TEXT PRIMARY KEY, title TEXT, description TEXT, category TEXT, sideA TEXT, sideB TEXT, sideC TEXT,
+        oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, oddsC REAL DEFAULT 1.90,
+        home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0, draw_volume REAL DEFAULT 0,
         league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
         media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
         creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, headline_version INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0, settled_at DATETIME,
@@ -2662,6 +2724,14 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'category', 'TEXT');
     addColumnSafely('markets', 'league', 'TEXT');
     addColumnSafely('markets', 'country', 'TEXT');
+    // Third outcome (Draw) for three-way sports markets. sideC/oddsC hold the
+    // draw label and price; draw_volume tracks the stake backing that side.
+    addColumnSafely('markets', 'sideC', 'TEXT');
+    addColumnSafely('markets', 'oddsC', 'REAL DEFAULT 1.90');
+    addColumnSafely('markets', 'draw_volume', 'REAL DEFAULT 0');
+    // The bookmaker's own 1X2 price, kept as JSON so the odds engine can tilt
+    // its prior back towards the real market after every bet.
+    addColumnSafely('markets', 'odds_anchor', 'TEXT');
     addColumnSafely('markets', 'startTime', 'DATETIME');
     addColumnSafely('markets', 'result', 'TEXT');
     addColumnSafely('markets', 'settled', 'INTEGER DEFAULT 0');
@@ -2791,6 +2861,29 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
     addColumnSafely('bets', 'is_boosted', 'INTEGER DEFAULT 0');
     addColumnSafely('bets', 'transaction_id', 'INTEGER');
     addColumnSafely('bets', 'reference', 'TEXT');
+
+    // Three-way backfill: the sports markets that already exist predate the
+    // draw outcome, so they are given one here. A football fixture is the
+    // only kind that settles on a draw, and the other sports are decided
+    // outright, so only football rows are touched.
+    db.run(
+        `UPDATE markets
+         SET sideC = 'Draw',
+             oddsC = CASE
+               WHEN COALESCE(oddsC, 0) > 1 THEN oddsC
+               ELSE GREATEST(COALESCE(oddsA, 1.90), COALESCE(oddsB, 1.90))
+             END
+         WHERE (id LIKE 'fb\\_%' ESCAPE '\\' OR LOWER(COALESCE(sport, '')) = 'football')
+           AND COALESCE(admin_verified, 0) = 0
+           AND sideA IS NOT NULL AND sideB IS NOT NULL
+           AND sideA NOT IN ('YES', 'NO', 'Home', 'Away', 'Unknown', '')
+           AND sideB NOT IN ('YES', 'NO', 'Home', 'Away', 'Unknown', '')
+           AND (sideC IS NULL OR TRIM(sideC) = '' OR COALESCE(oddsC, 0) <= 1)`,
+        [],
+        (backfillErr) => {
+            if (backfillErr) console.warn('[markets] three-way backfill deferred:', backfillErr.message);
+        }
+    );
     // Avatar bytes live in the database so they survive redeploys (the container
     // filesystem is ephemeral and used to lose every uploaded picture).
     addColumnSafely('users', 'avatar_mime', 'TEXT');
@@ -3024,31 +3117,22 @@ const syncFootballMarkets = async () => {
         // Dates for Today and Tomorrow in YYYY-MM-DD
         const dates = [0, 1].map((daysAhead) => formatNairobiDate(daysAhead));
 
-        const responses = await Promise.all(dates.map((date) => (
-            axios.get('https://v3.football.api-sports.io/fixtures', {
-                params: {
-                    date,
-                    timezone: 'Africa/Nairobi'
-                },
-                headers: {
-                    'x-apisports-key': API_SPORTS_KEY
-                },
+        // The fixture list goes through the shared budget, so the sync waits
+        // its turn instead of being rejected by the provider.
+        const responses = [];
+        for (const date of dates) {
+            const outcome = await footballRequest(API_SPORTS_KEY, 'https://v3.football.api-sports.io/fixtures', {
+                params: { date, timezone: 'Africa/Nairobi' },
                 timeout: 15000
-            }).catch((error) => {
-                console.error(`[football] Fixture request failed for ${date}:`, error.response?.data || error.message);
-                return { data: { response: [], errors: { request: error.message } } };
-            })
-        )));
+            });
+            if (outcome.error) {
+                console.error(`[football] Fixture request failed for ${date}: ${outcome.error}`);
+            }
+            responses.push({ data: Array.isArray(outcome.data) ? outcome.data : [] });
+        }
 
         // API-Football returns data inside 'response'
-        const matches = responses.flatMap((res) => res.data?.response || []);
-        const apiErrors = responses
-            .map((res, index) => ({ date: dates[index], errors: res.data?.errors }))
-            .filter(item => item.errors && Object.keys(item.errors).length > 0);
-
-        if (apiErrors.length > 0) {
-            console.error("⚠️ API-Football Errors:", JSON.stringify(apiErrors));
-        }
+        const matches = responses.flatMap((res) => res.data || []);
 
         if (matches.length === 0) {
             console.log("⚠️ No fixtures returned from API-Football.");
@@ -3056,13 +3140,24 @@ const syncFootballMarkets = async () => {
         }
 
         console.log(`⚽ Syncing ${matches.length} matches...`);
-        await processMatches(matches);
+
+        // Fetch the 1X2 bookmaker prices for the same days. The free tier
+        // allows 10 requests a minute, so this is one request per day and the
+        // result is cached. A failure here must not stop the fixture sync:
+        // the markets fall back to the flat price.
+        const oddsByFixture = new Map();
+        for (const date of dates) {
+            const daily = await fetchFootballOdds(API_SPORTS_KEY, date);
+            for (const [fixtureId, prices] of daily) oddsByFixture.set(fixtureId, prices);
+        }
+
+        await processMatches(matches, oddsByFixture);
 
     } catch (e) {
         console.error("⚽ API-Football Sync Error:", e.response?.data || e.message);
     }
 };
-const processMatches = async (matches) => {
+const processMatches = async (matches, oddsByFixture = new Map()) => {
     if (!matches || matches.length === 0) return;
 
     for (const m of matches) {
@@ -3080,8 +3175,12 @@ const processMatches = async (matches) => {
 
         const category = "sports";
 
+        // The three-way prices: the bookmaker's 1X2 market when it quotes
+        // this fixture, otherwise the flat fallback.
+        const prices = oddsForFixture(oddsByFixture.get(String(m.fixture.id)));
+
         // Determine result once the match is finished.
-        // Football markets settle on HOME vs AWAY (draws are refunded).
+        // Football markets settle on HOME, DRAW or AWAY.
         let result = null;
         if (status === 'closed') {
             const hg = Number(m.goals?.home);
@@ -3094,15 +3193,27 @@ const processMatches = async (matches) => {
         }
 
         await dbRun(
-            `INSERT INTO markets 
-            (id, title, category, sport, sideA, sideB, oddsA, oddsB, startTime, status, league, country, result) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET 
+            `INSERT INTO markets
+            (id, title, category, sport, sideA, sideB, sideC, oddsA, oddsB, oddsC, odds_anchor, startTime, status, league, country, result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             category = excluded.category,
             sport = excluded.sport,
             sideA = excluded.sideA,
             sideB = excluded.sideB,
+            sideC = excluded.sideC,
+            -- The bookmaker price is the market's anchor either way, so it is
+            -- always refreshed. The quoted price only follows it while no
+            -- money is in the pool; once there is stake, the odds engine owns
+            -- the price.
+            odds_anchor = excluded.odds_anchor,
+            oddsA = CASE WHEN COALESCE(markets.home_volume,0) + COALESCE(markets.away_volume,0) + COALESCE(markets.draw_volume,0) = 0
+                         THEN excluded.oddsA ELSE markets.oddsA END,
+            oddsB = CASE WHEN COALESCE(markets.home_volume,0) + COALESCE(markets.away_volume,0) + COALESCE(markets.draw_volume,0) = 0
+                         THEN excluded.oddsB ELSE markets.oddsB END,
+            oddsC = CASE WHEN COALESCE(markets.home_volume,0) + COALESCE(markets.away_volume,0) + COALESCE(markets.draw_volume,0) = 0
+                         THEN excluded.oddsC ELSE markets.oddsC END,
             status = excluded.status,
             startTime = excluded.startTime,
             event_start_time = excluded.startTime,
@@ -3117,8 +3228,11 @@ const processMatches = async (matches) => {
                 'Football',
                 homeTeam,
                 awayTeam,
-                1.90, 
-                1.90, 
+                DEFAULT_DRAW_LABEL,
+                prices.home,
+                prices.away,
+                prices.draw,
+                JSON.stringify({ HOME: prices.home, DRAW: prices.draw, AWAY: prices.away }),
                 m.fixture.date,
                 status,
                 m.league.name || "Football",
@@ -3127,30 +3241,31 @@ const processMatches = async (matches) => {
             ]
         );
 
-        // Auto-settle as soon as outcome is known.
+        // Auto-settle as soon as outcome is known. A draw settles the draw
+        // bets rather than refunding the market, because the market now
+        // offers the draw as a real outcome.
         if (status === 'closed' && result) {
-            if (result === 'DRAW') {
-                await cancelMarket(marketId, 'DRAW');
-            } else {
-                await settleMarket(marketId, result);
-            }
+            await settleMarket(marketId, result);
         }
     }
 
     emitMarkets();
 };
 
+// Sports that can end in a draw get a third outcome. The others (basketball,
+// football, baseball, ...) are decided outright, so offering a draw on them
+// would be a bet nobody can win.
 const SPORTS_SOURCES = [
     { key: 'nba', label: 'NBA', host: 'https://v2.nba.api-sports.io', path: '/games' },
     { key: 'nfl', label: 'NFL', host: 'https://v1.american-football.api-sports.io', path: '/games' },
     { key: 'basketball', label: 'Basketball', host: 'https://v1.basketball.api-sports.io', path: '/games' },
     { key: 'baseball', label: 'Baseball', host: 'https://v1.baseball.api-sports.io', path: '/games' },
-    { key: 'hockey', label: 'Hockey', host: 'https://v1.hockey.api-sports.io', path: '/games' },
+    { key: 'hockey', label: 'Hockey', host: 'https://v1.hockey.api-sports.io', path: '/games', draw: true },
     { key: 'volleyball', label: 'Volleyball', host: 'https://v1.volleyball.api-sports.io', path: '/games' },
     { key: 'rugby', label: 'Rugby', host: 'https://v1.rugby.api-sports.io', path: '/games' },
     { key: 'handball', label: 'Handball', host: 'https://v1.handball.api-sports.io', path: '/games' },
-    { key: 'cricket', label: 'Cricket', host: 'https://v1.cricket.api-sports.io', path: '/matches' },
-    { key: 'tennis', label: 'Tennis', host: 'https://v1.tennis.api-sports.io', path: '/matches' },
+    { key: 'cricket', label: 'Cricket', host: 'https://v1.cricket.api-sports.io', path: '/matches', draw: true },
+    { key: 'tennis', label: 'Tennis', host: 'https://v1.tennis.api-sports.io', path: '/matches', draw: true },
     { key: 'mma', label: 'MMA', host: 'https://v1.mma.api-sports.io', path: '/fights' },
     { key: 'afl', label: 'AFL', host: 'https://v1.afl.api-sports.io', path: '/games' }
 ];
@@ -3432,10 +3547,14 @@ const syncSportsMarkets = async () => {
                 const title = `${homeTeam} vs ${awayTeam}`;
                 const description = `${sport.label} match in ${league}${location ? `, ${location}` : ''}.`;
 
+                // Sports that can be drawn get a third outcome. The rest stay
+                // two-way, because a draw bet on them could never be paid.
+                const supportsDrawOutcome = Boolean(sport.draw);
+
                 await dbRun(
                 `INSERT INTO markets
-                    (id, title, description, content, category, sport, sideA, sideB, oddsA, oddsB, startTime, status, league, country)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.90, 1.90, ?, ?, ?, ?)
+                    (id, title, description, content, category, sport, sideA, sideB, sideC, oddsA, oddsB, oddsC, startTime, status, league, country)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         title = excluded.title,
                         description = excluded.description,
@@ -3444,6 +3563,7 @@ const syncSportsMarkets = async () => {
                         sport = excluded.sport,
                         sideA = excluded.sideA,
                         sideB = excluded.sideB,
+                        sideC = excluded.sideC,
                         startTime = excluded.startTime,
                         event_start_time = excluded.startTime,
                         event_end_time = excluded.startTime + INTERVAL '120 minutes',
@@ -3465,6 +3585,8 @@ const syncSportsMarkets = async () => {
                         sport.label,
                         homeTeam,
                         awayTeam,
+                        supportsDrawOutcome ? DEFAULT_DRAW_LABEL : null,
+                        supportsDrawOutcome ? 1.90 : null,
                         startTime,
                         status,
                         league,
@@ -3687,34 +3809,57 @@ const fixMissingMarketTimes = async () => {
     await dbRun(`UPDATE markets SET startTime = ? WHERE startTime IS NULL AND status IN ('open', 'upcoming', 'live')`, [tomorrow]);
 };
 
+// Re-prices a market from the money in the pool.
+//
+// The prior comes from `odds_anchor` when the market has one: that is the
+// bookmaker's own price, written by the sports sync, so a real market price
+// is not thrown away every time a bet lands. A market without an anchor (a
+// news market) starts from even money.
+//
+// A three-way sports market prices all three of its outcomes from one pool,
+// so the draw is a real alternative rather than a leftover.
 const recalculateOdds = async (marketId) => {
     try {
         const market = await dbGet(
-            `SELECT home_volume, away_volume FROM markets WHERE id=?`,
+            `SELECT home_volume, away_volume, draw_volume, sideC, oddsC, odds_anchor FROM markets WHERE id=?`,
             [marketId]
         );
 
         if (!market) return;
 
-        const total = market.home_volume + market.away_volume;
+        const total = Number(market.home_volume || 0) + Number(market.away_volume || 0) + Number(market.draw_volume || 0);
 
         // Avoid division by zero
         if (total === 0) return;
 
-        // Simple probability-based odds
-        const minLiquidity = 100;
+        const hasDraw = supportsDraw(market);
+        const anchor = parseOddsAnchor(market.odds_anchor);
 
-let oddsA = (total + minLiquidity) / ((market.home_volume || 1) + minLiquidity);
-let oddsB = (total + minLiquidity) / ((market.away_volume || 1) + minLiquidity);
-        // Add house margin (important for profit)
-        const margin = 1.05;
-        oddsA = Number((oddsA * margin).toFixed(2));
-        oddsB = Number((oddsB * margin).toFixed(2));
+        // The prior: the bookmaker's price when there is one, even money
+        // otherwise. A draw that has no prior of its own starts at the same
+        // even money as the other two outcomes.
+        const prior = hasDraw
+            ? { HOME: anchor.HOME || DEFAULT_ANCHOR_ODDS, DRAW: anchor.DRAW || DEFAULT_ANCHOR_ODDS, AWAY: anchor.AWAY || DEFAULT_ANCHOR_ODDS }
+            : { HOME: anchor.HOME || DEFAULT_ANCHOR_ODDS, AWAY: anchor.AWAY || DEFAULT_ANCHOR_ODDS };
 
-        await dbRun(
-            `UPDATE markets SET oddsA=?, oddsB=? WHERE id=?`,
-            [oddsA, oddsB, marketId]
-        );
+        const volumes = hasDraw
+            ? { HOME: Number(market.home_volume || 0), DRAW: Number(market.draw_volume || 0), AWAY: Number(market.away_volume || 0) }
+            : { HOME: Number(market.home_volume || 0), AWAY: Number(market.away_volume || 0) };
+
+        const prices = priceMarket({ prior, volumes });
+        if (!prices) return;
+
+        if (hasDraw) {
+            await dbRun(
+                `UPDATE markets SET oddsA=?, oddsB=?, oddsC=? WHERE id=?`,
+                [prices.HOME, prices.AWAY, prices.DRAW, marketId]
+            );
+        } else {
+            await dbRun(
+                `UPDATE markets SET oddsA=?, oddsB=? WHERE id=?`,
+                [prices.HOME, prices.AWAY, marketId]
+            );
+        }
 
     } catch (e) {
         console.error("Odds calc error:", e.message);
@@ -3780,19 +3925,19 @@ function normalizeSettlementSide(value) {
 function isWinningBetSide(betSide, winningSide, market = {}) {
     const bet = normalizeSettlementSide(betSide);
     const winner = normalizeSettlementSide(winningSide);
-    const sideA = normalizeSettlementSide(market.sideA || 'YES');
-    const sideB = normalizeSettlementSide(market.sideB || 'NO');
 
     if (!bet || !winner) return false;
 
-    if (bet === winner) return true;
+    // Three-way sports markets settle on HOME, DRAW or AWAY. The draw side is
+    // a real outcome there, so it must be matched explicitly: a bet on Draw
+    // wins when the match is drawn and loses otherwise.
+    if (supportsDraw(market)) {
+        return isWinningSide(bet, winner, market);
+    }
 
-    const winnerIsA = winner === sideA || winner === 'HOME' || winner === 'YES';
-    const winnerIsB = winner === sideB || winner === 'AWAY' || winner === 'NO';
-    const betIsA = bet === sideA || bet === 'HOME' || bet === 'YES';
-    const betIsB = bet === sideB || bet === 'AWAY' || bet === 'NO';
-
-    return (winnerIsA && betIsA) || (winnerIsB && betIsB);
+    // A binary market settles on the label its own sides carry, so a news
+    // market's YES/NO and a politics market's LIKELY/UNLIKELY both work.
+    return isWinningBinarySide(bet, winner, market);
 }
 
 const settleMarket = async (marketId, winningSide) => {
@@ -3801,7 +3946,7 @@ const settleMarket = async (marketId, winningSide) => {
     try {
         // ✅ CHECK FIRST
         const market = await dbGet(
-            `SELECT settled, sideA, sideB FROM markets WHERE id=?`,
+            `SELECT settled, sideA, sideB, sideC, oddsC FROM markets WHERE id=?`,
             [marketId]
         );
 
@@ -3816,10 +3961,27 @@ const settleMarket = async (marketId, winningSide) => {
         }
 
         if (normalizeSettlementSide(winningSide) === 'DRAW') {
+            // A market with a draw side treats the draw as a real third
+            // outcome: the draw bets win and the rest lose. A market without
+            // one has no way to express that, so it keeps refunding instead.
+            if (supportsDraw(market)) {
+                return settleMarketBets(marketId, market, 'DRAW');
+            }
             await cancelMarket(marketId, 'DRAW');
             return { success: true, cancelled: true };
         }
 
+        return settleMarketBets(marketId, market, winningSide);
+    } catch (e) {
+        console.error("❌ Market settlement failed:", e.message);
+    }
+};
+
+// Pays the winning bets, marks the rest lost, and closes the market.
+// Shared by every settlement path so a three-way market and a binary market
+// settle through exactly the same code.
+const settleMarketBets = async (marketId, market, winningSide) => {
+    try {
         // 1. Get bets
         const bets = await dbAll(`
             SELECT * FROM bets
@@ -4006,12 +4168,23 @@ const settleBetById = async (betId, winningSide) => {
     if (!bet) throw new Error("Bet not found");
     if (bet.status !== 'active') return { success: true, alreadySettled: true };
 
-    const market = await dbGet(`SELECT sideA, sideB FROM markets WHERE id=?`, [bet.market_id]) || {};
-    const outcome = normalizeSettlementSide(winningSide);
-    if (!outcome) throw new Error("Missing settlement result");
-    if (outcome === 'DRAW' || outcome === 'CANCEL' || outcome === 'CANCELLED') {
-        return cancelBetById(betId, outcome);
+    const market = await dbGet(`SELECT sideA, sideB, sideC, oddsC FROM markets WHERE id=?`, [bet.market_id]) || {};
+    const raw = normalizeSettlementSide(winningSide);
+    if (!raw) throw new Error("Missing settlement result");
+    if (raw === 'CANCEL' || raw === 'CANCELLED') {
+        return cancelBetById(betId, raw);
     }
+    // A draw is a real outcome on three-way sports markets: the draw bet
+    // wins and the home/away bets lose. A market without a draw side has no
+    // outcome to pay, so the stake is refunded instead.
+    if (raw === 'DRAW' && !supportsDraw(market)) {
+        return cancelBetById(betId, raw);
+    }
+
+    // The admin may name the outcome the way the market does (a team name),
+    // so the result is resolved against the market's own outcomes first.
+    const outcome = settlementOutcome(raw, market);
+    if (!outcome) throw new Error(`"${raw}" does not match an outcome on this market.`);
 
     const isWinner = isWinningBetSide(bet.picked, outcome, market);
     const payout = isWinner ? Number((Number(bet.amount || 0) * Number(bet.odds || 1)).toFixed(2)) : 0;
@@ -4171,7 +4344,7 @@ const closeExpiredMarkets = async () => {
 const refreshBoostedMarkets = async () => {
     try {
         const candidates = await dbAll(`
-            SELECT id, home_volume, away_volume, status
+            SELECT id, home_volume, away_volume, draw_volume, status
             FROM markets
             WHERE status IN ('open','upcoming','live') AND settled = 0
         `, []);
@@ -4183,7 +4356,7 @@ const refreshBoostedMarkets = async () => {
         const selectedIds = candidates
             .map(m => ({
                 id: m.id,
-                volume: Number(m.home_volume || 0) + Number(m.away_volume || 0)
+                volume: Number(m.home_volume || 0) + Number(m.away_volume || 0) + Number(m.draw_volume || 0)
             }))
             .sort((a, b) => b.volume - a.volume || Math.random() - 0.5)
             .slice(0, 10)
@@ -4223,9 +4396,15 @@ const settleResolvedMarkets = async () => {
 
 const sendDailyMarkets = () => {
     db.all(`SELECT email FROM users WHERE terms_accepted=1`, [], (err, users) => {
-        db.all(`SELECT title, oddsA, oddsB FROM markets WHERE status='upcoming' LIMIT 5`, [], (err, markets) => {
+        db.all(`SELECT title, sideA, sideB, sideC, oddsA, oddsB, oddsC FROM markets WHERE status='upcoming' LIMIT 5`, [], (err, markets) => {
             if (!markets || markets.length === 0) return;
-            const marketList = markets.map(m => `${m.title} (Yes: ${m.oddsA} | No: ${m.oddsB})`).join('\n');
+            // A sports market quotes three outcomes; everything else quotes two.
+            const marketList = markets.map(m => {
+                if (m.sideC && Number(m.oddsC) > 1) {
+                    return `${m.title} (${m.sideA}: ${m.oddsA} | ${m.sideC}: ${m.oddsC} | ${m.sideB}: ${m.oddsB})`;
+                }
+                return `${m.title} (${m.sideA || 'Yes'}: ${m.oddsA} | ${m.sideB || 'No'}: ${m.oddsB})`;
+            }).join('\n');
             users.forEach(u => {
                 sendPolyMail(u.email, "Today's Hot Markets 🔥", `Check out these live odds:\n\n${marketList}`);
             });
@@ -4399,7 +4578,7 @@ app.get('/api/markets/preview', async (req, res) => {
              ORDER BY
                 CASE WHEN status='live' THEN 0 ELSE 1 END,
                 COALESCE(is_boosted, 0) DESC,
-                COALESCE(home_volume, 0) + COALESCE(away_volume, 0) DESC,
+                COALESCE(home_volume, 0) + COALESCE(away_volume, 0) + COALESCE(draw_volume, 0) DESC,
                 startTime ASC,
                 title ASC`,
             []
@@ -4466,7 +4645,7 @@ const marketsRouteHandler = async (req, res) => {
              ORDER BY
                 CASE WHEN status='live' THEN 0 ELSE 1 END,
                 COALESCE(is_boosted, 0) DESC,
-                COALESCE(home_volume, 0) + COALESCE(away_volume, 0) DESC,
+                COALESCE(home_volume, 0) + COALESCE(away_volume, 0) + COALESCE(draw_volume, 0) DESC,
                 startTime ASC,
                 title ASC`,
             [LIVE_VISIBILITY_MINUTES, ...alias.params]
@@ -4504,18 +4683,23 @@ app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Missing market_id or outcome' });
         }
 
-        const validOutcomes = ['HOME', 'AWAY', 'DRAW', 'YES', 'NO'];
-        if (!validOutcomes.includes(String(outcome).toUpperCase())) {
-            return res.status(400).json({ success: false, message: 'Invalid outcome' });
-        }
-
-        const outcomeUpper = String(outcome).toUpperCase();
         const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [market_id]);
         if (!market) {
             return res.status(404).json({ success: false, message: 'Market not found' });
         }
         if (String(market.status).toUpperCase() !== 'SUSPENDED') {
             return res.status(400).json({ success: false, message: `Market is not suspended (current: ${market.status})` });
+        }
+
+        // The admin may name the winning outcome the way the market does (a
+        // team name), so the result is resolved against the market's own
+        // outcomes rather than matched against a fixed list of keywords.
+        const outcomeUpper = settlementOutcome(outcome, market);
+        if (!outcomeUpper) {
+            return res.status(400).json({
+                success: false,
+                message: `"${outcome}" does not match an outcome on this market.`
+            });
         }
 
         const bets = await dbAll(
@@ -4529,8 +4713,18 @@ app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
         await run('BEGIN');
         try {
             for (const bet of bets) {
-                const isWinner = String(bet.side || '').toUpperCase() === outcomeUpper;
-                if (isWinner) {
+                // Three-way sports markets settle by team name, so the side is
+                // matched against the market's own outcomes rather than with
+                // an exact string comparison. A draw on a market that has no
+                // draw side cannot pay anyone, so those stakes are refunded.
+                const isVoid = isVoidingDraw(outcomeUpper, market);
+                const isWinner = !isVoid && isWinningBetSide(bet.side, outcomeUpper, market);
+                if (isVoid) {
+                    const refund = Number(Number(bet.amount || 0).toFixed(2));
+                    await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [refund, bet.user_phone]);
+                    await run(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE id=?`, [refund, bet.id]);
+                    await run(`UPDATE bets SET status='cancelled' WHERE market_id=? AND user_phone=? AND status='active'`, [market_id, bet.user_phone]);
+                } else if (isWinner) {
                     const payout = Number((Number(bet.amount || 0) * Number(bet.odds || 0)).toFixed(2));
                     await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [payout, bet.user_phone]);
                     await run(`UPDATE transactions SET status='won', settled_amount=? WHERE id=?`, [payout, bet.id]);
@@ -4669,7 +4863,7 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
 
     try {
         const market = await dbGet(
-            `SELECT id, title, sideA, sideB, oddsA, oddsB, home_volume, away_volume, admin_verified
+            `SELECT id, title, sideA, sideB, sideC, oddsA, oddsB, oddsC, home_volume, away_volume, draw_volume, admin_verified
              FROM markets
              WHERE id=?`,
             [marketId]
@@ -4685,17 +4879,31 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
             [marketId]
         );
 
-        const normalizeSide = (value) => {
-            const side = normalizeSettlementSide(value);
-            if (side === normalizeSettlementSide(market.sideA || 'YES') || side === 'YES' || side === 'HOME') return 'YES';
-            if (side === normalizeSettlementSide(market.sideB || 'NO') || side === 'NO' || side === 'AWAY') return 'NO';
-            return side || 'OTHER';
-        };
+        // Bucket each bet onto one of the market's outcomes. A three-way
+        // sports market reports HOME/DRAW/AWAY; every other market keeps the
+        // legacy YES/NO buckets.
         const emptyBook = () => ({ orders: 0, volume: 0, levels: [] });
-        const orderBook = { yes: emptyBook(), no: emptyBook() };
+        const hasDraw = supportsDraw(market);
+        const orderBook = hasDraw
+            ? { home: emptyBook(), draw: emptyBook(), away: emptyBook() }
+            : { yes: emptyBook(), no: emptyBook() };
+
+        const bucketFor = (value) => {
+            const sideKey = resolveSideKey(value, market);
+            if (!sideKey) return null;
+            if (hasDraw) {
+                if (sideKey === 'HOME') return 'home';
+                if (sideKey === 'DRAW') return 'draw';
+                if (sideKey === 'AWAY') return 'away';
+                return null;
+            }
+            if (sideKey === 'HOME') return 'yes';
+            if (sideKey === 'AWAY') return 'no';
+            return null;
+        };
 
         for (const row of rows || []) {
-            const key = normalizeSide(row.side) === 'YES' ? 'yes' : normalizeSide(row.side) === 'NO' ? 'no' : null;
+            const key = bucketFor(row.side);
             if (!key) continue;
             const volume = Number(row.volume || 0);
             const orders = Number(row.orders || 0);
@@ -4715,10 +4923,14 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
                 title: market.title,
                 sideA: market.sideA || 'YES',
                 sideB: market.sideB || 'NO',
+                sideC: hasDraw ? (market.sideC || DEFAULT_DRAW_LABEL) : null,
                 oddsA: Number(market.oddsA || 1.9),
                 oddsB: Number(market.oddsB || 1.9),
+                oddsC: hasDraw ? Number(market.oddsC || 0) : null,
                 homeVolume: Number(market.home_volume || 0),
-                awayVolume: Number(market.away_volume || 0)
+                awayVolume: Number(market.away_volume || 0),
+                drawVolume: Number(market.draw_volume || 0),
+                sides: marketSideKeys(market)
             },
             orderBook
         });
@@ -5552,12 +5764,6 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
     if (!marketId) return res.status(400).json({ success: false, message: "Missing Market ID" });
     if (isNaN(stake) || stake <= 0) return res.status(400).json({ success: false, message: "Invalid amount" });
 
-    const normalizedSide = side?.toUpperCase();
-    let col = '';
-    if (['HOME', 'YES'].includes(normalizedSide)) col = 'home_volume';
-    if (['AWAY', 'NO'].includes(normalizedSide)) col = 'away_volume';
-    if (!col) return res.status(400).json({ success: false, message: "Invalid side" });
-
     const reference = "BET_" + Date.now();
 
     try {
@@ -5568,9 +5774,28 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
             return res.status(400).json({ success: false, message: "This market is closed." });
         }
 
-        const baseOdds = ["HOME", "YES"].includes(normalizedSide) ? market.oddsA : market.oddsB;
+        // Resolve the requested side against the market's own outcomes. The
+        // client may send the canonical key (HOME/DRAW/AWAY), the legacy
+        // binary alias (YES/NO), or the label the user tapped (a team name).
+        const sideKey = resolveSideKey(side, market);
+        if (!sideKey) return res.status(400).json({ success: false, message: "Invalid side" });
+        const col = volumeColumnForSide(sideKey);
+        if (!col) return res.status(400).json({ success: false, message: "Invalid side" });
+        // A draw can only be bet on when the market actually offers it.
+        if (sideKey === 'DRAW' && !supportsDraw(market)) {
+            return res.status(400).json({ success: false, message: "This market does not offer a draw." });
+        }
+
+        const baseOdds = sideOdds(sideKey, market);
+        if (!Number.isFinite(baseOdds) || baseOdds <= 0) {
+            return res.status(400).json({ success: false, message: "This outcome is not available right now." });
+        }
+        // Store the market's own label so the bet history and the order book
+        // show the team the user actually picked.
+        const pickedSide = sideLabel(sideKey, market) || sideKey;
+
         const user = await dbGet(`SELECT is_upgraded, upgrade_expiry FROM users WHERE phone = ?`, [req.user.phone]);
-        
+
         const isElite = user && Number(user.is_upgraded) === 1 && new Date(user.upgrade_expiry || 0) > new Date();
         const isBoostedMarket = Number(market.is_boosted || 0) === 1;
         const boostedOdds = isElite && isBoostedMarket ? Number((baseOdds * 1.10).toFixed(2)) : baseOdds;
@@ -5597,16 +5822,16 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
 
         // Insert transaction log
         const txInsert = await dbRun(`
-            INSERT INTO transactions (user_phone, market_id, amount, type, side, status, odds, reference, is_boosted) 
+            INSERT INTO transactions (user_phone, market_id, amount, type, side, status, odds, reference, is_boosted)
             VALUES (?, ?, ?, 'bet', ?, 'active', ?, ?, ?)
-        `, [req.user.phone, marketId, stake, side, boostedOdds, reference, isBoostedBet]);
+        `, [req.user.phone, marketId, stake, pickedSide, boostedOdds, reference, isBoostedBet]);
         const transactionId = txInsert.lastID;
 
         // Insert actual bet record
         const betInsert = await dbRun(`
             INSERT INTO bets (user_phone, market_id, event, picked, amount, odds, status, category, commence_time, is_boosted, transaction_id, reference)
             VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-        `, [req.user.phone, marketId, market.title, side, stake, boostedOdds, market.category || 'general', market.startTime || null, isBoostedBet, transactionId, reference]);
+        `, [req.user.phone, marketId, market.title, pickedSide, stake, boostedOdds, market.category || 'general', market.startTime || null, isBoostedBet, transactionId, reference]);
 
         const betId = betInsert.lastID;
             await dbRun(`UPDATE transactions SET bet_id=? WHERE id=?`, [betId, transactionId]);
@@ -5998,17 +6223,45 @@ app.get('/api/my-bets', authenticate, (req, res) => {
 });
 // --- ADMIN ROUTES ---
 app.post('/api/admin/update-market', authenticateAdmin, (req, res) => {
-    const { id, title, content, media_url, media_type } = req.body;
-    
+    const { id, title, content, media_url, media_type, sideA, sideB, sideC, oddsA, oddsB, oddsC } = req.body;
+
+    // The outcome labels and prices are only written when the admin supplied
+    // them, so an older admin client that only sends the copy fields does not
+    // wipe a market's sides.
+    const sets = ['title = ?', 'content = ?', 'media_url = ?', 'media_type = ?'];
+    const params = [title, content, media_url || null, media_type || 'auto'];
+
+    const pushText = (column, value) => {
+        if (value === undefined || value === null) return;
+        sets.push(`${column} = ?`);
+        params.push(String(value));
+    };
+    const pushNumber = (column, value) => {
+        if (value === undefined || value === null || value === '') return;
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric) || numeric <= 0) return;
+        sets.push(`${column} = ?`);
+        params.push(numeric);
+    };
+
+    pushText('sideA', sideA);
+    pushText('sideB', sideB);
+    pushText('sideC', sideC);
+    pushNumber('oddsA', oddsA);
+    pushNumber('oddsB', oddsB);
+    pushNumber('oddsC', oddsC);
+
+    params.push(id);
+
     db.run(`
-        UPDATE markets 
-        SET title = ?, content = ?, media_url = ?, media_type = ? 
+        UPDATE markets
+        SET ${sets.join(', ')}
         WHERE id = ?
-    `, [title, content, media_url || null, media_type || 'auto', id], function(err) {
+    `, params, function(err) {
         if (err) return res.status(500).json({ success: false, message: err.message });
-        
-        if (typeof emitMarkets === "function") emitMarkets(); 
-        
+
+        if (typeof emitMarkets === "function") emitMarkets();
+
         res.json({ success: true });
     });
 });
@@ -6111,8 +6364,7 @@ async function settleAllOpenAdminMarkets() {
         try {
             const result = await resolveFootballMarketResult(row.id);
             if (!result) continue;
-            if (result === 'DRAW') await cancelMarket(row.id, 'DRAW');
-            else await settleMarket(row.id, result);
+            await settleMarket(row.id, result);
             footballResolved++;
         } catch (e) {
             console.warn(`Admin settle-all failed for ${row.id}:`, e.message);
@@ -6191,6 +6443,7 @@ app.get('/api/admin/all-active-bets', authenticateAdmin, async (req, res) => {
                 b.status,
                 m.sideA,
                 m.sideB,
+                m.sideC,
                 m.status AS marketStatus,
                 m.result AS marketResult,
                 b.created_at as timestamp
@@ -6754,10 +7007,26 @@ app.post('/api/admin/settle', authenticateAdmin, async (req, res) => {
     }
 
     try {
-        const outcome = result.toUpperCase();
-        const details = outcome === 'CANCEL' || outcome === 'CANCELLED'
-            ? await cancelMarket(marketId, 'ADMIN_CANCELLED')
-            : await settleMarket(marketId, outcome);
+        const raw = String(result).trim();
+        const outcome = raw.toUpperCase();
+        if (outcome === 'CANCEL' || outcome === 'CANCELLED') {
+            const details = await cancelMarket(marketId, 'ADMIN_CANCELLED');
+            return res.json({ success: true, ...details });
+        }
+
+        // The admin may name the winning outcome the way the market does
+        // (a team name, or the market's own label), so the result is resolved
+        // against the market's own outcomes before it is settled.
+        const market = await dbGet(`SELECT sideA, sideB, sideC, oddsC FROM markets WHERE id=?`, [marketId]);
+        const outcomeKey = market ? settlementOutcome(raw, market) : null;
+        if (!outcomeKey) {
+            return res.status(400).json({
+                success: false,
+                message: `"${raw}" does not match an outcome on this market.`
+            });
+        }
+
+        const details = await settleMarket(marketId, outcomeKey);
         res.json({ success: true, ...details });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message || "Settlement failed" });
@@ -6782,18 +7051,23 @@ app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Missing market_id or outcome' });
         }
 
-        const validOutcomes = ['HOME', 'AWAY', 'DRAW', 'YES', 'NO'];
-        if (!validOutcomes.includes(String(outcome).toUpperCase())) {
-            return res.status(400).json({ success: false, message: 'Invalid outcome' });
-        }
-
-        const outcomeUpper = String(outcome).toUpperCase();
         const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [marketId]);
         if (!market) {
             return res.status(404).json({ success: false, message: 'Market not found' });
         }
         if (market.status !== 'SUSPENDED') {
             return res.status(400).json({ success: false, message: `Market is not suspended (current: ${market.status})` });
+        }
+
+        // The admin may name the winning outcome the way the market does (a
+        // team name), so the result is resolved against the market's own
+        // outcomes rather than matched against a fixed list of keywords.
+        const outcomeUpper = settlementOutcome(outcome, market);
+        if (!outcomeUpper) {
+            return res.status(400).json({
+                success: false,
+                message: `"${outcome}" does not match an outcome on this market.`
+            });
         }
 
         const bets = await dbAll(
@@ -6807,8 +7081,18 @@ app.post('/api/admin/manual-settle', authenticateAdmin, async (req, res) => {
         await run('BEGIN');
         try {
             for (const bet of bets) {
-                const isWinner = String(bet.side || '').toUpperCase() === outcomeUpper;
-                if (isWinner) {
+                // Three-way sports markets settle by team name, so the side is
+                // matched against the market's own outcomes rather than with
+                // an exact string comparison. A draw on a market that has no
+                // draw side cannot pay anyone, so those stakes are refunded.
+                const isVoid = isVoidingDraw(outcomeUpper, market);
+                const isWinner = !isVoid && isWinningBetSide(bet.side, outcomeUpper, market);
+                if (isVoid) {
+                    const refund = Number(Number(bet.amount || 0).toFixed(2));
+                    await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [refund, bet.user_phone]);
+                    await run(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE id=?`, [refund, bet.id]);
+                    await run(`UPDATE bets SET status='cancelled' WHERE market_id=? AND user_phone=? AND status='active'`, [marketId, bet.user_phone]);
+                } else if (isWinner) {
                     const payout = Number((Number(bet.amount || 0) * Number(bet.odds || 0)).toFixed(2));
                     await run(`UPDATE users SET balance = balance + ? WHERE phone=?`, [payout, bet.user_phone]);
                     await run(`UPDATE transactions SET status='won', settled_amount=? WHERE id=?`, [payout, bet.id]);
@@ -6925,12 +7209,15 @@ async function resolveFootballMarketResult(marketId) {
     if (!fixtureId) return null;
     if (!API_SPORTS_KEY) return null;
 
-    const resp = await axios.get('https://v3.football.api-sports.io/fixtures', {
+    // The result lookup shares the process-wide budget with the match
+    // details, so a settlement sweep can never spend the day's allowance.
+    const outcome = await footballRequest(API_SPORTS_KEY, 'https://v3.football.api-sports.io/fixtures', {
         params: { id: fixtureId, timezone: 'Africa/Nairobi' },
-        headers: { 'x-apisports-key': API_SPORTS_KEY }
+        timeout: 15000
     });
+    if (outcome.error || !Array.isArray(outcome.data)) return null;
 
-    const fixture = resp.data?.response?.[0];
+    const fixture = outcome.data[0];
     if (!fixture) return null;
 
     const status = normalizeStatus(fixture.fixture?.status?.short);
@@ -6959,8 +7246,7 @@ async function settleFootballBacklog() {
         try {
             const result = await resolveFootballMarketResult(row.id);
             if (!result) continue;
-            if (result === 'DRAW') await cancelMarket(row.id, 'DRAW');
-            else await settleMarket(row.id, result);
+            await settleMarket(row.id, result);
             resolved++;
         } catch (e) {
             console.warn(`Football backlog resolve failed for ${row.id}:`, e.message);
@@ -7026,13 +7312,11 @@ async function runSuspendedMarketSettlement() {
         }
         if (!result) continue; // fixture not finished yet; stays suspended for next run
         try {
-            if (result === 'DRAW') {
-                const d = await cancelMarket(marketId, 'DRAW');
-                summary.cancelled += (d && d.cancelledBets) || 0;
-            } else {
-                const d = await settleMarket(marketId, result);
-                summary.settled += (d && d.settledBets) || 0;
-            }
+            // A market that offers a draw settles the draw bets; one that
+            // does not still refunds, which settleMarket handles internally.
+            const d = await settleMarket(marketId, result);
+            if (d && d.cancelled) summary.cancelled += (d.cancelledBets) || 0;
+            else summary.settled += (d && d.settledBets) || 0;
         } catch (e) {
             console.error("[settlement worker] settlement failed for", marketId, e.message);
             summary.skipped++;
@@ -7090,8 +7374,7 @@ app.post('/api/admin/settle-backlog', authenticateAdmin, async (req, res) => {
             try {
                 const result = await resolveFootballMarketResult(row.id);
                 if (!result) continue;
-                if (result === 'DRAW') await cancelMarket(row.id, 'DRAW');
-                else await settleMarket(row.id, result);
+                await settleMarket(row.id, result);
                 resolved++;
             } catch (e) {
                 console.warn(`Football backlog resolve failed for ${row.id}:`, e.message);
@@ -7147,7 +7430,7 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
                 const expiry = new Date(user.upgrade_expiry);
                 const days = Math.ceil((expiry - new Date()) / (1000 * 60 * 60 * 24));
                 const boostedMarkets = await dbAll(`
-                    SELECT id, title, category, oddsA, oddsB, status, home_volume, away_volume, is_boosted
+                    SELECT id, title, category, sideA, sideB, sideC, oddsA, oddsB, oddsC, status, home_volume, away_volume, draw_volume, is_boosted
                     FROM markets
                     WHERE is_boosted = 1 AND status IN ('open','upcoming','live')
                       AND (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL})
@@ -7279,7 +7562,9 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
         res.json({ success: true, market: normalizeMarketRow(updatedMarket) });
     } catch (e) {
         console.error('[admin] unverified market edit failed:', e.message);
-        res.status(e.message?.includes('GOOGLE_API_KEY') ? 503 : 400).json({ success: false, message: e.message?.includes('GOOGLE_API_KEY') ? 'Headline verification is unavailable because Gemini is not configured.' : `Market was not saved: ${e.message}` });
+        const geminiUnconfigured = e.message?.includes('GEMINI_API_KEY is not configured.')
+            || e.message?.includes('GOOGLE_API_KEY is not configured.');
+        res.status(geminiUnconfigured ? 503 : 400).json({ success: false, message: geminiUnconfigured ? 'Headline verification is unavailable because Gemini is not configured.' : `Market was not saved: ${e.message}` });
     }
 });
 
@@ -7484,6 +7769,9 @@ io.on('connection', (socket) => {
 // Backend: server.js
 // server.js
 const footballMatchDetailsCache = new Map();
+// The starting XI and the match statistics do not change once they are
+// published, so they are kept far longer than the live score.
+const footballFixtureDataCache = new FixtureDataCache();
 app.get('/api/football/details/:id', async (req, res) => {
     try {
         const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
@@ -7492,22 +7780,29 @@ app.get('/api/football/details/:id', async (req, res) => {
         if (cached && cached.expiresAt > Date.now()) return res.json(cached.data);
         const apiKey = API_SPORTS_KEY;
         if (!apiKey) return res.status(503).json({ error: 'Sports API key is not configured' });
-        const config = { headers: { 'x-apisports-key': apiKey }, timeout: 12000 };
-        const request = async (label, url) => {
-            try {
-                const response = await axios.get(url, config);
-                return { data: response.data?.response || [], error: hasApiErrors(response.data) ? `${label} data is unavailable from the provider.` : null };
-            } catch (error) {
-                console.warn(`[football details] ${label} request failed for fixture ${fixtureId}:`, error.response?.data || error.message);
-                return { data: [], error: `${label} data is temporarily unavailable.` };
+
+        // Every call goes through the shared budget, so a burst of visitors
+        // cannot spend the day's allowance in a few minutes.
+        const request = async (label, url, params, kind) => {
+            if (kind) {
+                const stored = footballFixtureDataCache.get(fixtureId, kind);
+                if (stored) return { data: stored, error: null };
             }
+            const outcome = await footballRequest(apiKey, url, { params });
+            if (outcome.error) {
+                console.warn(`[football details] ${label} request failed for fixture ${fixtureId}:`, outcome.error);
+                return { data: [], error: outcome.error };
+            }
+            if (kind) footballFixtureDataCache.set(fixtureId, kind, outcome.data);
+            return { data: outcome.data, error: null };
         };
+
         const [fixtureResult, statsResult, lineupsResult, eventsResult, predictionsResult] = await Promise.all([
-            request('Fixture', `https://v3.football.api-sports.io/fixtures?id=${fixtureId}&timezone=Africa%2FNairobi`),
-            request('Statistics', `https://v3.football.api-sports.io/fixtures/statistics?fixture=${fixtureId}`),
-            request('Lineups', `https://v3.football.api-sports.io/fixtures/lineups?fixture=${fixtureId}`),
-            request('Events', `https://v3.football.api-sports.io/fixtures/events?fixture=${fixtureId}`),
-            request('Predictions', `https://v3.football.api-sports.io/predictions?fixture=${fixtureId}`)
+            request('Fixture', 'https://v3.football.api-sports.io/fixtures', { id: fixtureId, timezone: 'Africa/Nairobi' }),
+            request('Statistics', 'https://v3.football.api-sports.io/fixtures/statistics', { fixture: fixtureId }, 'stats'),
+            request('Lineups', 'https://v3.football.api-sports.io/fixtures/lineups', { fixture: fixtureId }, 'lineups'),
+            request('Events', 'https://v3.football.api-sports.io/fixtures/events', { fixture: fixtureId }),
+            request('Predictions', 'https://v3.football.api-sports.io/predictions', { fixture: fixtureId })
         ]);
         const fixture = fixtureResult.data[0] || null;
         const lineupsData = lineupsResult.data;

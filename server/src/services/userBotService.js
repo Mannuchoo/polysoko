@@ -3,13 +3,26 @@ import OpenAI from 'openai';
 // Groq retired the previous Llama default for developer-tier projects in
 // August 2026. Keep this on a currently supported model unless overridden.
 const DEFAULT_MODEL = 'openai/gpt-oss-120b';
-const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+// The Gemini free tier allows only 20 requests per day per model, so a single
+// model runs dry after a couple of dozen chats. Every model in this chain
+// carries its own daily quota, which multiplies the budget the bot can serve.
+const DEFAULT_GEMINI_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash'
+];
+const REQUEST_TIMEOUT_MS = 25000;
 let groqClient;
 let geminiClient;
+// Models whose daily quota is spent stay skipped for the life of the process,
+// so one request discovers them instead of every request paying for the 429.
+const exhaustedGeminiModels = new Set();
 function getGroqClient() {
   const apiKey = String(process.env.GROQ_API_KEY || '').trim();
   if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
-  if (!groqClient) groqClient = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' });
+  if (!groqClient) groqClient = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1', maxRetries: 0 });
   return groqClient;
 }
 function getGeminiClient() {
@@ -18,10 +31,29 @@ function getGeminiClient() {
   if (!geminiClient) {
     geminiClient = new OpenAI({
       apiKey,
-      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      maxRetries: 0
     });
   }
   return geminiClient;
+}
+function hasGroqKey() {
+  return Boolean(String(process.env.GROQ_API_KEY || '').trim());
+}
+function hasGeminiKey() {
+  return Boolean(String(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim());
+}
+// A daily free-tier quota error means the model stays unusable until the quota
+// resets. A short-window rate limit is a different problem and is not fatal.
+function isDailyQuotaError(error) {
+  if (Number(error?.status) !== 429) return false;
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('quota exceeded') || message.includes('exceeded your current quota') || message.includes('free_tier');
+}
+function geminiModelChain() {
+  const configured = String(process.env.GEMINI_CHAT_MODEL || '').trim();
+  const models = [...new Set(configured ? [configured, ...DEFAULT_GEMINI_MODELS] : DEFAULT_GEMINI_MODELS)];
+  return models.filter(model => !exhaustedGeminiModels.has(model));
 }
 const MARKET_VISIBILITY = `
   status IN ('open', 'upcoming', 'live') AND COALESCE(settled, 0)=0
@@ -38,24 +70,46 @@ const YES_PRICE_SQL = `CASE
       THEN COALESCE(oddsA,0)/(oddsA+oddsB)
     ELSE NULL
   END`;
-const MARKET_FIELDS = `id, title, category, sideA, sideB, oddsA, oddsB,
-  COALESCE(home_volume,0) + COALESCE(away_volume,0) AS volume,
-  ${YES_PRICE_SQL} AS yes_price`;
+// A three-way sports market quotes three outcomes, so its "Yes price" is the
+// favourite's share of the implied probability across all three.
+const THREE_WAY_PRICE_SQL = `CASE
+    WHEN COALESCE(sideC,'') <> '' AND COALESCE(oddsC,0) > 1
+      AND COALESCE(oddsA,0) + COALESCE(oddsB,0) + COALESCE(oddsC,0) > 0
+      THEN GREATEST(
+        COALESCE(oddsA,0) * COALESCE(oddsB,0),
+        COALESCE(oddsA,0) * COALESCE(oddsC,0),
+        COALESCE(oddsB,0) * COALESCE(oddsC,0)
+      ) / (COALESCE(oddsA,0) * COALESCE(oddsB,0)
+         + COALESCE(oddsA,0) * COALESCE(oddsC,0)
+         + COALESCE(oddsB,0) * COALESCE(oddsC,0))
+    ELSE NULL
+  END`;
+const MARKET_FIELDS = `id, title, category, sideA, sideB, sideC, oddsA, oddsB, oddsC,
+  COALESCE(home_volume,0) + COALESCE(away_volume,0) + COALESCE(draw_volume,0) AS volume,
+  ${YES_PRICE_SQL} AS yes_price,
+  ${THREE_WAY_PRICE_SQL} AS three_way_price`;
+
+// A market is priced by whichever model applies to it: binary markets report
+// their Yes price, three-way sports markets report their favourite's share.
+const priceFor = row => (row.three_way_price != null ? Number(row.three_way_price) : (row.yes_price == null ? null : Number(row.yes_price)));
 
 export async function getHighRiskMarkets(dbAll) {
   if (typeof dbAll !== 'function') throw new Error('Market database reader is required.');
-  return (await dbAll(`SELECT ${MARKET_FIELDS} FROM markets WHERE ${MARKET_VISIBILITY}
-    AND ((${YES_PRICE_SQL}) <= 0.20 OR (${YES_PRICE_SQL}) >= 0.80)
-    ORDER BY volume DESC, timestamp DESC LIMIT 12`)).map(row => ({ ...row, yes_price: Number(row.yes_price), volume: Number(row.volume) }));
+  const rows = await dbAll(`SELECT ${MARKET_FIELDS} FROM markets WHERE ${MARKET_VISIBILITY}
+    AND ((${YES_PRICE_SQL}) <= 0.20 OR (${YES_PRICE_SQL}) >= 0.80
+         OR (${THREE_WAY_PRICE_SQL}) <= 0.20 OR (${THREE_WAY_PRICE_SQL}) >= 0.80)
+    ORDER BY volume DESC, timestamp DESC LIMIT 12`);
+  return rows.map(row => ({ ...row, yes_price: priceFor(row), volume: Number(row.volume) }));
 }
 
 export async function getTrendingMarkets(dbAll) {
   if (typeof dbAll !== 'function') throw new Error('Market database reader is required.');
-  return (await dbAll(`SELECT ${MARKET_FIELDS} FROM markets WHERE ${MARKET_VISIBILITY}
-    ORDER BY volume DESC, timestamp DESC LIMIT 12`)).map(row => ({
-      ...row,
-      yes_price: row.yes_price == null ? null : Number(row.yes_price),
-      volume: Number(row.volume)
+  const rows = await dbAll(`SELECT ${MARKET_FIELDS} FROM markets WHERE ${MARKET_VISIBILITY}
+    ORDER BY volume DESC, timestamp DESC LIMIT 12`);
+  return rows.map(row => ({
+    ...row,
+    yes_price: priceFor(row),
+    volume: Number(row.volume)
   }));
 }
 
@@ -87,7 +141,7 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
         tool_choice: 'auto',
         temperature: 0.3,
         max_tokens: 600
-      }, { timeout: 25000 });
+      }, { timeout: REQUEST_TIMEOUT_MS });
       const choice = payload.choices?.[0];
       if (!choice?.message) throw new Error(`${provider} returned an empty chat response.`);
       providerMessages.push(choice.message);
@@ -108,27 +162,54 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
   };
 
   let groqError;
-  try {
-    return await runProvider({
-      client: getGroqClient(),
-      model: String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim(),
-      provider: 'Groq'
-    });
-  } catch (error) {
-    groqError = error;
-    console.warn('[sokobot] Groq unavailable; trying Gemini fallback:', error.message);
+  if (hasGroqKey()) {
+    try {
+      return await runProvider({
+        client: getGroqClient(),
+        model: String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim(),
+        provider: 'Groq'
+      });
+    } catch (error) {
+      groqError = error;
+      console.warn('[sokobot] Groq unavailable; trying Gemini fallback:', error.message);
+    }
+  } else {
+    groqError = new Error('GROQ_API_KEY is not configured.');
   }
 
-  try {
-    return await runProvider({
-      client: getGeminiClient(),
-      model: String(process.env.GEMINI_CHAT_MODEL || DEFAULT_GEMINI_MODEL).trim(),
-      provider: 'Gemini'
-    });
-  } catch (geminiError) {
-    console.error('[sokobot] Gemini fallback failed:', geminiError.message);
+  if (!hasGeminiKey()) {
     const error = new Error('Both Groq and Gemini chat providers are unavailable.');
-    error.cause = { groq: groqError, gemini: geminiError };
+    error.cause = { groq: groqError, gemini: new Error('Gemini chat fallback is not configured.') };
     throw error;
   }
+
+  const client = getGeminiClient();
+  const chain = geminiModelChain();
+  if (!chain.length) {
+    const error = new Error('Both Groq and Gemini chat providers are unavailable.');
+    error.cause = { groq: groqError, gemini: new Error('Every configured Gemini model has exhausted its daily quota.') };
+    throw error;
+  }
+
+  let lastGeminiError;
+  for (const model of chain) {
+    try {
+      return await runProvider({ client, model, provider: 'Gemini' });
+    } catch (error) {
+      lastGeminiError = error;
+      if (isDailyQuotaError(error)) {
+        // The quota resets daily, so stop using this model for the rest of
+        // this process and let the next model in the chain serve the request.
+        exhaustedGeminiModels.add(model);
+        console.warn(`[sokobot] Gemini model ${model} hit its daily quota; trying the next model.`);
+        continue;
+      }
+      console.warn(`[sokobot] Gemini model ${model} failed; trying the next model:`, error.message);
+    }
+  }
+
+  console.error('[sokobot] Gemini fallback failed:', lastGeminiError?.message);
+  const error = new Error('Both Groq and Gemini chat providers are unavailable.');
+  error.cause = { groq: groqError, gemini: lastGeminiError };
+  throw error;
 }
