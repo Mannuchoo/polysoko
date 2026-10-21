@@ -8,6 +8,11 @@ import { fetchFootballOdds, oddsForFixture } from './src/services/footballOdds.j
 import { FixtureDataCache, footballRequest } from './src/services/footballApiClient.js';
 import { priceMarket } from './src/services/oddsEngine.js';
 import {
+    THREE_WAY_BACKFILL_SQL,
+    THREE_WAY_COLUMNS,
+    THREE_WAY_READY_SQL
+} from './src/services/threeWayMigration.js';
+import {
     DEFAULT_DRAW_LABEL,
     isVoidingDraw,
     isWinningBinarySide,
@@ -265,6 +270,38 @@ app.use((req, res, next) => {
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self), payment=(self)');
     if (req.method === 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) setNoStoreHeaders(res);
+    next();
+});
+
+// The three-way columns (sideC/oddsC/draw_volume/odds_anchor) have to exist
+// before a request reads them by name, or /api/markets fails outright. They
+// are added by ensureThreeWayColumns() on boot.
+//
+// This gate holds the API requests until that migration has landed, so the
+// very first request after a deploy cannot land in the gap. It is deliberately
+// NOT awaited before the socket is bound: Railway rejects a deployment that
+// does not accept connections within its startup window, and the migration
+// needs the same connection pool the boot statements are already using.
+//
+// The gate resolves on the first failure too, so a database that is slow or
+// unreachable can never wedge the API: the request fails on its own database
+// error instead of hanging.
+//
+// The health probe is exempt. It has to answer while the migration is still
+// running, because Railway's healthcheck is what decides whether the deploy
+// succeeded, and it does not read the markets table.
+let threeWayColumnsReady = null;
+const awaitThreeWayColumns = () => {
+    if (!threeWayColumnsReady) {
+        threeWayColumnsReady = ensureThreeWayColumns().catch(err => {
+            console.error('Pre-listen three-way column migration failed:', err.message);
+        });
+    }
+    return threeWayColumnsReady;
+};
+app.use('/api', async (req, res, next) => {
+    if (req.path === '/health') return next();
+    await awaitThreeWayColumns();
     next();
 });
 // Cloudinary cloud names are public identifiers required by unsigned browser uploads;
@@ -639,6 +676,53 @@ function createPostgresCompatDb(connectionString) {
         return result.rows;
     };
 
+    // PostgreSQL folds unquoted camelCase identifiers to lower case, so a
+    // column declared `sideA` is stored as `sidea` and comes back from `pg`
+    // as `sidea`. The application was written against the camelCase names,
+    // so every row needs the folded key aliased back to the name the code
+    // reads.
+    //
+    // Without this, `market.oddsA` is undefined on a raw `SELECT *`, and
+    // /api/place-bet rejected every bet with "This outcome is not available
+    // right now." The same fold broke the settlement paths, which read
+    // market.sideA / market.sideB.
+    //
+    // The alias is applied to every row of every result, so it works no
+    // matter which columns the statement selected, and it is keyed on the
+    // folded name so it cannot collide with a real lowercase column: a table
+    // with both `sidea` and `sideA` cannot exist, because Postgres would
+    // have folded them onto the same column.
+    const CAMEL_CASE_COLUMNS = {
+        sidea: 'sideA',
+        sideb: 'sideB',
+        sidec: 'sideC',
+        oddsa: 'oddsA',
+        oddsb: 'oddsB',
+        oddsc: 'oddsC',
+        starttime: 'startTime',
+        createdat: 'createdAt',
+        updatedat: 'updatedAt'
+    };
+
+    const withCamelCaseColumns = (result) => {
+        if (!result || !Array.isArray(result.rows) || result.rows.length === 0) return result;
+        return {
+            ...result,
+            rows: result.rows.map((row) => {
+                if (!row || typeof row !== 'object') return row;
+                for (const [folded, camel] of Object.entries(CAMEL_CASE_COLUMNS)) {
+                    if (Object.prototype.hasOwnProperty.call(row, folded)) {
+                        // The camelCase name wins if the statement aliased it
+                        // explicitly; otherwise the folded column is exposed
+                        // under the name the application reads.
+                        if (row[camel] === undefined) row[camel] = row[folded];
+                    }
+                }
+                return row;
+            })
+        };
+    };
+
     // Transactions are scoped per async context instead of sharing one
     // module-level client. With a single shared client, one task's BEGIN pinned
     // the connection for *every* concurrent task, and a single failed statement
@@ -710,8 +794,8 @@ function createPostgresCompatDb(connectionString) {
         // ROLLBACK from the caller). Doing it here as well would race with that
         // path and release the connection twice.
         const tx = currentTx();
-        if (tx) return await (await tx.pending).query(text, params);
-        return await pool.query(text, params);
+        if (tx) return withCamelCaseColumns(await (await tx.pending).query(text, params));
+        return withCamelCaseColumns(await pool.query(text, params));
     };
 
     // Seeding AND clearing the transaction store must happen in the caller's
@@ -1093,12 +1177,32 @@ const withTransaction = (fn) => {
 
 async function ensureDbColumn(tableName, columnName, definition) {
     const columns = await dbAll(`PRAGMA table_info(${tableName})`);
-    if (columns.some(col => col.name === columnName)) return;
+    // PostgreSQL folds unquoted identifiers to lower case, so a column added
+    // as `sideC` is reported as `sidec`. The comparison has to ignore case
+    // or the column is re-added on every boot.
+    if (columns.some(col => String(col.name).toLowerCase() === String(columnName).toLowerCase())) return;
     try {
         await dbRun(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition.replace(/,$/, '')}`);
     } catch (e) {
         // Postgres raises 42701 ("column ... already exists"); SQLite says "duplicate column name".
         if (e.code !== '42701' && !/duplicate column|already exists/i.test(e.message || '')) throw e;
+    }
+}
+
+// Adds a column, creating the table first if it does not exist yet.
+//
+// The boot migration creates the tables, but its statements are dispatched
+// concurrently (db.serialize() is a no-op on PostgreSQL), so a column can be
+// added before the CREATE TABLE that it belongs to has run. On a fresh
+// database that is a "relation markets does not exist" error, which would
+// leave the table without the column.
+async function ensureDbColumnWithTable(tableName, createSql, columnName, definition) {
+    try {
+        await ensureDbColumn(tableName, columnName, definition);
+    } catch (e) {
+        if (!/does not exist|doesn't exist|no such table/i.test(e.message || '')) throw e;
+        await dbRun(createSql);
+        await ensureDbColumn(tableName, columnName, definition);
     }
 }
 
@@ -2607,6 +2711,26 @@ function verificationUrl(token) {
     return url.toString();
 }
 
+// The markets table, in one place. The boot migration creates it, and the
+// three-way migration uses it as a fallback for a database that does not have
+// the table yet. Keeping a single copy means the two cannot drift apart.
+//
+// sideC/oddsC/draw_volume are the three-way (Home / Draw / Away) columns.
+// oddsC deliberately has no default: a default would be written into every
+// existing row by ADD COLUMN, so a market that has never had a draw price
+// would look like it already had one, and the backfill could not tell
+// "unset" from "set".
+const CREATE_MARKETS_TABLE = `CREATE TABLE IF NOT EXISTS markets (
+        id TEXT PRIMARY KEY, title TEXT, description TEXT, category TEXT, sideA TEXT, sideB TEXT, sideC TEXT,
+        oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, oddsC REAL,
+        home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0, draw_volume REAL DEFAULT 0,
+        league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
+        media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
+        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, headline_version INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0, settled_at DATETIME,
+        url TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
+    )`;
+
 function passwordResetUrl(token, otp) {
     const url = new URL('/reset.password.html', PUBLIC_SITE_URL);
     url.searchParams.set('token', token);
@@ -2642,16 +2766,7 @@ db.serialize(() => {
         settled_amount REAL, odds REAL, bet_id INTEGER, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS markets (
-        id TEXT PRIMARY KEY, title TEXT, description TEXT, category TEXT, sideA TEXT, sideB TEXT, sideC TEXT,
-        oddsA REAL DEFAULT 1.90, oddsB REAL DEFAULT 1.90, oddsC REAL DEFAULT 1.90,
-        home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0, draw_volume REAL DEFAULT 0,
-        league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
-        media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
-        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, headline_version INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0, settled_at DATETIME,
-        url TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
-    )`);
+    db.run(CREATE_MARKETS_TABLE);
 db.run(`CREATE TABLE IF NOT EXISTS password_resets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT,
@@ -2698,40 +2813,74 @@ CREATE TABLE IF NOT EXISTS user_devices (
     db.run(`CREATE INDEX IF NOT EXISTS idx_markets_settle ON markets(status, settled, startTime)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_markets_category ON markets(category, sport, status)`);
 
+// Adds a column if the table has it missing.
+//
+// The boot migration dispatches its statements concurrently (db.serialize() is
+// a no-op on PostgreSQL), so this can run before the CREATE TABLE that owns
+// the table has landed. The ALTER then fails with "relation X does not
+// exist", and the column is never added: the feature that needs it stays
+// broken for the life of the database. When that happens the ALTER waits for
+// the table to appear and tries again.
+//
+// A column that already exists is not an error either: the CREATE TABLE may
+// declare the same column, and it may land between the check and the ALTER.
+// How many times a missing-column ALTER is retried while the boot migration
+// catches up, and how long to wait between attempts.
+const ADD_COLUMN_RETRIES = 10;
+const ADD_COLUMN_RETRY_DELAY_MS = 300;
+
 const addColumnSafely = (tableName, columnName, definition, callback) => {
-    db.all(`PRAGMA table_info(${tableName})`, (err, columns) => {
-        if (err || !columns) return;
-
-        const exists = columns.some(col => String(col.name).toLowerCase() === String(columnName).toLowerCase());
-        
-        if (!exists) {
-            const cleanDef = definition.replace(/,$/, '');
-            const sql = `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${cleanDef}`;
-
-            console.log("🧪 Running:", sql);
-
-            db.run(sql, (err) => {
-                if (err) console.error("❌ ALTER ERROR:", err.message);
+    const attempt = (retriesLeft) => {
+        db.all(`PRAGMA table_info(${tableName})`, (err, columns) => {
+            if (err || !columns) {
                 if (callback) callback();
-            });
-        } else {
-            if (callback) callback();
-        }
-    });
+                return;
+            }
+
+            const exists = columns.some(col => String(col.name).toLowerCase() === String(columnName).toLowerCase());
+
+            if (!exists) {
+                const cleanDef = definition.replace(/,$/, '');
+                const sql = `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${cleanDef}`;
+
+                if (retriesLeft === ADD_COLUMN_RETRIES) console.log("🧪 Running:", sql);
+
+                db.run(sql, (err) => {
+                    if (err) {
+                        const alreadyThere = err.code === '42701' || /already exists|duplicate column/i.test(err.message || '');
+                        const tableMissing = err.code === '42P01' || /does not exist|doesn't exist|no such table/i.test(err.message || '');
+                        if (alreadyThere) {
+                            // The column is there. Nothing to do.
+                        } else if (tableMissing && retriesLeft > 0) {
+                            // The table has not been created yet. Wait for it
+                            // and try again, so the column is not lost.
+                            setTimeout(() => attempt(retriesLeft - 1), ADD_COLUMN_RETRY_DELAY_MS);
+                            return;
+                        } else if (!tableMissing) {
+                            console.error("❌ ALTER ERROR:", err.message);
+                        } else {
+                            console.error(`❌ ALTER ERROR: ${err.message} (gave up after ${ADD_COLUMN_RETRIES} retries)`);
+                        }
+                    }
+                    if (callback) callback();
+                });
+            } else {
+                if (callback) callback();
+            }
+        });
+    };
+    attempt(ADD_COLUMN_RETRIES);
 };
    
     addColumnSafely('users', 'crypto_balance', 'REAL DEFAULT 0');
     addColumnSafely('markets', 'category', 'TEXT');
     addColumnSafely('markets', 'league', 'TEXT');
     addColumnSafely('markets', 'country', 'TEXT');
-    // Third outcome (Draw) for three-way sports markets. sideC/oddsC hold the
-    // draw label and price; draw_volume tracks the stake backing that side.
-    addColumnSafely('markets', 'sideC', 'TEXT');
-    addColumnSafely('markets', 'oddsC', 'REAL DEFAULT 1.90');
-    addColumnSafely('markets', 'draw_volume', 'REAL DEFAULT 0');
-    // The bookmaker's own 1X2 price, kept as JSON so the odds engine can tilt
-    // its prior back towards the real market after every bet.
-    addColumnSafely('markets', 'odds_anchor', 'TEXT');
+    // The three-way columns (sideC/oddsC/draw_volume/odds_anchor) are added
+    // by ensureThreeWayColumns() before the server starts accepting traffic,
+    // not here. This block does not run its statements in order (db.serialize()
+    // is a no-op on PostgreSQL), and the request path reads these columns by
+    // name, so they have to be in place before the first request is served.
     addColumnSafely('markets', 'startTime', 'DATETIME');
     addColumnSafely('markets', 'result', 'TEXT');
     addColumnSafely('markets', 'settled', 'INTEGER DEFAULT 0');
@@ -2773,13 +2922,25 @@ addColumnSafely('password_resets', 'otp', 'TEXT');
     // reset-password query throw "value is out of range for type integer".
     // That surfaced as "could not create reset request" / "link invalid" and
     // looked like passwords "reset" on deploy. Widen to BIGINT (int8).
-    // NOTE: this block runs inside db.serialize() (non-async), so no await —
-    // the compat layer queues the statement like every other migration here.
-    db.run(`ALTER TABLE password_resets ALTER COLUMN expires TYPE BIGINT USING expires::bigint`, (alterErr) => {
-        if (alterErr && !/already|exists|bigint|duplicate/i.test(alterErr.message || '')) {
-            console.warn('[schema] could not widen password_resets.expires to BIGINT:', alterErr.message);
-        }
-    });
+    //
+    // The boot block dispatches its statements concurrently, so this can run
+    // before the password_resets table exists. The widening is retried until
+    // the table lands, because an int4 `expires` column breaks password
+    // resets entirely.
+    const widenExpires = (retriesLeft) => {
+        db.run(`ALTER TABLE password_resets ALTER COLUMN expires TYPE BIGINT USING expires::bigint`, (alterErr) => {
+            if (!alterErr) return;
+            const tableMissing = alterErr.code === '42P01' || /does not exist|doesn't exist|no such table/i.test(alterErr.message || '');
+            if (tableMissing && retriesLeft > 0) {
+                setTimeout(() => widenExpires(retriesLeft - 1), ADD_COLUMN_RETRY_DELAY_MS);
+                return;
+            }
+            if (!/already|exists|bigint|duplicate/i.test(alterErr.message || '')) {
+                console.warn('[schema] could not widen password_resets.expires to BIGINT:', alterErr.message);
+            }
+        });
+    };
+    widenExpires(ADD_COLUMN_RETRIES);
     
     // Activity logs table
     db.run(`CREATE TABLE IF NOT EXISTS activity_logs (
@@ -2862,28 +3023,14 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
     addColumnSafely('bets', 'transaction_id', 'INTEGER');
     addColumnSafely('bets', 'reference', 'TEXT');
 
-    // Three-way backfill: the sports markets that already exist predate the
-    // draw outcome, so they are given one here. A football fixture is the
-    // only kind that settles on a draw, and the other sports are decided
-    // outright, so only football rows are touched.
-    db.run(
-        `UPDATE markets
-         SET sideC = 'Draw',
-             oddsC = CASE
-               WHEN COALESCE(oddsC, 0) > 1 THEN oddsC
-               ELSE GREATEST(COALESCE(oddsA, 1.90), COALESCE(oddsB, 1.90))
-             END
-         WHERE (id LIKE 'fb\\_%' ESCAPE '\\' OR LOWER(COALESCE(sport, '')) = 'football')
-           AND COALESCE(admin_verified, 0) = 0
-           AND sideA IS NOT NULL AND sideB IS NOT NULL
-           AND sideA NOT IN ('YES', 'NO', 'Home', 'Away', 'Unknown', '')
-           AND sideB NOT IN ('YES', 'NO', 'Home', 'Away', 'Unknown', '')
-           AND (sideC IS NULL OR TRIM(sideC) = '' OR COALESCE(oddsC, 0) <= 1)`,
-        [],
-        (backfillErr) => {
-            if (backfillErr) console.warn('[markets] three-way backfill deferred:', backfillErr.message);
-        }
-    );
+    // The three-way columns and their backfill live in
+    // ensureThreeWayMarkets() below. They have to run in order (the columns
+    // first, then the backfill that writes to them), and this block does not
+    // run its statements in order: db.serialize() is a no-op on PostgreSQL, so
+    // everything here is dispatched concurrently. A backfill dispatched from
+    // here would reach PostgreSQL before the ALTER TABLE that creates the
+    // columns it writes to.
+
     // Avatar bytes live in the database so they survive redeploys (the container
     // filesystem is ephemeral and used to lose every uploaded picture).
     addColumnSafely('users', 'avatar_mime', 'TEXT');
@@ -2898,7 +3045,9 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
     // `admin_phone` lets admin login survive a host that does not define
-    // ADMIN_PHONE. Added separately so existing databases are upgraded in place.
+    // ADMIN_PHONE. The CREATE TABLE above already declares it, so it is not
+    // added again here: on an existing database the column is already
+    // present, and on a fresh one the CREATE TABLE has just created it.
     addColumnSafely('admin_settings', 'admin_phone', 'TEXT');
     // Guarantee the singleton row exists; the CHECK (id = 1) constraint means an
     // UPDATE against a missing row is a silent no-op.
@@ -3286,6 +3435,44 @@ function contentFieldValue(content, field) {
     return match ? match[1].trim() : '';
 }
 
+// Brings the three-way (Home / Draw / Away) sports markets up to date.
+//
+// The four columns are added first and the backfill runs only once they all
+// exist. The order matters: the boot migration block above dispatches its
+// statements concurrently (db.serialize() is a no-op on PostgreSQL), so a
+// backfill dispatched from there would reach PostgreSQL before the ALTER
+// TABLE that creates the columns it writes to, and would fail with
+// "column sidec does not exist". The error was swallowed by a warning, so the
+// backfill simply never ran and every football market kept its two-way shape.
+
+// Adds the four three-way columns. Idempotent, and safe to call twice: the
+// second call finds them already there and does nothing.
+//
+// The column list and the types come from the shared migration module, so the
+// boot migration and the standalone production migration script create exactly
+// the same columns.
+async function ensureThreeWayColumns() {
+    for (const [column, definition] of THREE_WAY_COLUMNS) {
+        await ensureDbColumnWithTable('markets', CREATE_MARKETS_TABLE, column, definition);
+    }
+}
+
+// Gives every existing football fixture a draw side and a draw price.
+//
+// The sports markets that already exist predate the draw outcome, so they
+// are given one here. A football fixture is the only kind that settles on a
+// draw, and the other sports are decided outright, so only football rows are
+// touched. The backfill only writes to sideC and oddsC, both of which start
+// empty, so it cannot change an existing price, status, result or volume.
+async function ensureThreeWayMarkets() {
+    // The columns have to exist before the statement below can write to them.
+    await ensureThreeWayColumns();
+
+    const result = await dbRun(THREE_WAY_BACKFILL_SQL);
+    const ready = await dbGet(THREE_WAY_READY_SQL);
+    console.log(`[markets] three-way backfill updated ${result.changes} row(s); ${ready.n} football market(s) offer a draw.`);
+}
+
 async function repairSportsMarketMetadata() {
     await ensureDbColumn('markets', 'sport', 'TEXT');
 
@@ -3586,6 +3773,8 @@ const syncSportsMarkets = async () => {
                         homeTeam,
                         awayTeam,
                         supportsDrawOutcome ? DEFAULT_DRAW_LABEL : null,
+                        1.90,
+                        1.90,
                         supportsDrawOutcome ? 1.90 : null,
                         startTime,
                         status,
@@ -4769,9 +4958,9 @@ app.get('/api/admin/pending-settlements', authenticateAdmin, async (req, res) =>
         }
 
         const rows = await dbAll(
-            `SELECT id, category, title, sport, home_team, away_team, api_event_id, status, result, createdAt, updatedAt
+            `SELECT id, category, title, sport, sideA, sideB, sideC, oddsA, oddsB, oddsC, status, result, timestamp
              FROM markets ${where}
-             ORDER BY createdAt ASC`,
+             ORDER BY timestamp ASC`,
             []
         );
 
@@ -8292,17 +8481,40 @@ const startServer = async () => {
     // prevent the API from coming up. Failures are logged and retried on the
     // next deploy rather than crashing the service.
     const runStartupRepairs = async () => {
+        // The order matters. The sports-metadata repair is what classifies a
+        // row as a football fixture, and the three-way backfill works from
+        // that classification. Running the backfill first would leave the rows
+        // the repair is about to reclassify without a draw side, and they
+        // would keep their two-way shape until the next deploy.
         try {
             await repairSportsMarketMetadata();
         } catch (err) {
             console.error('Startup schema repair failed (serving anyway):', err.message);
         }
+        try {
+            await ensureThreeWayMarkets();
+        } catch (err) {
+            console.error('Startup three-way migration failed (serving anyway):', err.message);
+        }
     };
 
-    server.listen(PORT, '0.0.0.0', async () => {
-        console.log(`🚀 Terminal Online on Port ${PORT}`);
-        // Socket is already accepting connections; safe to touch the DB now.
-        runStartupRepairs();
+    // The three-way columns have to exist before a request reads them by name
+    // (/api/markets does a SELECT * plus a COALESCE on draw_volume), so the
+    // migration is started here and the API gate in awaitThreeWayColumns
+    // holds the requests until it has landed.
+    //
+    // It is started, not awaited, so the socket can be bound immediately: the
+    // migration shares the connection pool with the boot statements, so
+    // awaiting it before listen() delayed the socket by several seconds and
+    // risked a Railway startup timeout.
+    const startThreeWayColumns = () => {
+        awaitThreeWayColumns();
+    };
+
+    // Starts the background workers. Called once the startup repairs have
+    // finished, because the football and sports syncs write to the three-way
+    // columns the migration adds.
+    const startBackgroundJobs = () => {
         // Proves every deploy reads the SAME database and surfaces the two
         // most common "it broke on deploy" states: wrong/empty DB (looks
         // like passwords were reset) and a suspended admin account.
@@ -8353,6 +8565,22 @@ const startServer = async () => {
             console.log('SKIP_STARTUP_SYNC enabled; background market sync is disabled for this run.');
         }
         runSafely('forceVerifyLegacyUsers', forceVerifyLegacyUsers);
+    };
+
+    // Start the three-way column migration, then bind the socket straight
+    // away. The API gate holds the requests until the migration has landed.
+    startThreeWayColumns();
+
+    server.listen(PORT, '0.0.0.0', async () => {
+        console.log(`🚀 Terminal Online on Port ${PORT}`);
+        // Socket is already accepting connections; safe to touch the DB now.
+        // Awaited: the football and sports syncs write to the three-way
+        // columns, so they must not start before the migration has added them.
+        // The socket is already open, so awaiting here cannot stop the API
+        // from serving requests.
+        runStartupRepairs().then(() => {
+            startBackgroundJobs();
+        });
         if (process.env.EXIT_AFTER_STARTUP === '1' || process.env.EXIT_AFTER_STARTUP === 'true') {
             console.log('EXIT_AFTER_STARTUP set — exiting process so you can run in VS Code.');
             setTimeout(() => process.exit(0), 250);
