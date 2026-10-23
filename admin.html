@@ -2313,12 +2313,57 @@ async function editUnverifiedMarket(marketId) {
     const form = document.createElement('div');
     form.dataset.marketEdit = 'true';
     form.style.cssText = 'display:grid;gap:8px;margin-top:12px;padding:12px;background:#08090b;border-radius:8px;';
-    const field = (label, value, key, type='text') => `<label style="color:#aaa;font-size:.8rem;">${label}<input data-key="${key}" type="${type}" value="${esc(value || '')}" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:9px;background:#15171b;border:1px solid #444;color:white;border-radius:6px;"></label>`;
+    const field = (label, value, key, type='text') => {
+        const safeValue = esc(value || '');
+        const control = type === 'textarea'
+            ? `<textarea data-key="${key}" rows="${key === 'title' ? 2 : 4}" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:9px;background:#15171b;border:1px solid #444;color:white;border-radius:6px;resize:vertical;">${safeValue}</textarea>`
+            : `<input data-key="${key}" type="${type}" value="${safeValue}" style="display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:9px;background:#15171b;border:1px solid #444;color:white;border-radius:6px;">`;
+        return `<label style="color:#aaa;font-size:.8rem;">${label}${control}</label>`;
+    };
     const deadline = m.event_end_time || m.startTime || '';
     const deadlineInput = deadline && Number.isFinite(new Date(deadline).getTime()) ? new Date(deadline).toISOString().slice(0, 16) : '';
-    form.innerHTML = field('Title shown to users', m.title, 'title') + field('Description / resolution criteria', m.description, 'description') + field('Category', m.category, 'category') + field('Side A label', m.sideA || 'YES', 'sideA') + field('Side B label', m.sideB || 'NO', 'sideB') + field('Exact deadline', deadlineInput, 'deadline', 'datetime-local') + field('Image URL', m.image_url || (m.media_type !== 'video' ? m.media_url : ''), 'imageUrl') + field('Video URL', m.video_url || (m.media_type === 'video' ? m.media_url : ''), 'videoUrl') + '<div data-save-message role="status" style="font-size:.85rem;"></div><div style="display:flex;gap:8px;"><button type="button" class="btn-primary" data-save style="flex:1;">Save changes</button><button type="button" class="btn-no" data-cancel>Cancel</button></div>';
+    form.innerHTML = field('Title shown to users', m.title, 'title', 'textarea') + field('Description / resolution criteria', m.description, 'description', 'textarea') + field('Category', m.category, 'category') + field('Side A label', m.sideA || 'YES', 'sideA') + field('Side B label', m.sideB || 'NO', 'sideB') + field('Exact deadline', deadlineInput, 'deadline', 'datetime-local') + field('Image URL', m.image_url || (m.media_type !== 'video' ? m.media_url : ''), 'imageUrl') + field('Video URL', m.video_url || (m.media_type === 'video' ? m.media_url : ''), 'videoUrl') + '<div data-save-message role="status" style="font-size:.85rem;"></div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="btn-primary" data-suggest style="flex:1;">Suggest with Groq</button><button type="button" class="btn-primary" data-save style="flex:1;">Save my wording</button><button type="button" class="btn-no" data-cancel>Cancel</button></div>';
+    if (Number(m.admin_edited || 0) === 1) {
+        const suggestButton = form.querySelector('[data-suggest]');
+        suggestButton.disabled = true;
+        suggestButton.textContent = 'Groq suggestions locked';
+        suggestButton.title = 'A superadmin has already saved this market; its wording is protected.';
+    }
     card.appendChild(form);
     form.querySelector('[data-cancel]').onclick = () => form.remove();
+    form.querySelector('[data-suggest]').onclick = async () => {
+        const suggestButton = form.querySelector('[data-suggest]');
+        const saveButton = form.querySelector('[data-save]');
+        const message = form.querySelector('[data-save-message]');
+        const payload = { marketId, sourceContext };
+        form.querySelectorAll('[data-key]').forEach(el => payload[el.dataset.key] = el.value.trim());
+        if (!payload.title) payload.title = m.title || '';
+        if (!payload.deadline) {
+            message.textContent = 'Enter an exact future deadline before requesting a suggestion.';
+            message.style.color = '#ffb454';
+            return;
+        }
+        try {
+            payload.deadline = new Date(payload.deadline).toISOString();
+            suggestButton.disabled = true;
+            saveButton.disabled = true;
+            suggestButton.textContent = 'Groq is suggesting…';
+            message.textContent = '';
+            const result = await API.post('/admin/suggest-unverified-market', payload);
+            if (!result?.success || !result.suggestion) throw new Error(result?.message || 'Groq could not suggest an edit.');
+            form.querySelector('[data-key="title"]').value = result.suggestion.title || payload.title;
+            form.querySelector('[data-key="description"]').value = result.suggestion.description || payload.description || '';
+            message.textContent = 'Groq suggestion added to the editable fields. Review or change it, then choose “Save my wording.”';
+            message.style.color = '#91caff';
+        } catch (error) {
+            message.textContent = error.message || 'Groq could not suggest an edit.';
+            message.style.color = '#ff8080';
+        } finally {
+            suggestButton.disabled = Number(m.admin_edited || 0) === 1;
+            saveButton.disabled = false;
+            suggestButton.textContent = Number(m.admin_edited || 0) === 1 ? 'Groq suggestions locked' : 'Suggest with Groq';
+        }
+    };
     form.querySelector('[data-save]').onclick = async () => {
         const payload = { marketId };
         form.querySelectorAll('[data-key]').forEach(el => payload[el.dataset.key] = el.value.trim());
@@ -2332,9 +2377,8 @@ async function editUnverifiedMarket(marketId) {
         try {
             payload.deadline = new Date(payload.deadline).toISOString();
             saveButton.disabled = true;
-            saveButton.textContent = 'Groq is reviewing…';
+            saveButton.textContent = 'Saving your wording…';
             message.textContent = '';
-            payload.sourceContext = sourceContext;
             const saved = await API.post('/admin/edit-unverified-market', payload);
             if (!saved?.success || !saved.market) throw new Error(saved?.message || 'Could not save edits.');
             const updated = saved.market;
@@ -2366,9 +2410,13 @@ async function editUnverifiedMarket(marketId) {
                 link.style.cssText = 'display:inline-block;margin-top:10px;color:#91caff;';
                 mediaPreview.appendChild(link);
             }
-            message.textContent = 'Groq reviewed the edits and the saved market was reloaded from the database.';
+            message.textContent = 'Your exact wording was saved and reloaded from the database.';
             message.style.color = '#00e887';
             saveButton.textContent = 'Saved';
+            const suggestButton = form.querySelector('[data-suggest]');
+            suggestButton.disabled = true;
+            suggestButton.textContent = 'Groq suggestions locked';
+            suggestButton.title = 'This saved market is protected from AI title rewrites.';
         } catch (error) {
             message.textContent = error.message || 'Could not save edits.';
             message.style.color = /deadline|date|future|passed/i.test(message.textContent) ? '#ffb454' : '#ff8080';

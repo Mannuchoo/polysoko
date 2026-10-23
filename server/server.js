@@ -1635,6 +1635,21 @@ function classifyNewsArticle(title, content = '') {
     return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: NEWS_MARKET_LIFETIME_HOURS, prefix: 'news' };
 }
 
+function isCompletedNewsEvent(title, content = '') {
+    const text = `${title || ''} ${content || ''}`.replace(/\s+/g, ' ').trim();
+    const completedResultPatterns = [
+        /\b(?:official\s+)?(?:election\s+)?results?\s+(?:have\s+been\s+|were\s+|are\s+)?(?:officially\s+)?(?:announced|confirmed|declared|released|published)\b/i,
+        /\bconfirms?\b.{0,100}\b(?:winner|won|victory|elected)\b/i,
+        /\b(?:winner|champion|victor)\s+(?:has\s+been\s+|was\s+|is\s+)?(?:officially\s+)?(?:announced|confirmed|declared|revealed)\b/i,
+        /\b(?:has|have)\s+won\s+(?:the\s+)?(?:election|vote|referendum|race|match|final|title|award|ballon\s+d'or|ballon\s+d’or)\b/i,
+        /\b(?:wins|won)\s+(?:the\s+)?(?:election|vote|referendum|race|match|final|title|award|ballon\s+d'or|ballon\s+d’or)\b/i,
+        /\b(?:was|were)\s+(?:elected|declared\s+the\s+winner|crowned\s+(?:the\s+)?(?:champion|winner))\b/i,
+        /\b(?:election|vote|referendum|match|final|ceremony|awards?)\s+(?:was|were)\s+(?:held|conducted|played|staged|completed)\s+(?:yesterday|earlier|last\s+(?:night|week|month|year)|on\s+\d{1,2}\b)/i,
+        /\b(?:held|conducted|played|staged|took\s+place|concluded|ended)\s+(?:yesterday|earlier\s+today|last\s+(?:night|week|month|year))\b/i
+    ];
+    return completedResultPatterns.some(pattern => pattern.test(text));
+}
+
 async function normalizeNewsArticle(article) {
     const rawHeadline = String(article?.title || '').replace(/\s+-\s+[^-]+$/, '').replace(/\s+/g, ' ').trim();
     if (!rawHeadline || rawHeadline === '[Removed]') return null;
@@ -1648,9 +1663,17 @@ async function normalizeNewsArticle(article) {
     const country = article.marketCountry || article.country || sourceName || 'GLOBAL';
     const marketTopic = article.marketTopic || (SPORTS_NEWS_PATTERN.test(`${rawHeadline} ${content}`) ? 'sports news' : classification.category);
     const hash = crypto.createHash('md5').update(`${rawHeadline}|${sourceName || ''}|${publishedAt}`).digest('hex');
-    const expiresAt = new Date(Date.now() + classification.expiryHours * 60 * 60 * 1000).toISOString();
     const id = `${classification.prefix}_${hash}`;
-    const existing = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime) > NOW()`, [id]);
+    if (isCompletedNewsEvent(rawHeadline, content)) {
+        // A newly published recap can describe an event that is already decided.
+        // Hide a stale generated copy if one exists, while preserving admin edits.
+        await dbRun(`UPDATE markets SET status='draft', admin_verified=0 WHERE id=? AND COALESCE(admin_edited,0)=0`, [id]);
+        return null;
+    }
+    const existing = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND (COALESCE(admin_edited,0)=1 OR COALESCE(event_end_time,startTime) > NOW())`, [id]);
+    if (existing && Number(existing.admin_edited || 0) === 1) {
+        return { ...normalizeMarketRow(existing), _persisted: true };
+    }
     const existingDeadline = Date.parse(existing?.event_end_time || existing?.eventEndTime || existing?.startTime || existing?.starttime || '');
     if (existing && Number(existing.headline_version || 0) >= 2 && existingDeadline > Date.now() + 48 * 60 * 60 * 1000) {
         return { ...normalizeMarketRow(existing), _persisted: true };
@@ -1666,7 +1689,6 @@ async function normalizeNewsArticle(article) {
         marketTopic,
         country,
         source: sourceName,
-        requiredDeadline: expiresAt,
         media_url: article.urlToImage || article.image || article.media_url || null,
         imageUrl: article.urlToImage || article.image || article.media_url || null,
         videoUrl: article.videoUrl || article.video_url || null
@@ -1721,7 +1743,8 @@ async function saveNewsMarket(market) {
             ai_headline_generated=1,
             headline_version=2,
             admin_verified=0,
-            timestamp=CURRENT_TIMESTAMP`,
+            timestamp=CURRENT_TIMESTAMP
+         WHERE COALESCE(markets.admin_edited,0)=0`,
         [market.id, market.title, market.description, market.content, market.media_url, market.media_type, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time || new Date().toISOString(), market.event_end_time || market.startTime, market.status, market.url, market.image_url || null, market.video_url || null, 1]
     );
 }
@@ -2006,7 +2029,8 @@ async function syncTmdbMarkets() {
                 const idSource = `${endpoint.path}_${item.id || title}`;
                 const hash = crypto.createHash('md5').update(idSource).digest('hex');
                 const marketId = `tmdb_${endpoint.categorySuffix}_${hash}`;
-                const existing = await dbGet(`SELECT id, event_end_time, startTime FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [marketId]);
+                const existing = await dbGet(`SELECT id, event_end_time, startTime, admin_edited FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND (COALESCE(admin_edited,0)=1 OR COALESCE(event_end_time,startTime)>NOW())`, [marketId]);
+                if (Number(existing?.admin_edited || 0) === 1) continue;
                 const existingDeadline = Date.parse(existing?.event_end_time || existing?.startTime || '');
                 if (existing && existingDeadline > Date.now() + 48 * 60 * 60 * 1000) continue;
                 const listName = endpoint.path.replace(/^\//, '').replace(/\//g, ' ');
@@ -2049,7 +2073,7 @@ async function syncTmdbMarkets() {
                     url: item.homepage || detailUrl
                 };
 
-                await dbRun(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, ai_headline_generated) VALUES (?, ?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, category=excluded.category, country=excluded.country, sideA=excluded.sideA, sideB=excluded.sideB, startTime=excluded.startTime, event_start_time=excluded.event_start_time, event_end_time=excluded.event_end_time, status='draft', url=excluded.url, ai_headline_generated=1, admin_verified=0, timestamp=CURRENT_TIMESTAMP`,
+                await dbRun(`INSERT INTO markets (id, title, description, content, media_url, media_type, category, country, sideA, sideB, startTime, event_start_time, event_end_time, status, url, ai_headline_generated) VALUES (?, ?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description, content=excluded.content, media_url=excluded.media_url, media_type=excluded.media_type, category=excluded.category, country=excluded.country, sideA=excluded.sideA, sideB=excluded.sideB, startTime=excluded.startTime, event_start_time=excluded.event_start_time, event_end_time=excluded.event_end_time, status='draft', url=excluded.url, ai_headline_generated=1, admin_verified=0, timestamp=CURRENT_TIMESTAMP WHERE COALESCE(markets.admin_edited,0)=0`,
                     [market.id, market.title, market.description, market.content, market.media_url, market.category, market.country, market.sideA, market.sideB, market.startTime, market.event_start_time, market.event_end_time, market.status, market.url]);
             }
         }
@@ -2462,7 +2486,7 @@ const CREATE_MARKETS_TABLE = `CREATE TABLE IF NOT EXISTS markets (
         home_volume REAL DEFAULT 0, away_volume REAL DEFAULT 0, draw_volume REAL DEFAULT 0,
         league TEXT, country TEXT, sport TEXT, startTime DATETIME, event_start_time DATETIME, event_end_time DATETIME, result TEXT, settled INTEGER DEFAULT 0,
         media_url TEXT, media_type TEXT, image_url TEXT, video_url TEXT, content TEXT,
-        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, headline_version INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0, settled_at DATETIME,
+        creator TEXT, ai_generated INTEGER DEFAULT 0, ai_headline_generated INTEGER DEFAULT 0, headline_version INTEGER DEFAULT 0, admin_verified INTEGER DEFAULT 0, admin_edited INTEGER DEFAULT 0, settled_at DATETIME,
         url TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, status TEXT DEFAULT 'open'
     )`;
@@ -3051,7 +3075,7 @@ const processMatches = async (matches, oddsByFixture = new Map()) => {
             (id, title, category, sport, sideA, sideB, sideC, oddsA, oddsB, oddsC, odds_anchor, startTime, status, league, country, result)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-            title = excluded.title,
+            title = CASE WHEN COALESCE(markets.admin_edited,0)=1 THEN markets.title ELSE excluded.title END,
             category = excluded.category,
             sport = excluded.sport,
             sideA = excluded.sideA,
@@ -3160,6 +3184,7 @@ async function ensureThreeWayColumns() {
     for (const [column, definition] of THREE_WAY_COLUMNS) {
         await ensureDbColumnWithTable('markets', CREATE_MARKETS_TABLE, column, definition);
     }
+    await ensureDbColumnWithTable('markets', CREATE_MARKETS_TABLE, 'admin_edited', 'INTEGER DEFAULT 0');
 }
 
 // Gives every existing football fixture a draw side and a draw price.
@@ -3448,7 +3473,7 @@ const syncSportsMarkets = async () => {
                     (id, title, description, content, category, sport, sideA, sideB, sideC, oddsA, oddsB, oddsC, startTime, status, league, country)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                        title = excluded.title,
+                        title = CASE WHEN COALESCE(markets.admin_edited,0)=1 THEN markets.title ELSE excluded.title END,
                         description = excluded.description,
                         content = excluded.content,
                         category = excluded.category,
@@ -3604,7 +3629,8 @@ const syncSportsMarkets = async () => {
                     };
                     const eventType = String(m.id).split('_').pop();
                     const deadlineAt = new Date(`${forecast.date}T23:59:59.999Z`).toISOString();
-                    const existing = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [m.id]);
+                    const existing = await dbGet(`SELECT id, admin_edited FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND (COALESCE(admin_edited,0)=1 OR COALESCE(event_end_time,startTime)>NOW())`, [m.id]);
+                    if (Number(existing?.admin_edited || 0) === 1) continue;
                     if (existing) continue;
                     let generated;
                     try {
@@ -3626,7 +3652,8 @@ const syncSportsMarkets = async () => {
                             status='draft',
                             ai_headline_generated=1,
                             admin_verified=0,
-                            timestamp=CURRENT_TIMESTAMP`,
+                            timestamp=CURRENT_TIMESTAMP
+                         WHERE COALESCE(markets.admin_edited,0)=0`,
                         [
                             m.id, 
                             generated.title,
@@ -4406,7 +4433,8 @@ const syncAllMarkets = async () => {
 
         for (const coin of coins) {
             const marketId = `crypto_${coin.id}_${marketDate}`;
-            const existing = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [marketId]);
+            const existing = await dbGet(`SELECT id, admin_edited FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND (COALESCE(admin_edited,0)=1 OR COALESCE(event_end_time,startTime)>NOW())`, [marketId]);
+            if (Number(existing?.admin_edited || 0) === 1) continue;
             if (existing) continue;
             const targetPrice = `$${(coin.current_price * 1.02).toFixed(2)}`;
             const body = `${coin.name} is trading at $${coin.current_price?.toLocaleString()}. 24h change: ${Number(coin.price_change_percentage_24h || 0).toFixed(2)}%. Market action: reach or exceed ${targetPrice}. Resolution source: CoinGecko USD spot price at the exact deadline.`;
@@ -4439,7 +4467,8 @@ const syncAllMarkets = async () => {
                     image_url=excluded.image_url,
                     ai_headline_generated=1,
                     admin_verified=0,
-                    timestamp=CURRENT_TIMESTAMP`,
+                    timestamp=CURRENT_TIMESTAMP
+                 WHERE COALESCE(markets.admin_edited,0)=0`,
                 [
                     marketId,
                     generated.title,
@@ -6283,6 +6312,7 @@ app.post('/api/admin/update-market', authenticateAdmin, async (req, res) => {
     pushNumber('oddsB', oddsB);
     pushNumber('oddsC', oddsC);
 
+    sets.push('admin_edited = 1');
     params.push(id);
     try {
         const result = await dbRun(`UPDATE markets SET ${sets.join(', ')} WHERE id = ?`, params);
@@ -7552,47 +7582,64 @@ app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticat
     }
 });
 
-app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res) => {
-    const { marketId, title, description, sourceContext, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
-    if (!marketId || !String(title || '').trim()) return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
+app.post('/api/admin/suggest-unverified-market', authenticateAdmin, async (req, res) => {
+    const { marketId, title, description, sourceContext, category, deadline, imageUrl, videoUrl } = req.body || {};
+    if (!marketId) return res.status(400).json({ success: false, message: 'Market ID is required.' });
     try {
         const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });
+        if (Number(market.admin_edited || 0) === 1) {
+            return res.status(409).json({ success: false, message: 'This market has been edited by a superadmin. Groq suggestions are locked; edit the fields directly and save.' });
+        }
+        const due = new Date(deadline || market.event_end_time || market.startTime);
+        if (!Number.isFinite(due.getTime())) return res.status(400).json({ success: false, message: 'Enter a valid exact deadline before requesting a suggestion.' });
+        if (due.getTime() <= Date.now()) return res.status(400).json({ success: false, message: 'This deadline has passed. Choose a future date and time.' });
+        const generated = await generateMarketFromNews({
+            title: String(title || market.title || '').trim(),
+            body: [String(description || '').trim(), String(sourceContext || '').trim()].filter(Boolean).join('\n\n').slice(0, 10000) || String(title || market.title || '').trim(),
+            marketTopic: category || market.category || 'market',
+            requiredDeadline: due.toISOString(),
+            imageUrl: imageUrl ? String(imageUrl).trim() : null,
+            videoUrl: videoUrl ? String(videoUrl).trim() : null
+        });
+        return res.json({
+            success: true,
+            provider: 'groq',
+            suggestion: { title: generated.title, description: generated.resolutionCriteria, marketHeader: generated.marketHeader }
+        });
+    } catch (e) {
+        console.error('[admin] Groq market suggestion failed:', e.message);
+        const groqUnconfigured = e.message?.includes('GROQ_API_KEY is not configured.');
+        return res.status(groqUnconfigured ? 503 : 400).json({ success: false, message: groqUnconfigured ? 'Market suggestions are unavailable because Groq is not configured.' : `Groq could not suggest an edit: ${e.message}` });
+    }
+});
+
+app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res) => {
+    const { marketId, title, description, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
+    const savedTitle = String(title || '').trim();
+    if (!marketId || !savedTitle) return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
+    try {
+        const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
+        if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });
+        const due = new Date(deadline);
+        if (!deadline || !Number.isFinite(due.getTime())) return res.status(400).json({ success: false, message: 'Enter a valid exact deadline before saving.' });
+        if (due.getTime() <= Date.now()) return res.status(400).json({ success: false, message: 'This deadline has passed. Choose a future date and time, then save again.' });
         const cleanImage = imageUrl ? String(imageUrl).trim() : null;
         const cleanVideo = videoUrl ? String(videoUrl).trim() : null;
-        if (!deadline) return res.status(400).json({ success: false, message: 'Enter a future deadline before saving.' });
-        const due = new Date(deadline);
-        if (!Number.isFinite(due.getTime())) return res.status(400).json({ success: false, message: 'Enter a valid date and time.' });
-        if (due.getTime() <= Date.now()) return res.status(400).json({ success: false, message: 'This deadline has passed. Choose a future date and time, then save again.' });
-        const generated = await generateMarketFromNews({
-            title: String(title).trim(),
-            body: [String(description || '').trim(), String(sourceContext || '').trim()].filter(Boolean).join('\n\n').slice(0, 10000) || String(title).trim(),
-            requiredDeadline: due.toISOString(),
-            imageUrl: cleanImage,
-            videoUrl: cleanVideo
-        });
-        const finalImage = generated.imageUrl;
-        const finalVideo = generated.videoUrl;
-        const mediaUrl = finalVideo || finalImage;
-        const mediaType = finalVideo ? 'video' : (finalImage ? 'image' : null);
-        const content = `Action/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nDeadline: ${generated.deadlineAt}\nResolution: ${generated.resolutionCriteria}`;
         const updateResult = await dbRun(
-            `UPDATE markets SET title=?, description=?, content=?, category=?, event_end_time=?, startTime=?, media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=?, ai_headline_generated=1, headline_version=2, status='draft' WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`,
-            [generated.title, generated.resolutionCriteria, content, category || 'general', generated.deadlineAt, generated.deadlineAt, mediaUrl, mediaType, finalImage, finalVideo, sideA || 'YES', sideB || 'NO', marketId]
+            `UPDATE markets SET title=?, description=?, category=?, event_end_time=?, startTime=?, media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=?, ai_headline_generated=1, headline_version=2, admin_edited=1, status='draft' WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`,
+            [savedTitle, String(description || '').trim(), category || market.category || 'general', due.toISOString(), due.toISOString(), cleanVideo || cleanImage, cleanVideo ? 'video' : (cleanImage ? 'image' : null), cleanImage, cleanVideo, String(sideA || market.sideA || 'YES').trim(), String(sideB || market.sideB || 'NO').trim(), marketId]
         );
-        if (!updateResult?.changes) {
-            return res.status(409).json({ success: false, message: 'Market was not saved because it is no longer editable. Refresh the review list and try again.' });
-        }
+        if (!updateResult?.changes) return res.status(409).json({ success: false, message: 'Market was not saved because it is no longer editable. Refresh the review list and try again.' });
         const updatedMarket = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
-        if (!updatedMarket || updatedMarket.title !== generated.title) {
+        if (!updatedMarket || updatedMarket.title !== savedTitle || Number(updatedMarket.admin_edited || 0) !== 1) {
             return res.status(500).json({ success: false, message: 'Market update did not persist. Please refresh and retry.' });
         }
         emitMarkets();
-        res.json({ success: true, market: normalizeMarketRow(updatedMarket) });
+        return res.json({ success: true, market: normalizeMarketRow(updatedMarket) });
     } catch (e) {
         console.error('[admin] unverified market edit failed:', e.message);
-        const groqUnconfigured = e.message?.includes('GROQ_API_KEY is not configured.');
-        res.status(groqUnconfigured ? 503 : 400).json({ success: false, message: groqUnconfigured ? 'Headline verification is unavailable because Groq is not configured.' : `Market was not saved: ${e.message}` });
+        return res.status(500).json({ success: false, message: 'Market was not saved. Please retry.' });
     }
 });
 
