@@ -1422,11 +1422,10 @@ function esc(str) {
 <div id="adminLoginGate" style="display:flex; position:fixed; inset:0; background:rgba(0,0,0,0.96); z-index:12000; justify-content:center; align-items:center; padding:20px;">
     <div style="width:100%; max-width:360px; background:#101014; border:1px solid #333; border-radius:14px; padding:18px; box-shadow:0 24px 70px rgba(0,0,0,.55);">
         <p id="adminLoginGateMessage" style="margin:0 0 10px; color:#aaa; font-size:.82rem; min-height:1rem;"></p>
-        <input id="adminInlinePhoneInput" type="tel" autocomplete="username" autofocus required aria-label="Phone number" placeholder="Phone number" style="width:100%; box-sizing:border-box; padding:13px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
-        <input id="adminInlinePasswordInput" type="password" autocomplete="current-password" required aria-label="Password" placeholder="Password" style="width:100%; box-sizing:border-box; padding:13px; margin-top:10px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none;">
+        <input id="adminInlinePinInput" type="password" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autofocus required aria-label="Admin PIN" placeholder="6-digit admin PIN" style="width:100%; box-sizing:border-box; padding:13px; border-radius:10px; border:1px solid #333; background:#000; color:white; font-size:1rem; outline:none; letter-spacing:.25em;">
         <div id="adminInlineLoginStatus" style="min-height:1.2rem; margin:8px 0; color:#ff7777; font-size:.82rem;"></div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
-            <button id="adminInlineLoginBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Log in</button>
+            <button id="adminInlineLoginBtn" onclick="submitInlineAdminLogin()" style="flex:1; min-width:150px; padding:13px; border:0; border-radius:10px; background:#00ff88; color:#050505; font-weight:900; cursor:pointer;">Unlock with PIN</button>
         </div>
         <div style="margin-top:14px; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <button onclick="location.href='index.html'" style="background:none; border:0; color:#aaa; cursor:pointer; padding:0; font-size:.8rem;">Back to site</button>
@@ -1515,7 +1514,7 @@ const API = {
 
         try {
             const token = localStorage.getItem("token");
-            const isLoginRoute = path === '/admin/login';
+            const isLoginRoute = path === '/admin/login' || path === '/admin/pin-login';
             if (!token && !isLoginRoute) {
                 showAdminLoginGate("Admin session required. Log in to load this data.");
                 throw new Error("Admin session required.");
@@ -1548,11 +1547,11 @@ const API = {
                 // expired. A 403 such as "Not an administrator" (or a startup 503)
                 // must NOT log the admin out - the token is still perfectly valid.
                 const code = data.code;
-                const tokenIsDead = res.status === 401
+                const tokenIsDead = !isLoginRoute && (res.status === 401
                     || code === 'TOKEN_INVALID'
                     || code === 'TOKEN_EXPIRED'
                     || code === 'NO_TOKEN'
-                    || (res.status === 403 && /invalid or expired session/i.test(message));
+                    || (res.status === 403 && /invalid or expired session/i.test(message)));
                 if (tokenIsDead) {
                     localStorage.removeItem("token");
                 }
@@ -1580,7 +1579,7 @@ function showAdminLoginGate(message = "Enter your admin PIN to continue.") {
     if (msg) msg.textContent = message;
     if (gate) {
         gate.style.display = 'flex';
-        setTimeout(() => document.getElementById('adminInlinePhoneInput')?.focus(), 50);
+        setTimeout(() => document.getElementById('adminInlinePinInput')?.focus(), 50);
     }
 }
 
@@ -1598,8 +1597,8 @@ function resetAdminIdleLock() {
     if (!localStorage.getItem('token') || gate?.style.display !== 'none') return;
     adminIdleLockTimer = setTimeout(() => {
         localStorage.removeItem('token');
-        const passwordInput = document.getElementById('adminInlinePasswordInput');
-        if (passwordInput) passwordInput.value = '';
+        const pinInput = document.getElementById('adminInlinePinInput');
+        if (pinInput) pinInput.value = '';
         showAdminLoginGate('Locked after 5 minutes of inactivity. Enter your admin PIN to continue.');
     }, ADMIN_IDLE_LOCK_MS);
 }
@@ -1609,11 +1608,15 @@ function resetAdminIdleLock() {
 });
 
 async function submitInlineAdminLogin() {
-    const phoneInput = document.getElementById('adminInlinePhoneInput');
-    const passwordInput = document.getElementById('adminInlinePasswordInput');
+    const pinInput = document.getElementById('adminInlinePinInput');
     const status = document.getElementById('adminInlineLoginStatus');
     const loginBtn = document.getElementById('adminInlineLoginBtn');
-    const payload = { phone: phoneInput?.value || '', password: passwordInput?.value || '' };
+    const pin = String(pinInput?.value || '').trim();
+    if (!/^\d{6}$/.test(pin)) {
+        if (status) status.textContent = 'Enter your 6-digit admin PIN.';
+        pinInput?.focus();
+        return;
+    }
 
     if (status) {
         status.style.color = '#aaa';
@@ -1622,12 +1625,19 @@ async function submitInlineAdminLogin() {
     if (loginBtn) loginBtn.disabled = true;
 
     try {
-        const data = await API.post('/admin/login', payload);
+        const data = await API.post('/admin/pin-login', { pin });
         if (!data.success || !data.token) {
             throw new Error(data.message || 'Admin login failed.');
         }
         localStorage.setItem('token', data.token);
-        if (passwordInput) passwordInput.value = '';
+        // The page can be opened with a basic user's token. Re-authenticate the
+        // socket with the newly issued SuperAdmin token after the PIN succeeds.
+        socket.auth = { token: data.token };
+        if (typeof socket.disconnect === 'function' && typeof socket.connect === 'function') {
+            socket.disconnect();
+            socket.connect();
+        }
+        if (pinInput) pinInput.value = '';
         if (status) status.textContent = '';
         await initAdminAfterLogin();
     } catch (e) {
@@ -1646,7 +1656,7 @@ document.addEventListener('keydown', (e) => {
     const gate = document.getElementById('adminLoginGate');
     if (!gate || gate.style.display !== 'flex') return;
     const active = document.activeElement;
-    if (active?.id === 'adminInlinePhoneInput' || active?.id === 'adminInlinePasswordInput') submitInlineAdminLogin();
+    if (active?.id === 'adminInlinePinInput') submitInlineAdminLogin();
 });
 
 window.filterAdminList = function(containerId, query) {
