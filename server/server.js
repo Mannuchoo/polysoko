@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
 import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
 import { createBotRouter } from './src/routes/bot.js';
+import adminAuth from './src/middleware/adminAuth.js';
 import { fetchFootballOdds, oddsForFixture } from './src/services/footballOdds.js';
 import { FixtureDataCache, footballRequest } from './src/services/footballApiClient.js';
 import { priceMarket } from './src/services/oddsEngine.js';
@@ -617,8 +618,6 @@ function translatePostgresSql(sql) {
     translated = translated
         .replace(/INSERT\s+OR\s+IGNORE\s+INTO\s+admin_settings\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)/i,
             'INSERT INTO admin_settings ($1) VALUES ($2) ON CONFLICT (id) DO NOTHING')
-        .replace(/INSERT\s+OR\s+REPLACE\s+INTO\s+admin_settings\s*\(id,\s*pin_hash,\s*updated_at\)\s*VALUES\s*\(1,\s*\?,\s*CURRENT_TIMESTAMP\)/i,
-            'INSERT INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = EXCLUDED.updated_at')
         .replace(/INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY')
         .replace(/\bDATETIME\b/gi, 'TIMESTAMPTZ')
         // Avatar bytes are stored in the DB; `BLOB` is not a PostgreSQL type.
@@ -1036,140 +1035,20 @@ const parseOddsAnchor = value => {
     return anchor;
 };
 
-// --- JWT SECRET RESOLUTION -------------------------------------------------
-// Sessions are stateless JWTs, so the signing secret must stay identical across
-// every process restart. Previously the secret was read straight from
-// `process.env.JWT_SECRET || ''`, which caused two production failures:
-//
-//   1. When the variable was absent the secret silently became an EMPTY STRING.
-//      `jwt.sign` then threw inside the async `db.get` callback of /api/login,
-//      so no response was ever written and the browser just hung on "Login".
-//   2. Because the secret only ever came from the environment, there was no
-//      durable copy anywhere. Any redeploy that regenerated, dropped or rotated
-//      the variable invalidated every issued token, logging every user out.
-//
-// The secret is now resolved once, in priority order:
-//   1. `JWT_SECRET` / `JWT_SECRET_PREVIOUS` from the environment (authoritative).
-//   2. A previously generated secret persisted in the `app_secrets` table, so
-//      redeploys that lose the env var keep every existing session valid.
-//   3. A freshly generated secret, persisted so it is stable from then on.
-//
-// `JWT_SECRET_PREVIOUS` is a comma-separated list of retired secrets that are
-// still accepted during verification. That makes rotation safe: tokens signed
-// before the change keep working until they expire naturally.
-const envJwtSecret = String(process.env.JWT_SECRET || '').trim();
-const legacyJwtSecrets = String(process.env.JWT_SECRET_PREVIOUS || '')
-    .split(',')
-    .map(value => value.trim())
-    .filter(Boolean);
-
-const JWT_SECRET_ROW_KEY = 'jwt_secret';
-let jwtSecretSource = 'pending';
-let resolvedJwtSecret = envJwtSecret;
-
-// Signs are synchronous but verification must tolerate the brief startup window
-// before the persisted secret has been read back from the database. Until then
-// we fall back to the env value so a warm process never rejects a good token.
-const getJwtSecrets = () => [resolvedJwtSecret, ...legacyJwtSecrets].filter(Boolean);
-
-async function resolveJwtSecret() {
-    let persisted = null;
-    try {
-        // `id` is required: the Postgres SQL translator appends `RETURNING id` to
-        // every INSERT that lacks it, so the table must expose that column or the
-        // insert fails outright on Postgres.
-        await dbRun(`CREATE TABLE IF NOT EXISTS app_secrets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            value TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
-        const row = await dbGet(`SELECT value FROM app_secrets WHERE name = ?`, [JWT_SECRET_ROW_KEY]);
-        persisted = row?.value ? String(row.value) : null;
-    } catch (err) {
-        console.error('[JWT] Could not open the app_secrets table:', err.message);
-    }
-
-    if (envJwtSecret) {
-        // An explicit env var always wins, but persist it so a later deploy that
-        // drops the variable keeps signing with the identical secret.
-        if (persisted && persisted !== envJwtSecret) {
-            legacyJwtSecrets.push(persisted);
-        }
-        if (!persisted) {
-            try {
-                await dbRun(
-                    `INSERT INTO app_secrets (name, value) VALUES (?, ?)`,
-                    [JWT_SECRET_ROW_KEY, envJwtSecret]
-                );
-            } catch (err) {
-                console.error('[JWT] Could not persist the configured secret:', err.message);
-            }
-        }
-        resolvedJwtSecret = envJwtSecret;
-        jwtSecretSource = 'environment';
-        console.log('[JWT] Signing secret loaded from the environment (persisted for redeploy stability).');
-        return;
-    }
-
-    if (persisted) {
-        resolvedJwtSecret = persisted;
-        jwtSecretSource = 'database';
-        console.log('[JWT] JWT_SECRET is not set; reusing the secret persisted in the database so existing sessions stay valid.');
-        return;
-    }
-
-    const generated = crypto.randomBytes(48).toString('hex');
-    try {
-        await dbRun(
-            `INSERT INTO app_secrets (name, value) VALUES (?, ?)`,
-            [JWT_SECRET_ROW_KEY, generated]
-        );
-        jwtSecretSource = 'generated';
-        console.log('[JWT] JWT_SECRET is not set; generated and persisted a new signing secret.');
-    } catch (err) {
-        jwtSecretSource = 'ephemeral';
-        console.error('[JWT] Could not persist a generated secret; it will change on the next restart:', err.message);
-    }
-    resolvedJwtSecret = generated;
-}
-
-const jwtSecretReady = resolveJwtSecret().catch(err => {
-    console.error('[JWT] Secret resolution failed; using a process-local secret:', err.message);
-    resolvedJwtSecret = envJwtSecret || crypto.randomBytes(48).toString('hex');
-    jwtSecretSource = 'ephemeral';
-});
-
-// Signs a token with the current secret, guaranteeing callers never hit the
-// empty-secret throw that used to hang /api/login.
+// --- JWT SECRET CONFIGURATION ---------------------------------------------
+// All access and admin tokens use only the explicitly configured environment secret.
+const jwtSecretReady = Promise.resolve();
+const getJwtSecrets = () => process.env.JWT_SECRET ? [process.env.JWT_SECRET] : [];
+const jwtSecretSource = process.env.JWT_SECRET ? 'environment' : 'missing';
 const signJwt = (payload, options = {}) => {
-    if (!resolvedJwtSecret) throw new Error('JWT signing secret is not available yet.');
-    return jwt.sign(payload, resolvedJwtSecret, options);
+    if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured.');
+    return jwt.sign(payload, process.env.JWT_SECRET, options);
 };
-
-// Verifies against the active secret first, then any retired secrets.
 const verifyJwt = (token) => {
-    const secrets = getJwtSecrets();
-    if (!secrets.length) throw new Error('JWT verification secret is not available yet.');
-    let lastError;
-    for (const secret of secrets) {
-        try {
-            return jwt.verify(token, secret);
-        } catch (err) {
-            // An expired token still matched this secret's signature, so it is
-            // genuinely expired. Stop here instead of letting a later secret
-            // report a misleading "invalid signature" to the client.
-            if (err?.name === 'TokenExpiredError') throw err;
-            lastError = err;
-        }
-    }
-    throw lastError;
+    if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured.');
+    return jwt.verify(token, process.env.JWT_SECRET);
 };
 
-// Runs `fn` inside a database transaction. Prefer this over
-// manual BEGIN/COMMIT strings: it guarantees the connection is committed,
-// rolled back and returned to the pool exactly once, and it keeps concurrent
-// tasks from being swept into someone else's transaction.
 const withTransaction = (fn) => {
     if (typeof db.transaction === 'function') return db.transaction(fn);
     return Promise.resolve().then(fn);
@@ -1216,91 +1095,9 @@ const normalizePhone = (phone) => {
     return p;
 };
 
-// --- ADMIN IDENTITY RESOLUTION ---------------------------------------------
-// Admin login is driven by ADMIN_PHONE, but that variable is routinely missing
-// on the host (Railway), which made /api/admin/pin-login and /admin/master-login
-// reject every attempt with "Admin not configured on this server."
-//
-// The identity is resolved once and cached so that pin-login, master-login and
-// the authenticateAdmin middleware ALWAYS agree on the same phone. That
-// agreement is essential: if login minted a token for a fallback identity while
-// the middleware compared against the (absent) env var, every subsequent admin
-// API call would fail with 403 straight after a "successful" login.
-//
-// Resolution order:
-//   1. ADMIN_PHONE from the environment (authoritative when present).
-//   2. admin_settings.admin_phone, persisted on first successful configuration.
-//   3. The first user already flagged role='admin' in the database.
-// Credentials (PIN / master password) are still required in every case - this
-// only decides WHICH identity the resulting token is issued for.
-let cachedAdminPhone = null;
-let adminPhoneResolution = null;
-
+// Admin identity is explicitly configured through the server environment.
 async function resolveAdminPhone() {
-    if (cachedAdminPhone) return cachedAdminPhone;
-    if (adminPhoneResolution) return adminPhoneResolution;
-
-    adminPhoneResolution = (async () => {
-        const fromEnv = normalizePhone(process.env.ADMIN_PHONE);
-        if (fromEnv) {
-            cachedAdminPhone = fromEnv;
-            return fromEnv;
-        }
-
-        try {
-            const stored = await dbGet(
-                `SELECT admin_phone FROM admin_settings WHERE id = 1`
-            ).catch(() => null);
-            const fromSettings = normalizePhone(stored?.admin_phone);
-            if (fromSettings) {
-                cachedAdminPhone = fromSettings;
-                console.warn(`[ADMIN] ADMIN_PHONE is not set; using the admin phone saved in the database (${fromSettings}). Set ADMIN_PHONE to make this explicit.`);
-                return fromSettings;
-            }
-        } catch (err) {
-            console.error('[ADMIN] Could not read the stored admin phone:', err.message);
-        }
-
-        // Last resort: reuse whichever account the database already treats as an
-        // admin. The PIN/master-password check still gates access.
-        try {
-            const row = await dbGet(
-                `SELECT phone FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1`
-            ).catch(() => null);
-            const fromDb = normalizePhone(row?.phone);
-            if (fromDb) {
-                cachedAdminPhone = fromDb;
-                console.warn(`[ADMIN] ADMIN_PHONE is not set; falling back to the existing admin account ${fromDb}. Set ADMIN_PHONE to make this explicit.`);
-                return fromDb;
-            }
-        } catch (err) {
-            console.error('[ADMIN] Could not resolve an admin account from the database:', err.message);
-        }
-
-        return null;
-    })();
-
-    try {
-        return await adminPhoneResolution;
-    } finally {
-        // Allow a later retry (e.g. after an admin account is created) instead of
-        // caching the failure for the lifetime of the process.
-        adminPhoneResolution = null;
-    }
-}
-
-async function persistAdminPhone(phone) {
-    const normalized = normalizePhone(phone);
-    if (!normalized) return;
-    cachedAdminPhone = normalized;
-    try {
-        await dbRun(
-            `UPDATE admin_settings SET admin_phone = ? WHERE id = 1`,
-            [normalized]
-        );
-    } catch (err) {
-        console.error('[ADMIN] Could not persist the admin phone:', err.message);
-    }
+    return normalizePhone(process.env.ADMIN_PHONE) || null;
 }
 
 const formatNairobiDate = (offsetDays = 0) => {
@@ -3036,19 +2833,12 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
     addColumnSafely('users', 'avatar_mime', 'TEXT');
     addColumnSafely('users', 'avatar_data', 'BLOB');
 
-    // Admin settings table (stores hashed PIN + the resolved admin phone)
+    // Minimal admin settings metadata; admin credentials and identity are environment-managed.
     db.run(`CREATE TABLE IF NOT EXISTS admin_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
-        pin_hash TEXT,
-        admin_phone TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
-    // `admin_phone` lets admin login survive a host that does not define
-    // ADMIN_PHONE. The CREATE TABLE above already declares it, so it is not
-    // added again here: on an existing database the column is already
-    // present, and on a fresh one the CREATE TABLE has just created it.
-    addColumnSafely('admin_settings', 'admin_phone', 'TEXT');
     // Guarantee the singleton row exists; the CHECK (id = 1) constraint means an
     // UPDATE against a missing row is a silent no-op.
     db.run(`INSERT INTO admin_settings (id, created_at, updated_at) VALUES (1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING`);
@@ -3061,9 +2851,7 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
             });
             return;
         }
-        // ADMIN_PHONE is optional. When it is absent, adopt whichever account the
-        // database already treats as an admin so the panel remains reachable, and
-        // remember it so later restarts resolve the same identity.
+        // Admin identity is configured explicitly through ADMIN_PHONE.
         resolveAdminPhone()
             .then((resolved) => {
                 if (resolved) console.log(`👑 SuperAdmin identity resolved: ${resolved}`);
@@ -3123,39 +2911,7 @@ const authenticate = (req, res, next) => {
     }).catch(() => res.status(503).json({ success: false, code: 'AUTH_UNAVAILABLE', message: "Authentication is starting up. Please try again." }));
 };
 
-const authenticateAdmin = (req, res, next) => {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(403).json({ success: false, message: "Authentication token missing" });
-
-    jwtSecretReady.then(async () => {
-        let decoded;
-        try {
-            decoded = verifyJwt(token);
-        } catch (error) {
-            const expired = error?.name === 'TokenExpiredError';
-            return res.status(401).json({
-                success: false,
-                code: expired ? 'TOKEN_EXPIRED' : 'TOKEN_INVALID',
-                message: expired ? 'Admin session expired. Please log in again.' : 'Invalid admin session. Please log in again.'
-            });
-        }
-        // Must use the same resolver as the login routes. Comparing against a
-        // missing ADMIN_PHONE here would reject every token that pin-login or
-        // master-login had just issued for the fallback identity.
-        const adminPhone = await resolveAdminPhone();
-        const userPhone = normalizePhone(decoded.phone);
-
-        if (!adminPhone || userPhone !== adminPhone) {
-            console.warn(`🚫 Unauthorized admin access attempt from: ${userPhone}`);
-            return res.status(403).json({ success: false, message: "Access denied: Not an administrator" });
-        }
-
-        req.user = decoded;
-        req.user.role = 'admin';
-        req.user.phone = normalizePhone(decoded.phone);
-        next();
-    }).catch(() => res.status(503).json({ success: false, message: "Authentication is starting up. Please try again." }));
-};
+const authenticateAdmin = adminAuth;
 
 const createNotification = async (phone, title, message, type = 'info') => {
     try {
@@ -5131,6 +4887,8 @@ app.get('/api/markets/:id/order-book', authenticate, async (req, res) => {
 
 let lastEmptyFootballRecoveryAt = 0;
 let emptyFootballRecoveryPromise = null;
+let lastEmptySportsRecoveryAt = 0;
+let emptySportsRecoveryPromise = null;
 
 app.get('/api/sports/categories', async (req, res) => {
     try {
@@ -5169,6 +4927,37 @@ app.get('/api/sports/categories', async (req, res) => {
             );
             recoveredFootballMarkets = (recoveredFootballMarkets || []).map(normalizeMarketRow);
             console.warn(`[football] Empty category recovered with ${recoveredFootballMarkets.length} visible fixtures.`);
+        }
+
+        // Unlike Football, non-football sports previously depended only on the
+        // background timer. Recover an entirely empty sports board when the
+        // frontend requests categories, with a cooldown and one shared promise
+        // so concurrent page loads cannot fan out provider requests.
+        const visibleSports = await dbGet(
+            `SELECT COUNT(*) AS count FROM markets
+             WHERE (LOWER(COALESCE(category,''))='sports' OR id LIKE 'sp_%')
+               AND status IN ('open','upcoming','live')
+               AND COALESCE(event_end_time,startTime) > NOW()
+               AND (startTime IS NULL OR status IN ('open','upcoming') OR startTime > NOW() - (? * INTERVAL '1 minute'))
+               AND sideA IS NOT NULL AND sideB IS NOT NULL
+               AND sideA NOT IN ('Home','Away','Unknown','')
+               AND sideB NOT IN ('Home','Away','Unknown','')`,
+            [LIVE_VISIBILITY_MINUTES]
+        );
+        const hasVisibleSports = Number(visibleSports?.count || 0) > 0;
+        const sportsRecoveryWindowElapsed = Date.now() - lastEmptySportsRecoveryAt >= 30 * 60 * 1000;
+        if (!hasVisibleSports && API_SPORTS_KEY && (sportsRecoveryWindowElapsed || emptySportsRecoveryPromise)) {
+            if (!emptySportsRecoveryPromise) {
+                lastEmptySportsRecoveryAt = Date.now();
+                emptySportsRecoveryPromise = syncSportsMarkets().finally(() => {
+                    emptySportsRecoveryPromise = null;
+                });
+            }
+            try {
+                await emptySportsRecoveryPromise;
+            } catch (recoveryError) {
+                console.error('[sports] Empty category recovery failed:', recoveryError.message);
+            }
         }
 
         const rows = await dbAll(
@@ -6680,13 +6469,18 @@ app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
             return res.status(401).json({ success: false, message: 'These credentials do not match the SuperAdmin account.' });
         }
 
-        const user = await dbGet(`SELECT phone, password FROM users WHERE phone = ?`, [adminPhone]);
-        if (!user?.password || !(await bcrypt.compare(password, user.password))) {
-            console.warn(`[ADMIN] Failed database credential login from IP: ${req.ip}`);
+        const adminPassword = String(process.env.ADMIN_PASSWORD || '');
+        if (!adminPassword) return res.status(503).json({ success: false, code: 'ADMIN_PASSWORD_NOT_CONFIGURED', message: 'Set ADMIN_PASSWORD in the server environment.' });
+        const suppliedPassword = Buffer.from(password);
+        const configuredPassword = Buffer.from(adminPassword);
+        if (suppliedPassword.length !== configuredPassword.length || !crypto.timingSafeEqual(suppliedPassword, configuredPassword)) {
+            console.warn(`[ADMIN] Failed environment credential login from IP: ${req.ip}`);
             return res.status(401).json({ success: false, message: 'Incorrect phone number or password.' });
         }
+        const user = await dbGet(`SELECT id FROM users WHERE phone = ?`, [adminPhone]);
+        if (!user) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured admin account does not exist.' });
 
-        const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
+        const token = signJwt({ id: user.id, phone: adminPhone, isAdmin: true }, { expiresIn: '1d' });
         await dbRun(`UPDATE users SET role = 'admin' WHERE phone = ?`, [adminPhone]).catch(() => {});
         if (typeof global.addActivityLog === 'function') {
             global.addActivityLog(adminPhone, 'admin_login', 'Admin logged in with account credentials', req.ip || '', req.headers['user-agent'] || '');
@@ -6700,8 +6494,7 @@ app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
 
 app.post('/api/admin/pin-login', adminPinLimiter, async (req, res) => {
     const { pin } = req.body;
-    // Falls back to the stored/DB admin identity when ADMIN_PHONE is absent on
-    // the host, which previously made this route unusable in production.
+    // Admin identity is supplied only through ADMIN_PHONE.
     const adminPhone = await resolveAdminPhone();
     
     if (!adminPhone) {
@@ -6713,35 +6506,29 @@ app.post('/api/admin/pin-login', adminPinLimiter, async (req, res) => {
     }
     
     if (!pin || !/^\d{6}$/.test(String(pin))) {
-        return res.json({ success: false, message: "Please enter a valid 6-digit PIN." });
+        return res.status(400).json({ success: false, message: "Please enter a valid 6-digit PIN." });
     }
-    
-    // Check if a PIN is stored in the DB
-    const adminSettings = await dbGet(`SELECT pin_hash FROM admin_settings WHERE id = 1`).catch(() => null);
-    
-    let pinValid = false;
     
     const configuredAdminPin = String(process.env.ADMIN_PIN || '');
-    if (configuredAdminPin) {
-        const supplied = Buffer.from(String(pin));
-        const configured = Buffer.from(configuredAdminPin);
-        pinValid = supplied.length === configured.length && crypto.timingSafeEqual(supplied, configured);
-    } else if (adminSettings && adminSettings.pin_hash) {
-        // Use bcrypt to compare against stored hash
-        pinValid = await bcrypt.compare(String(pin), adminSettings.pin_hash);
-    } else {
-        // Fallback to env var for backward compatibility
-        const adminPin = process.env.ADMIN_PASSWORD || 'Polymarket2024';
-        pinValid = String(pin) === String(adminPin);
+    if (!configuredAdminPin) {
+        return res.status(503).json({ success: false, code: 'ADMIN_PIN_NOT_CONFIGURED', message: 'Set ADMIN_PIN in the server environment.' });
     }
+    if (!/^\d{6}$/.test(configuredAdminPin)) {
+        return res.status(503).json({ success: false, code: 'ADMIN_PIN_MISCONFIGURED', message: 'ADMIN_PIN must contain exactly six digits.' });
+    }
+    const supplied = Buffer.from(String(pin));
+    const configured = Buffer.from(configuredAdminPin);
+    const pinValid = supplied.length === configured.length && crypto.timingSafeEqual(supplied, configured);
+    const adminUser = await dbGet(`SELECT id FROM users WHERE phone = ?`, [adminPhone]);
+    if (!adminUser) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured admin account does not exist.' });
     
     if (!pinValid) {
         console.warn(`🚫 Failed admin PIN attempt from IP: ${req.ip}`);
-        return res.json({ success: false, message: "Invalid PIN. Access denied." });
+        return res.status(401).json({ success: false, message: "Invalid PIN. Access denied." });
     }
     
     // Generate admin token
-    const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
+    const token = signJwt({ id: adminUser.id, phone: adminPhone, isAdmin: true }, { expiresIn: '1d' });
     
     // Ensure admin role in DB
     try {
@@ -6764,7 +6551,7 @@ app.get('/api/admin/session', authenticateAdmin, (_req, res) => {
 app.post('/api/admin/master-login', authLimiter, async (req, res) => {
     const { password } = req.body;
     const adminPhone = await resolveAdminPhone();
-    const adminPassword = process.env.ADMIN_PASSWORD || 'Polymarket2024';
+    const adminPassword = String(process.env.ADMIN_PASSWORD || '');
     
     if (!adminPhone) {
         return res.status(503).json({
@@ -6774,20 +6561,16 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
         });
     }
     
-    if (!password || String(password) !== String(adminPassword)) {
+    if (!adminPassword) return res.status(503).json({ success: false, code: 'ADMIN_PASSWORD_NOT_CONFIGURED', message: 'Set ADMIN_PASSWORD in the server environment.' });
+    if (!password || String(password) !== adminPassword) {
         console.warn(`🚫 Failed admin master login from IP: ${req.ip}`);
-        return res.json({ success: false, message: "Invalid server password." });
+        return res.status(401).json({ success: false, message: "Invalid server password." });
     }
     
-    const token = signJwt({ phone: adminPhone }, { expiresIn: '24h' });
+    const adminUser = await dbGet(`SELECT id FROM users WHERE phone = ?`, [adminPhone]);
+    if (!adminUser) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured admin account does not exist.' });
+    const token = signJwt({ id: adminUser.id, phone: adminPhone, isAdmin: true }, { expiresIn: '1d' });
     
-    // Persist the identity that was actually used. If ADMIN_PHONE is absent this
-    // records the fallback so every future restart resolves the same admin
-    // instead of depending on whichever account happens to be flagged first.
-    if (!process.env.ADMIN_PHONE) {
-        await persistAdminPhone(adminPhone);
-    }
-
     try {
         await dbRun(`UPDATE users SET role='admin' WHERE phone=?`, [adminPhone]);
     } catch (e) { /* ignore */ }
@@ -6800,79 +6583,17 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
 });
 
 // Check if admin PIN has been set up
-app.get('/api/admin/pin-status', async (req, res) => {
-    try {
-        const adminSettings = await dbGet(`SELECT pin_hash FROM admin_settings WHERE id = 1`).catch(() => null);
-        const hasPin = !!(adminSettings && adminSettings.pin_hash);
-        res.json({ success: true, hasPin });
-    } catch (e) {
-        res.json({ success: true, hasPin: false });
-    }
+app.get('/api/admin/pin-status', authenticateAdmin, (_req, res) => {
+    res.json({ success: true, hasPin: Boolean(process.env.ADMIN_PIN) });
 });
 
-// Setup admin PIN (first-time registration, requires admin token)
-app.post('/api/admin/setup-pin', authenticateAdmin, async (req, res) => {
-    const { pin } = req.body;
-    
-    if (!pin || String(pin).length !== 6 || !/^\d{6}$/.test(String(pin))) {
-        return res.status(400).json({ success: false, message: "PIN must be exactly 6 digits." });
-    }
-    
-    try {
-        const existing = await dbGet(`SELECT pin_hash FROM admin_settings WHERE id = 1`).catch(() => null);
-        if (existing && existing.pin_hash) {
-            return res.status(400).json({ success: false, message: "PIN is already set. Use change-pin to update it." });
-        }
-        
-        const hashedPin = await bcrypt.hash(String(pin), 10);
-        await dbRun(`INSERT INTO admin_settings (id, pin_hash, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET pin_hash = EXCLUDED.pin_hash, updated_at = EXCLUDED.updated_at`, [hashedPin]);
-        
-        if (typeof global.addActivityLog === 'function') {
-            global.addActivityLog(req.user.phone, 'admin_pin_setup', 'Admin PIN was set up', req.ip || '', req.headers['user-agent'] || '');
-        }
-        
-        res.json({ success: true, message: "Admin PIN set up successfully." });
-    } catch (e) {
-        console.error("Setup PIN error:", e);
-        res.status(500).json({ success: false, message: "Failed to set up PIN." });
-    }
+// PIN changes are deployment configuration changes. Never persist submitted PINs
+// in the application database; update ADMIN_PIN in the service environment.
+app.post('/api/admin/setup-pin', authenticateAdmin, (_req, res) => {
+    res.status(409).json({ success: false, code: 'ADMIN_PIN_ENV_MANAGED', message: 'Configure ADMIN_PIN in the server environment.' });
 });
-
-// Change admin PIN (requires admin token + current PIN)
-app.post('/api/admin/change-pin', authenticateAdmin, async (req, res) => {
-    const { currentPin, newPin } = req.body;
-    
-    if (!currentPin || !newPin) {
-        return res.status(400).json({ success: false, message: "Both current and new PIN are required." });
-    }
-    if (!/^\d{6}$/.test(String(newPin))) {
-        return res.status(400).json({ success: false, message: "New PIN must be exactly 6 digits." });
-    }
-    
-    try {
-        const adminSettings = await dbGet(`SELECT pin_hash FROM admin_settings WHERE id = 1`).catch(() => null);
-        
-        if (!adminSettings || !adminSettings.pin_hash) {
-            return res.status(400).json({ success: false, message: "No PIN is set. Use setup-pin first." });
-        }
-        
-        const pinValid = await bcrypt.compare(String(currentPin), adminSettings.pin_hash);
-        if (!pinValid) {
-            return res.status(403).json({ success: false, message: "Current PIN is incorrect." });
-        }
-        
-        const hashedPin = await bcrypt.hash(String(newPin), 10);
-        await dbRun(`UPDATE admin_settings SET pin_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, [hashedPin]);
-        
-        if (typeof global.addActivityLog === 'function') {
-            global.addActivityLog(req.user.phone, 'admin_pin_change', 'Admin PIN was changed', req.ip || '', req.headers['user-agent'] || '');
-        }
-        
-        res.json({ success: true, message: "PIN changed successfully." });
-    } catch (e) {
-        console.error("Change PIN error:", e);
-        res.status(500).json({ success: false, message: "Failed to change PIN." });
-    }
+app.post('/api/admin/change-pin', authenticateAdmin, (_req, res) => {
+    res.status(409).json({ success: false, code: 'ADMIN_PIN_ENV_MANAGED', message: 'Configure ADMIN_PIN in the server environment.' });
 });
 
 app.post('/api/admin/wire-funds', authenticateAdmin, async (req, res) => {
@@ -7607,7 +7328,7 @@ app.post('/api/profile/avatar', uploadLimiter, authenticate, handleProfileAvatar
 
 app.post('/api/update-avatar', uploadLimiter, authenticate, handleProfileAvatarUpload, persistProfileAvatar);
 
-app.get('/api/admin/stats', authenticate, async (req, res) => {
+app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
     try {
         const adminPhone = await resolveAdminPhone();
         const userPhone = normalizePhone(req.user.phone);
@@ -8542,7 +8263,7 @@ const startServer = async () => {
             setInterval(() => runSafely('syncTmdbMarkets', syncTmdbMarkets), 6 * 60 * 60 * 1000);
             // Keep API-Sports free-tier usage below its daily request limit.
             setInterval(syncFootballMarkets, 3 * 60 * 60 * 1000);
-            setInterval(syncSportsMarkets, 6 * 60 * 60 * 1000);
+            setInterval(() => runSafely('syncSportsMarkets interval', syncSportsMarkets), 6 * 60 * 60 * 1000);
             setInterval(() => runSafely('syncNewsApiMarkets', async () => {
                 const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
                 emitMarkets();

@@ -1378,8 +1378,8 @@ function esc(str) {
     <div class="info-panel" onclick="event.stopPropagation()">
         <h3 style="color: var(--mu-red);">SuperAdmin Info</h3>
         <p><strong>Name:</strong> <span id="infoName">SuperAdmin</span></p>
-        <p><strong>Phone:</strong> <span id="infoPhone">+2547XXXXXXXX</span></p>
-        <p><strong>Email:</strong> <span id="infoEmail">superadmin@polysoko.com</span></p>
+        <p><strong>Phone:</strong> <span id="infoPhone">Not configured</span></p>
+        <p><strong>Email:</strong> <span id="infoEmail">Not configured</span></p>
         <p><strong>Total platform balance:</strong> <span id="infoTotalBalance">sKES 0.00</span></p>
         <p><strong>Admin Wallet:</strong> <span id="infoWallet">Not set</span></p>
         <p><strong>Business Till:</strong> <span id="infoTill">Not set</span></p>
@@ -1438,7 +1438,7 @@ function esc(str) {
 <div id="changePinModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:10002; justify-content:center; align-items:center;">
     <div style="background:#1a1b23; width:95%; max-width:400px; padding:30px; border-radius:20px; border:1px solid #333; text-align:center;">
         <div style="font-size:2rem; margin-bottom:10px;">🔑</div>
-        <h3 style="color:var(--mu-red); margin:0 0 15px 0;">Change Admin PIN</h3>
+        <h3 style="color:var(--mu-red); margin:0 0 15px 0;">Admin PIN is managed by the server</h3>
         <div style="margin-bottom:15px;">
             <label style="color:#888; font-size:0.7rem; display:block; text-align:left; margin-bottom:5px;">CURRENT PIN</label>
             <div style="display:flex; gap:8px; justify-content:center;">
@@ -1750,8 +1750,8 @@ window.openSuperAdminInfo = async function() {
         const stats = await API.get('/admin/stats');
         const profileRes = await API.get('/profile');
         document.getElementById('infoName').textContent = profileRes.user.name || 'SuperAdmin';
-        document.getElementById('infoPhone').textContent = profileRes.user.phone || '+2547XXXXXXXX';
-        document.getElementById('infoEmail').textContent = profileRes.user.email || 'superadmin@polysoko.com';
+        document.getElementById('infoPhone').textContent = profileRes.user.phone || 'Not configured';
+        document.getElementById('infoEmail').textContent = profileRes.user.email || 'Not configured';
         document.getElementById('infoTotalBalance').textContent = `sKES ${Number(stats.platformTotal || 0).toFixed(2)}`;
         document.getElementById('infoWallet').textContent = stats.adminWallet || 'Not set';
         document.getElementById('infoTill').textContent = stats.adminTill || 'Not set';
@@ -3114,39 +3114,8 @@ function getModalPin(group) {
     return Array.from(document.querySelectorAll(`.pin-modal-input[data-group="${group}"]`)).map(i => i.value).join('');
 }
 
-window.submitChangePin = async function() {
-    const currentPin = getModalPin('current');
-    const newPin = getModalPin('new');
-    const confirmPin = getModalPin('confirm');
-    const errorEl = document.getElementById('changePinError');
-    const successEl = document.getElementById('changePinSuccess');
-    const btn = document.getElementById('changePinBtn');
-    
-    errorEl.textContent = '';
-    successEl.textContent = '';
-    
-    if (currentPin.length !== 6) return errorEl.textContent = "Enter your current 6-digit PIN.";
-    if (newPin.length !== 6) return errorEl.textContent = "Enter a new 6-digit PIN.";
-    if (newPin !== confirmPin) return errorEl.textContent = "New PINs do not match.";
-    if (newPin === currentPin) return errorEl.textContent = "New PIN must be different from current PIN.";
-    
-    btn.disabled = true;
-    btn.innerText = "Changing...";
-    
-    try {
-        const res = await API.post('/admin/change-pin', { currentPin, newPin });
-        if (res.success) {
-            successEl.textContent = "PIN changed successfully! Use your new PIN next time.";
-            setTimeout(() => { document.getElementById('changePinModal').style.display = 'none'; }, 1500);
-        } else {
-            errorEl.textContent = res.message || "Failed to change PIN.";
-        }
-    } catch (e) {
-        errorEl.textContent = e.message || "Server error.";
-    } finally {
-        btn.disabled = false;
-        btn.innerText = "🔑 Change PIN";
-    }
+window.submitChangePin = function() {
+    document.getElementById('changePinError').textContent = 'Update ADMIN_PIN in the server environment to change the admin PIN.';
 };
 
 </script>

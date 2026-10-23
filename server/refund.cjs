@@ -5,7 +5,8 @@ const pool = createPool();
 console.log('Connected to Postgres.');
 
 (async () => {
-  const userPhone = '254740650864';
+  const userPhone = process.env.USER_PHONE;
+  if (!userPhone) throw new Error('Set USER_PHONE in the environment before running this script.');
   const totalRefund = 100000;
 
   // Check if the table actually exists first

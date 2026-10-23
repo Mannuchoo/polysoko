@@ -5,7 +5,8 @@ const pool = createPool();
 console.log('Connected to Postgres.');
 
 // CONFIGURATION
-const myPhone = "254748022271"; // <--- Replace with your actual phone number
+const myPhone = process.env.USER_PHONE;
+if (!myPhone) throw new Error('Set USER_PHONE in the environment before running this script.');
 const refundAmount = 300000;     // <--- Amount to add back (e.g., 3 bets * 100 KES)
 
 (async () => {
