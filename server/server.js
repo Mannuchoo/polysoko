@@ -7919,9 +7919,30 @@ app.get('/api/football/analytics/:id', async (req, res) => {
 // published, so they are kept far longer than the live score.
 const footballFixtureDataCache = new FixtureDataCache();
 app.get('/api/football/details/:id', async (req, res) => {
+    let fixtureId = '';
+    let market = null;
+    const fallbackDetails = (message = 'Football data providers are temporarily unavailable.') => {
+        const home = market?.sideA || market?.sidea || 'Home team';
+        const away = market?.sideB || market?.sideb || 'Away team';
+        const startTime = market?.startTime || market?.starttime || null;
+        return {
+            fallback: true,
+            fixture: { fixture: { id: Number(fixtureId), date: startTime, status: { long: 'Match details unavailable', short: String(market?.status || 'NS').toUpperCase() }, referee: null }, league: { name: market?.league || 'League information unavailable', country: market?.country || '', season: null }, teams: { home: { id: null, name: home }, away: { id: null, name: away } }, goals: { home: null, away: null }, score: {} },
+            score: { home: null, away: null, halftime: null, fulltime: null, extratime: null, penalty: null, status: { long: 'Match details unavailable' } },
+            stats: [],
+            lineups: [
+                { team: { id: null, name: home }, coach: { name: 'Not announced' }, formation: null, startXI: [], substitutes: [] },
+                { team: { id: null, name: away }, coach: { name: 'Not announced' }, formation: null, startXI: [], substitutes: [] }
+            ],
+            events: [], predictions: [], headToHead: [], standings: [], odds: [], oddsSources: [], relatedNews: [],
+            analytics: { homeTeamForm: [], awayTeamForm: [], starPlayer: null, starPlayers: [], lineups: { home: [], away: [] } },
+            sectionErrors: { fixture: message, stats: message, lineups: 'Starting lineups have not been published or could not be loaded.', events: message, predictions: message, headToHead: message, standings: message, odds: message }
+        };
+    };
     try {
-        const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
+        fixtureId = String(req.params.id || '').replace(/^fb_/, '');
         if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: 'Invalid fixture ID' });
+        market = await dbGet(`SELECT sideA, sideB, startTime, status, league, country FROM markets WHERE id = ?`, [`fb_${fixtureId}`]).catch(() => null);
         const cached = footballMatchDetailsCache.get(fixtureId);
         if (cached && cached.expiresAt > Date.now()) {
             const cachedStatus = cached.data?.fixture?.fixture?.status?.short;
@@ -7931,7 +7952,11 @@ app.get('/api/football/details/:id', async (req, res) => {
             return res.json(cached.data);
         }
         const apiKey = API_SPORTS_KEY;
-        if (!apiKey) return res.status(503).json({ error: 'Sports API key is not configured' });
+        if (!apiKey) {
+            const fallback = fallbackDetails('Sports API key is not configured.');
+            footballMatchDetailsCache.set(fixtureId, { data: fallback, expiresAt: Date.now() + 45 * 1000 });
+            return res.json(fallback);
+        }
 
         // Every call goes through the shared budget, so a burst of visitors
         // cannot spend the day's allowance in a few minutes.
@@ -7940,7 +7965,17 @@ app.get('/api/football/details/:id', async (req, res) => {
                 const stored = footballFixtureDataCache.get(fixtureId, kind);
                 if (stored) return { data: stored, error: null };
             }
-            const outcome = await footballRequest(apiKey, url, { params });
+            let outcome;
+            let timeoutId;
+            try {
+                outcome = await Promise.race([
+                    footballRequest(apiKey, url, { params, timeout: 10000 }),
+                    new Promise(resolve => { timeoutId = setTimeout(() => resolve({ data: [], error: `${label} request timed out.` }), 12000); })
+                ]);
+            } catch (error) {
+                console.warn(`[football details] ${label} request failed for fixture ${fixtureId}:`, error.message);
+                return { data: [], error: error.message || `${label} data unavailable` };
+            } finally { clearTimeout(timeoutId); }
             if (outcome.error) {
                 console.warn(`[football details] ${label} request failed for fixture ${fixtureId}:`, outcome.error);
                 return { data: [], error: outcome.error };
@@ -7956,7 +7991,12 @@ app.get('/api/football/details/:id', async (req, res) => {
             request('Events', 'https://v3.football.api-sports.io/fixtures/events', { fixture: fixtureId }),
             request('Predictions', 'https://v3.football.api-sports.io/predictions', { fixture: fixtureId })
         ]);
-        const fixture = fixtureResult.data[0] || null;
+        const fixture = Array.isArray(fixtureResult.data) ? (fixtureResult.data[0] || null) : null;
+        if (!fixture) {
+            const fallback = fallbackDetails(fixtureResult.error || 'Fixture data is unavailable from the configured providers.');
+            footballMatchDetailsCache.set(fixtureId, { data: fallback, expiresAt: Date.now() + 45 * 1000 });
+            return res.json(fallback);
+        }
         const homeId = fixture?.teams?.home?.id;
         const awayId = fixture?.teams?.away?.id;
         const leagueId = fixture?.league?.id;
@@ -7965,16 +8005,21 @@ app.get('/api/football/details/:id', async (req, res) => {
             homeId && awayId ? request('Head to head', 'https://v3.football.api-sports.io/fixtures/headtohead', { h2h: `${homeId}-${awayId}`, last: 5 }) : Promise.resolve({ data: [], error: 'Team data unavailable' }),
             leagueId && season ? request('Standings', 'https://v3.football.api-sports.io/standings', { league: leagueId, season }) : Promise.resolve({ data: [], error: 'League data unavailable' })
         ]);
-        const providerOdds = await fetchAllFootballOdds(fixtureId, {
-            homeTeam: fixture?.teams?.home?.name || market?.sideA,
-            awayTeam: fixture?.teams?.away?.name || market?.sideB,
-            startTime: fixture?.fixture?.date || market?.startTime,
+        let oddsTimeout;
+        const providerOdds = await Promise.race([
+            fetchAllFootballOdds(fixtureId, {
+            homeTeam: fixture?.teams?.home?.name || market?.sideA || market?.sidea,
+            awayTeam: fixture?.teams?.away?.name || market?.sideB || market?.sideb,
+            startTime: fixture?.fixture?.date || market?.startTime || market?.starttime,
             status: fixture?.fixture?.status?.short === 'LIVE' || fixture?.fixture?.status?.short === '1H' || fixture?.fixture?.status?.short === '2H' ? 'live' : market?.status
-        });
+            }).catch(error => ({ markets: [], sources: [], errors: { provider: error.message || 'Odds unavailable' } })),
+            new Promise(resolve => { oddsTimeout = setTimeout(() => resolve({ markets: [], sources: [], errors: { provider: 'Odds request timed out.' } }), 12000); })
+        ]);
+        clearTimeout(oddsTimeout);
         if (fixture?.fixture?.status?.short === 'LIVE' || ['1H', 'HT', '2H', 'ET', 'P'].includes(fixture?.fixture?.status?.short)) {
             io.emit('liveOddsUpdated', { marketId: `fb_${fixtureId}`, odds: providerOdds.markets, updatedAt: new Date().toISOString() });
         }
-        const lineupsData = lineupsResult.data;
+        const lineupsData = Array.isArray(lineupsResult.data) ? lineupsResult.data : [];
         const teamA = fixture?.teams?.home?.name || lineupsData[0]?.team?.name || '';
         const teamB = fixture?.teams?.away?.name || lineupsData[1]?.team?.name || '';
         const query = createMatchNewsQuery(teamA, teamB);
@@ -8024,6 +8069,7 @@ app.get('/api/football/details/:id', async (req, res) => {
         }
 
         const result = {
+            fallback: !fixture,
             fixture,
             score: fixture ? {
                 home: fixture.goals?.home ?? null,
@@ -8042,6 +8088,7 @@ app.get('/api/football/details/:id', async (req, res) => {
             standings: standingsResult.data?.[0]?.league?.standings?.[0] || [],
             odds: providerOdds.markets,
             oddsSources: providerOdds.sources,
+            analytics: { homeTeamForm: [], awayTeamForm: [], starPlayer: null, starPlayers: [], lineups: { home: [], away: [] } },
             relatedNews,
             sectionErrors: { fixture: fixtureResult.error, stats: statsResult.error, lineups: lineupsResult.error, events: eventsResult.error, predictions: predictionsResult.error, headToHead: headToHeadResult.error, standings: standingsResult.error, odds: Object.values(providerOdds.errors).join(' ') || null }
         };
@@ -8053,7 +8100,9 @@ app.get('/api/football/details/:id', async (req, res) => {
         res.json(result);
     } catch (error) {
         console.error("❌ API-Football Error:", error.response?.data || error.message);
-        res.status(error.response?.status || 500).json({ error: "Failed to fetch match details" });
+        const fallback = fallbackDetails(error.message || 'Failed to fetch match details.');
+        if (/^\d+$/.test(fixtureId)) footballMatchDetailsCache.set(fixtureId, { data: fallback, expiresAt: Date.now() + 45 * 1000 });
+        return res.json(fallback);
     }
 });
 app.get('/api/news/everything', async (req, res) => {

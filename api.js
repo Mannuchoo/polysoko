@@ -693,6 +693,23 @@ window.handleDepositSubmit = async function(event) {
         return;
     }
 
+    const token = localStorage.getItem('token');
+    let tokenIsValid = false;
+    if (token) {
+        try {
+            const parts = token.split('.');
+            if (parts.length === 3) {
+                const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+                tokenIsValid = !payload.exp || Number(payload.exp) * 1000 > Date.now();
+            }
+        } catch { tokenIsValid = false; }
+    }
+    if (!tokenIsValid) {
+        alert('Please log in to deposit funds.');
+        window.location.href = 'login.html';
+        return;
+    }
+
     const btn = event?.currentTarget || event?.target;
     const originalText = btn?.innerText;
     if (btn) {
