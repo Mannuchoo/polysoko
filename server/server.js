@@ -1096,9 +1096,21 @@ const normalizePhone = (phone) => {
     return p;
 };
 
-// Admin identity is explicitly configured through the server environment.
+// Prefer the explicitly configured admin identity. If older deployments have
+// an admin role in the database but ADMIN_PHONE was omitted, accept that row
+// only when it is unique; never guess between multiple admin accounts.
 async function resolveAdminPhone() {
-    return normalizePhone(process.env.ADMIN_PHONE) || null;
+    const configuredPhone = normalizePhone(process.env.ADMIN_PHONE);
+    if (configuredPhone) return configuredPhone;
+    try {
+        const rows = await dbAll(`SELECT phone FROM users WHERE LOWER(COALESCE(role, '')) = 'admin' AND phone IS NOT NULL`);
+        const adminPhones = [...new Set((rows || []).map(row => normalizePhone(row.phone)).filter(Boolean))];
+        if (adminPhones.length === 1) return adminPhones[0];
+        if (adminPhones.length > 1) console.error(`[ADMIN] ADMIN_PHONE is unset and ${adminPhones.length} admin accounts exist; refusing to guess the SuperAdmin identity.`);
+    } catch (error) {
+        console.warn('[ADMIN] Could not resolve the database admin identity:', error.message);
+    }
+    return null;
 }
 
 const formatNairobiDate = (offsetDays = 0) => {
@@ -6463,7 +6475,7 @@ app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
             return res.status(503).json({
                 success: false,
                 code: 'ADMIN_NOT_CONFIGURED',
-                message: 'No SuperAdmin account is configured in the database.'
+                message: 'Admin identity is not configured. Set ADMIN_PHONE or ensure the database has exactly one user with the admin role.'
             });
         }
         if (phone !== adminPhone) {
@@ -6479,7 +6491,7 @@ app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
             return res.status(401).json({ success: false, message: 'Incorrect phone number or password.' });
         }
         const user = await dbGet(`SELECT id FROM users WHERE phone = ?`, [adminPhone]);
-        if (!user) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured admin account does not exist.' });
+        if (!user) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured SuperAdmin phone has no matching user in this database.' });
 
         const token = signJwt({ id: user.id, phone: adminPhone, isAdmin: true }, { expiresIn: '1d' });
         await dbRun(`UPDATE users SET role = 'admin' WHERE phone = ?`, [adminPhone]).catch(() => {});
@@ -7683,8 +7695,11 @@ app.get('/api/football/analytics/:id', async (req, res) => {
     try {
         const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
         if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: 'Invalid fixture ID' });
+        const market = await dbGet(`SELECT sideA, sideB, startTime FROM markets WHERE id = ?`, [`fb_${fixtureId}`]);
         const analytics = await getFootballAnalytics(fixtureId, {
             apiFootballKey: process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY,
+            sportsMonksKey: process.env.SPORTS_API_KEY,
+            match: market ? { homeTeam: market.sidea || market.sideA, awayTeam: market.sideb || market.sideB, startTime: market.starttime || market.startTime } : null,
             request: async (url, params) => {
                 const result = await footballRequest(process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY, url, { params });
                 return { data: result.data, error: result.error };
@@ -7692,6 +7707,7 @@ app.get('/api/football/analytics/:id', async (req, res) => {
         });
         res.json(analytics);
     } catch (error) {
+        console.warn(`[sports analytics] fixture ${req.params.id} failed:`, error.message);
         res.status(error.message === 'Invalid fixture ID' ? 400 : 503).json({ error: 'Match analytics are temporarily unavailable.' });
     }
 });

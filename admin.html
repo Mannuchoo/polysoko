@@ -1624,9 +1624,6 @@ async function submitInlineAdminLogin() {
     try {
         const data = await API.post('/admin/login', payload);
         if (!data.success || !data.token) {
-            if (data.code === 'ADMIN_NOT_CONFIGURED') {
-                throw new Error('No SuperAdmin account is configured in the database.');
-            }
             throw new Error(data.message || 'Admin login failed.');
         }
         localStorage.setItem('token', data.token);
