@@ -1,6 +1,4 @@
 const API_FOOTBALL_BASE = 'https://v3.football.api-sports.io';
-const SPORTS_DB_BASE = 'https://www.thesportsdb.com/api/v1/json';
-
 const cache = new Map();
 const CACHE_TTL = 15 * 60 * 1000;
 
@@ -55,24 +53,9 @@ function starPlayerFromRows(rows, teamId) {
     };
 }
 
-async function fetchSportsDbTeam(teamName, apiKey) {
-    if (!apiKey || !teamName) return null;
-    try {
-        const url = `${SPORTS_DB_BASE}/${encodeURIComponent(apiKey)}/searchteams.php?t=${encodeURIComponent(teamName)}`;
-        const response = await fetch(url, { signal: AbortSignal.timeout(7000) });
-        if (!response.ok) return null;
-        const payload = await response.json();
-        const team = payload?.teams?.[0];
-        return team ? { name: team.strTeam, badge: team.strBadge || null, website: team.strWebsite || null } : null;
-    } catch {
-        return null;
-    }
-}
-
 /** Fetches optional football match analytics. Provider failures are isolated per section. */
 export async function getFootballAnalytics(fixtureId, {
-    apiFootballKey = process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.SPORTS_API_KEY || process.env.FOOTBALL_API_KEY,
-    sportsDbKey = process.env.SPORTS_DB_KEY || process.env.THESPORTSDB_KEY || process.env.THE_SPORTS_DB_KEY,
+    apiFootballKey = process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY,
     request
 } = {}) {
     const id = String(fixtureId || '').replace(/^fb_/, '');
@@ -98,13 +81,11 @@ export async function getFootballAnalytics(fixtureId, {
     }
 
     const season = league?.season;
-    const [homeRecent, awayRecent, lineupRows, scorerRows, homeTeam, awayTeam] = await Promise.all([
+    const [homeRecent, awayRecent, lineupRows, scorerRows] = await Promise.all([
         call(`${API_FOOTBALL_BASE}/fixtures`, { team: home.id, last: 5, status: 'FT' }).catch(() => { errors.homeForm = 'Recent form unavailable'; return []; }),
         call(`${API_FOOTBALL_BASE}/fixtures`, { team: away.id, last: 5, status: 'FT' }).catch(() => { errors.awayForm = 'Recent form unavailable'; return []; }),
         call(`${API_FOOTBALL_BASE}/fixtures/lineups`, { fixture: id }).catch(() => { errors.lineups = 'Lineups are not published yet'; return []; }),
-        season && league?.id ? call(`${API_FOOTBALL_BASE}/players/topscorers`, { league: league.id, season }).catch(() => []) : Promise.resolve([]),
-        fetchSportsDbTeam(home.name, sportsDbKey),
-        fetchSportsDbTeam(away.name, sportsDbKey)
+        season && league?.id ? call(`${API_FOOTBALL_BASE}/players/topscorers`, { league: league.id, season }).catch(() => []) : Promise.resolve([])
     ]);
     const candidate = starPlayerFromRows(scorerRows, home.id) || starPlayerFromRows(scorerRows, away.id);
     const result = {
@@ -112,7 +93,7 @@ export async function getFootballAnalytics(fixtureId, {
         awayTeamForm: formFromFixtures(awayRecent, away.id),
         lineups: normalizeLineups(lineupRows, home.id, away.id),
         starPlayer: candidate,
-        teamBadges: { home: homeTeam?.badge || null, away: awayTeam?.badge || null },
+        teamBadges: { home: home.logo || null, away: away.logo || null },
         errors
     };
     return writeCache(id, result);

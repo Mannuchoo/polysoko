@@ -1,21 +1,6 @@
-// The free tier allows 20 requests per day per model, so several models are
-// listed: when one model runs dry the next one still serves the request.
-// gemini-2.0-flash was retired and now answers 404, so it is not listed here.
-const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview'];
+import OpenAI from 'openai';
 
-const OUTPUT_SCHEMA = {
-  type: 'OBJECT',
-  properties: {
-    subject: { type: 'STRING' },
-    actionEvent: { type: 'STRING', description: 'A concise bare verb phrase in base form that follows "Will [subject]" grammatically. Example: "threaten to revoke", never "threatens to revoke" or "will threaten to revoke".' },
-    condition: { type: 'STRING', description: 'A concise context phrase that reads naturally after the action, preferably introduced by a preposition such as at, in, for, under, or during. Do not repeat the deadline.' },
-    deadline: { type: 'STRING', description: 'An exact future ISO 8601 timestamp with timezone, preferably YYYY-MM-DDTHH:mm:ss.sssZ.' },
-    resolutionCriteria: { type: 'STRING' },
-    imageUrl: { type: 'STRING', description: 'Use an empty string when there is no supported image URL.' },
-    videoUrl: { type: 'STRING', description: 'Use an empty string when there is no supported video URL.' }
-  },
-  required: ['subject', 'actionEvent', 'condition', 'deadline', 'resolutionCriteria', 'imageUrl', 'videoUrl']
-};
+const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b';
 
 const clean = value => typeof value === 'string' ? value.trim() : '';
 
@@ -64,10 +49,8 @@ function formatStrictMarketTitle({ subject, actionEvent, condition, deadlineAt }
 }
 
 export async function generateMarketFromNews(rawArticleData) {
-  // GEMINI_API_KEY is the documented name; GOOGLE_API_KEY is accepted as an
-  // alias so either variable configures the generator.
-  const apiKey = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured.');
+  const apiKey = String(process.env.GROQ_API_KEY || '').trim();
+  if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
   const article = rawArticleData && typeof rawArticleData === 'object' ? rawArticleData : {};
   const title = clean(article.title || article.headline);
   const body = clean(article.body || article.content || article.description);
@@ -80,56 +63,34 @@ export async function generateMarketFromNews(rawArticleData) {
   const required = suppliedDeadline ? validateDeadline(suppliedDeadline) : null;
   const prompt = `Extract one objectively resolvable prediction market from this source. Use only facts supported by the source. Extract all four required components in this order: [Action/Event], [Subject], [Condition], [Exact Timestamp/Deadline]. The displayed title will be phrased as a natural, grammatically correct Yes/No question: "Will [Subject] [Action/Event] [Condition] by [Exact Timestamp/Deadline]?" Use the subject before its action in that question. The action/event must be a bare verb phrase in base form after "Will" ("threaten to revoke", never "threatens to revoke" and never "will threaten"). The condition must be a short phrase that reads naturally after the action, preferably beginning with a preposition such as "at", "in", "for", "under", or "during". Keep the event and condition concise, avoid duplicated subjects or deadlines, and use correct capitalization, possessives, articles, and punctuation. The deadline must be an exact future ISO 8601 timestamp with timezone. If no trusted deadline is supplied and the source does not support an explicit future deadline, return an empty deadline. ${required ? `Use this trusted deadline exactly, without changing it: ${required.timestamp}.` : ''} Condition must name the relevant context or resolution source; do not leave it empty. Resolution criteria must define one observable Yes/No rule and the source/event used to settle it. Do not make up media links; return supplied media URLs only. If the subject/action/context cannot be grounded in the source or the result is not definitively resolvable, return empty mandatory fields.\n\nSource title: ${title}\nSource body: ${body}\nTrusted deadline: ${required?.timestamp || 'none'}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
 
+  const client = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1', maxRetries: 0 });
+  const response = await client.chat.completions.create({
+    model: String(process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL).trim(),
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: 'Extract grounded, objectively resolvable prediction markets. Return only a JSON object with subject, actionEvent, condition, deadline, resolutionCriteria, imageUrl, and videoUrl fields. Every field must be a string.' },
+      { role: 'user', content: prompt }
+    ]
+  });
+  const text = response.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Groq returned an empty structured response.');
   let result;
-  let lastError;
-  for (const model of GEMINI_MODELS) {
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: 'application/json',
-            responseSchema: OUTPUT_SCHEMA
-          }
-        })
-      });
-      if (!response.ok) {
-        const detail = await response.text();
-        const error = new Error(`Gemini API request failed (${response.status}): ${detail.slice(0, 500)}`);
-        // 400/404 mean the model is unusable; 429 means its daily quota is
-        // spent. Both cases mean the next model in the list should try.
-        if ([400, 404, 429].includes(response.status)) { lastError = error; continue; }
-        throw error;
-      }
-      const payload = await response.json();
-      const text = payload.candidates?.[0]?.content?.parts?.map(part => part.text || '').join('');
-      if (!text) throw new Error('Gemini returned an empty structured response.');
-      result = JSON.parse(text);
-      break;
-    } catch (error) {
-      lastError = error;
-      if (error instanceof SyntaxError) break;
-      if (String(error.message).includes('(400)') || String(error.message).includes('(404)') || String(error.message).includes('(429)')) continue;
-      throw error;
-    }
-  }
-  if (!result) throw lastError || new Error('Gemini could not generate a market.');
+  try { result = JSON.parse(text); }
+  catch { throw new Error('Groq returned invalid JSON for the market context check.'); }
 
   const subject = clean(result.subject);
   const actionEvent = clean(result.actionEvent);
   const condition = clean(result.condition);
   const resolutionCriteria = clean(result.resolutionCriteria);
   if (!subject || !actionEvent || !condition || !resolutionCriteria) {
-    throw new Error('Gemini output is missing an action event, subject, condition, or resolution criteria.');
+    throw new Error('Groq output is missing an action event, subject, condition, or resolution criteria.');
   }
   if (resolutionCriteria.length < 15 || /\b(might|could|possibly|perhaps|likely|unlikely|depends)\b/i.test(resolutionCriteria)) {
     throw new Error('The generated resolution rule must settle to a definitive Yes or No.');
   }
   const deadline = validateDeadline(result.deadline);
-  if (required && deadline.timestamp !== required.timestamp) throw new Error('Gemini changed the supplied exact deadline; the market was not accepted.');
+  if (required && deadline.timestamp !== required.timestamp) throw new Error('Groq changed the supplied exact deadline; the market was not accepted.');
   const imageUrl = suppliedImage || validHttpUrl(result.imageUrl);
   const videoUrl = suppliedVideo || validHttpUrl(result.videoUrl);
 

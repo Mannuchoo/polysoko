@@ -198,7 +198,7 @@ const MPESA_B2C_SHORTCODE = process.env.MPESA_B2C_SHORTCODE || (MPESA_ENV === 's
 const MPESA_B2C_INITIATOR = process.env.MPESA_B2C_INITIATOR || process.env.MPESA_INITIATOR;
 const MPESA_B2C_SECURITY_CREDENTIAL = process.env.MPESA_B2C_SECURITY_CREDENTIAL || process.env.MPESA_SECURITY_CREDENTIAL;
 const MPESA_B2C_COMMAND_ID = process.env.MPESA_B2C_COMMAND_ID || 'BusinessPayment';
-const API_SPORTS_KEY = process.env.API_FOOTBALL_KEY || process.env.SPORTS_API_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY;
+const API_SPORTS_KEY = process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY;
 const sportsSyncDaysConfig = Number(process.env.SPORTS_SYNC_DAYS || 2);
 const SPORTS_SYNC_DAYS = Number.isFinite(sportsSyncDaysConfig)
     ? Math.max(1, Math.min(sportsSyncDaysConfig, 2))
@@ -1765,7 +1765,7 @@ async function syncRssNewsMarkets(limit = 500) {
                 source: feed.source,
                 country: feed.local ? 'Kenya' : undefined
             }); } catch (error) {
-                console.warn(`[news] Gemini rejected RSS headline "${title}": ${error.message}`);
+                console.warn(`[news] Groq rejected RSS headline "${title}": ${error.message}`);
                 continue;
             }
             if (!market) continue;
@@ -1861,12 +1861,12 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     const processedMarkets = [];
 
     for (const article of articles) {
-        // normalizeNewsArticle asks Gemini to generate and validate a natural,
+        // normalizeNewsArticle asks Groq to generate and validate a natural,
         // deadline-bound question while retaining the source headline separately.
         let market;
         try { market = await normalizeNewsArticle(article); }
         catch (error) {
-            console.warn(`[news] Gemini rejected headline "${article.title || ''}": ${error.message}`);
+            console.warn(`[news] Groq rejected headline "${article.title || ''}": ${error.message}`);
             continue;
         }
         if (!market || seen.has(market.id)) continue;
@@ -1952,7 +1952,7 @@ async function syncTmdbMarkets() {
                 try {
                     generated = await generateMarketFromNews({ title, body: `${content}\nCurrent TMDB list: ${listName}. Resolve by checking whether this title is present in that exact TMDB list at the trusted deadline.`, requiredDeadline: expiryTime, imageUrl: mediaUrl });
                 } catch (error) {
-                    console.warn(`[tmdb] Gemini rejected ${title}: ${error.message}`);
+                    console.warn(`[tmdb] Groq rejected ${title}: ${error.message}`);
                     continue;
                 }
                 const market = {
@@ -3427,7 +3427,7 @@ function sportsResponseRecords(data) {
 
 const syncSportsMarkets = async () => {
     if (!API_SPORTS_KEY) {
-        console.warn("Sports API key is not configured. Set SPORTS_API_KEY, API_SPORTS_KEY, or FOOTBALL_API_KEY.");
+        console.warn("API-Sports key is not configured. Set API_FOOTBALL_KEY, API_SPORTS_KEY, or FOOTBALL_API_KEY.");
         return;
     }
 
@@ -3662,7 +3662,7 @@ const syncSportsMarkets = async () => {
                     try {
                         generated = await generateMarketFromNews({ title: `Weather forecast in ${town.name}`, body: `${m.desc} Exact test: ${eventRules[eventType] || ''} Resolution source: WeatherAPI.`, requiredDeadline: deadlineAt });
                     } catch (error) {
-                        console.warn(`[weather] Gemini rejected ${town.name} ${eventType}: ${error.message}`);
+                        console.warn(`[weather] Groq rejected ${town.name} ${eventType}: ${error.message}`);
                         continue;
                     }
                     await dbRun(
@@ -4400,7 +4400,7 @@ const syncAllMarkets = async () => {
             let generated;
             try { generated = await generateMarketFromNews({ title: `${coin.name} USD price market`, body, requiredDeadline: expiryTime, imageUrl: coin.image || '' }); }
             catch (error) {
-                console.warn(`[crypto] Gemini rejected ${coin.name}: ${error.message}`);
+                console.warn(`[crypto] Groq rejected ${coin.name}: ${error.message}`);
                 continue;
             }
             const description = `${body}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`;
@@ -7473,9 +7473,8 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
         res.json({ success: true, market: normalizeMarketRow(updatedMarket) });
     } catch (e) {
         console.error('[admin] unverified market edit failed:', e.message);
-        const geminiUnconfigured = e.message?.includes('GEMINI_API_KEY is not configured.')
-            || e.message?.includes('GOOGLE_API_KEY is not configured.');
-        res.status(geminiUnconfigured ? 503 : 400).json({ success: false, message: geminiUnconfigured ? 'Headline verification is unavailable because Gemini is not configured.' : `Market was not saved: ${e.message}` });
+        const groqUnconfigured = e.message?.includes('GROQ_API_KEY is not configured.');
+        res.status(groqUnconfigured ? 503 : 400).json({ success: false, message: groqUnconfigured ? 'Headline verification is unavailable because Groq is not configured.' : `Market was not saved: ${e.message}` });
     }
 });
 
@@ -7685,10 +7684,9 @@ app.get('/api/football/analytics/:id', async (req, res) => {
         const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
         if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: 'Invalid fixture ID' });
         const analytics = await getFootballAnalytics(fixtureId, {
-            apiFootballKey: API_SPORTS_KEY,
-            sportsDbKey: process.env.SPORTS_DB_KEY || process.env.THESPORTSDB_KEY || process.env.THE_SPORTS_DB_KEY,
+            apiFootballKey: process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY,
             request: async (url, params) => {
-                const result = await footballRequest(API_SPORTS_KEY, url, { params });
+                const result = await footballRequest(process.env.API_FOOTBALL_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY, url, { params });
                 return { data: result.data, error: result.error };
             }
         });
