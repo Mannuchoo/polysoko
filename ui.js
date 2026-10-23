@@ -202,6 +202,17 @@ function isGamingMarket(m) {
         league.includes('esport') || league.includes('gaming');
 }
 
+function marketMetaText(value, fallback = '') {
+    const raw = typeof value === 'string' ? value : value && typeof value === 'object'
+        ? (value.name || value.displayName || value.label || value.code || value.abbreviation || value.abbr || value.short || '')
+        : '';
+    const text = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!text || /\[object(?:\s+object)?\]/i.test(text)) return fallback;
+    if (/^nca$/i.test(text)) return 'NCAA';
+    if (/^(?:us|usa)$/i.test(text)) return 'United States';
+    return text;
+}
+
 function isSportsMarket(m) {
     if (isElectronicGameMarket(m)) return false;
     const cat = normalizeCategory(m?.category);
@@ -504,7 +515,7 @@ function renderSportsPage(container, sportsMarkets) {
         if (["nba", "nfl", "basketball", "baseball", "hockey", "volleyball", "rugby", "handball", "cricket", "tennis", "mma", "afl", "f1", "golf"].includes(cat)) return normalizeSportLabel(cat);
         // Fallback: detect football fixtures by "Team A vs Team B" title pattern
         if ((cat === "sports" || cat === "football") && isFootballFixtureMarket(m)) return "Football";
-        const league = (m.league || "").toLowerCase();
+        const league = marketMetaText(m.league).toLowerCase();
         if (league.includes("nba") || league.includes("basketball")) return "Basketball";
         if (league.includes("nfl") || league.includes("american football")) return "NFL";
         if (league.includes("nhl") || league.includes("hockey")) return "Hockey";
@@ -585,7 +596,7 @@ function renderSportsPage(container, sportsMarkets) {
         html += `<div class="empty-state" style="padding:24px;">${escapeHtml(label)} matches will appear here once synced.</div>`;
     }
     matches.forEach(m => {
-        const league = m.league || "General";
+        const league = marketMetaText(m.league, "General");
         if (league !== lastLeague) {
             html += `<div class="section-label" style="font-size:0.7rem;color:#777;margin-top:12px;">${escapeHtml(league.toUpperCase())}</div>`;
             lastLeague = league;
@@ -632,7 +643,7 @@ function createMarketCard(m) {
     // Determine badge and color — show actual location/league info
     let badgeText;
     if (isSports) {
-        const parts = [m.country, m.league || m.sport].filter(Boolean);
+        const parts = [marketMetaText(m.country), marketMetaText(m.league || m.sport)].filter(Boolean);
         badgeText = (parts.length ? parts.join(' — ') : 'Sports').toUpperCase();
     } else if (isNews) {
         badgeText = (m.source || m.country || 'NEWS').toUpperCase();
@@ -1620,7 +1631,7 @@ window.renderMatchView = async function renderMatchView(marketId) {
     const kickoff = market.startTime || market.event_start_time || market.eventStartTime;
     const kickoffDate = kickoff ? new Date(kickoff) : null;
     const kickoffLabel = kickoffDate && !Number.isNaN(kickoffDate.getTime()) ? kickoffDate.toLocaleString(undefined, { dateStyle:'full', timeStyle:'short' }) : 'Kickoff time unavailable';
-    const category = [market.sport || 'Soccer', market.country, market.league].filter(Boolean).map(escapeHtml).join(' | ');
+    const category = [marketMetaText(market.sport, 'Soccer'), marketMetaText(market.country), marketMetaText(market.league)].filter(Boolean).map(escapeHtml).join(' | ');
     const title = escapeHtml(market.betQuestion || market.title || `${home} vs ${away}`);
     root.innerHTML = `
       <div class="match-view-shell">
@@ -2129,24 +2140,12 @@ async function processConfirmedBet() {
 }
 
 function toggleHistory() {
-    const el = document.getElementById("historyCenter");
-    if (!el) return;
-
-    const isOpening = !el.classList.contains("active");
-
-    el.classList.toggle("active");
-
-    if (isOpening) {
-        loadHistory();
-    }
+    if (window.location.hash === '#history') window.closeUtilityPage?.();
+    else window.location.hash = '#history';
 }
 
 function openHistory() {
-    const el = document.getElementById("historyCenter");
-    if (!el) return;
-
-    el.classList.add("active");
-    loadHistory();
+    window.location.hash = '#history';
 }
 
 function loadHistory() {
@@ -2157,10 +2156,7 @@ function loadHistory() {
 }
 
 function closeHistory() {
-    const el = document.getElementById("historyCenter");
-    if (!el) return;
-
-    el.classList.remove("active");
+    if (window.location.hash === '#history') window.closeUtilityPage?.();
 }
 
 window.toggleHistory = toggleHistory;

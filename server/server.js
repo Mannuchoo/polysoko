@@ -3181,6 +3181,19 @@ function contentFieldValue(content, field) {
     return match ? match[1].trim() : '';
 }
 
+function sportsMetadataText(value, fallback = '') {
+    const raw = typeof value === 'string'
+        ? value
+        : value && typeof value === 'object'
+            ? (value.name || value.displayName || value.label || value.code || value.abbreviation || value.abbr || value.short || '')
+            : '';
+    const text = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!text || /\[object(?:\s+object)?\]/i.test(text)) return fallback;
+    if (/^nca$/i.test(text)) return 'NCAA';
+    if (/^(?:us|usa)$/i.test(text)) return 'United States';
+    return text;
+}
+
 // Brings the three-way (Home / Draw / Away) sports markets up to date.
 //
 // The four columns are added first and the backfill runs only once they all
@@ -3224,7 +3237,7 @@ async function repairSportsMarketMetadata() {
     await ensureDbColumn('markets', 'sport', 'TEXT');
 
     const rows = await dbAll(
-        `SELECT id, title, category, sport, sideA, sideB, country, league, content, startTime, event_start_time, event_end_time, status
+        `SELECT id, title, description, category, sport, sideA, sideB, country, league, content, startTime, event_start_time, event_end_time, status
          FROM markets
          WHERE id LIKE 'sp_%' OR id LIKE 'fb_%' OR category='football' OR category='sports'`,
         []
@@ -3247,9 +3260,25 @@ async function repairSportsMarketMetadata() {
         const sport = isFootball
             ? 'Football'
             : (row.sport || contentFieldValue(row.content, 'Sport') || sportLabelFromMarketId(row.id) || 'Other');
-        const country = contentFieldValue(row.content, 'Location') ||
-            (/^sp_/i.test(row.id || '') && row.country === sport ? 'International' : row.country) ||
-            'International';
+        const isNonStringMetadata = value => typeof value !== 'string' || !value.trim() || /\[object(?:\s+object)?\]/i.test(value);
+        const leagueFromContent = contentFieldValue(row.content, 'League');
+        let league = sportsMetadataText(leagueFromContent || row.league, '');
+        if (!league || isNonStringMetadata(row.league)) {
+            league = /^sp_nfl_/i.test(row.id || '') && /\bNCA\b/i.test(`${row.league || ''} ${row.content || ''}`) ? 'NCAA' : sport;
+        }
+        const countryFromContent = sportsMetadataText(contentFieldValue(row.content, 'Location'), '');
+        let country = countryFromContent || sportsMetadataText(row.country, '');
+        if (!country || isNonStringMetadata(row.country)) {
+            country = /^sp_nfl_/i.test(row.id || '') ? 'United States' : 'International';
+        }
+        const metadataNeedsRepair = row.league !== league || row.country !== country || /\[object(?:\s+object)?\]/i.test(`${row.description || ''} ${row.content || ''}`);
+        const description = metadataNeedsRepair ? `${sport} match in ${league}, ${country}.` : row.description;
+        const content = metadataNeedsRepair ? [
+            `Sport: ${sport}`,
+            `League: ${league}`,
+            `Location: ${country}`,
+            `Starts: ${row.startTime || ''}`
+        ].join('\n') : row.content;
         const status = validStatuses.has(String(row.status || '').toLowerCase())
             ? row.status
             : computeMarketStatus(row.startTime);
@@ -3266,7 +3295,9 @@ async function repairSportsMarketMetadata() {
         if (
             row.category === 'sports' &&
             row.sport === sport &&
+            row.league === league &&
             row.country === country &&
+            !metadataNeedsRepair &&
             row.status === status &&
             eventWindowMatches
         ) {
@@ -3278,12 +3309,15 @@ async function repairSportsMarketMetadata() {
             `UPDATE markets
              SET category = 'sports',
                  sport = ?,
+                 league = ?,
                  country = ?,
+                 description = ?,
+                 content = ?,
                  status = ?,
                  event_start_time = COALESCE(?, event_start_time),
                  event_end_time = COALESCE(?, event_end_time)
              WHERE id = ?`,
-            [sport, country, status, eventStartTime, eventEndTime, row.id]
+            [sport, league, country, description, content, status, eventStartTime, eventEndTime, row.id]
         );
     }
 }
@@ -3476,8 +3510,8 @@ const syncSportsMarkets = async () => {
                     continue;
                 }
                 const status = getSportsStatus(game, startTime);
-                const league = game?.league?.name || game?.league || sport.label;
-                const location = game?.country?.name || game?.league?.country || 'International';
+                const league = sportsMetadataText(game?.league?.name || game?.league?.code || game?.league, sport.label);
+                const location = sportsMetadataText(game?.country?.name || game?.country?.code || game?.country || game?.league?.country?.name || game?.league?.country, sport.key === 'nfl' ? 'United States' : 'International');
                 const title = `${homeTeam} vs ${awayTeam}`;
                 const description = `${sport.label} match in ${league}${location ? `, ${location}` : ''}.`;
 

@@ -311,6 +311,7 @@ function initSocket() {
     socket.on("newNotification", (data) => {
         showToast(`🔔 ${data.title}: ${data.message}`);
         updateNotificationBadge();
+        if (window.location.hash === '#notifications') window.router?.();
     });
 
     socket.on("winningPayout", (data) => {
@@ -336,18 +337,140 @@ window.addEventListener('beforeunload', () => {
     window.cleanupSocketListeners?.();
 });
 
-// Lightweight hash router for dedicated sports match pages.
+function utilityEscape(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+function restoreUtilityElements() {
+    const historyCenter = document.getElementById('historyCenter');
+    const historyHost = document.getElementById('history-placeholder');
+    if (historyCenter && historyHost && historyCenter.parentElement !== historyHost) historyHost.appendChild(historyCenter);
+    historyCenter?.classList.remove('utility-page-panel', 'active');
+
+    const accountCenter = document.getElementById('accountCenter');
+    const profileHost = document.getElementById('profile-placeholder');
+    if (accountCenter && profileHost && accountCenter.parentElement !== profileHost) profileHost.appendChild(accountCenter);
+    accountCenter?.classList.remove('utility-page-panel', 'active');
+
+    const assistant = document.querySelector('.assistant-chat-wrap');
+    const header = document.querySelector('.mobile-header');
+    const search = document.querySelector('.header-search-wrap');
+    if (assistant && header && assistant.parentElement !== header) header.insertBefore(assistant, search?.nextSibling || null);
+    assistant?.classList.remove('utility-chat-page');
+    assistant?.querySelector('.assistant-panel')?.classList.remove('utility-chat-panel', 'active');
+
+    const utilityContent = document.getElementById('utilityContent');
+    if (utilityContent) utilityContent.replaceChildren();
+}
+
+async function renderUtilityPage(route) {
+    const content = document.getElementById('utilityContent');
+    const title = document.getElementById('utilityTitle');
+    if (!content || !title) return;
+    const pageTitles = { chat: 'PolySoko AI', history: 'My History', notifications: 'Notifications', profile: 'My Profile', funds: 'Wallet' };
+    title.textContent = pageTitles[route] || 'PolySoko';
+
+    if (route === 'chat') {
+        const assistant = document.querySelector('.assistant-chat-wrap');
+        if (assistant) {
+            content.appendChild(assistant);
+            assistant.classList.add('utility-chat-page');
+            assistant.querySelector('.assistant-panel')?.classList.add('active', 'utility-chat-panel');
+            setTimeout(() => document.getElementById('assistantInput')?.focus(), 50);
+        } else {
+            content.innerHTML = '<p class="utility-empty">Chat is still loading. Please try again.</p>';
+        }
+        return;
+    }
+
+    if (route === 'history') {
+        const history = document.getElementById('historyCenter');
+        if (!history) return;
+        content.appendChild(history);
+        history.classList.add('active', 'utility-page-panel');
+        window.loadHistory?.();
+        return;
+    }
+
+    if (route === 'profile') {
+        const profile = document.getElementById('accountCenter');
+        if (!profile) return;
+        content.appendChild(profile);
+        profile.classList.add('active', 'utility-page-panel');
+        window.renderSuperAdminProfile?.();
+        return;
+    }
+
+    if (route === 'funds') {
+        const user = JSON.parse(localStorage.getItem('user_data') || '{}');
+        const balance = Number(user.balance || 0);
+        const card = typeof window.renderBalanceCard === 'function' ? window.renderBalanceCard(balance) : '';
+        content.innerHTML = `<div class="utility-card"><div id="walletBalanceCard" class="balance-card-dark wallet-balance-card">${card}</div></div>`;
+        return;
+    }
+
+    if (route === 'notifications') {
+        content.innerHTML = '<div class="utility-card"><div id="noteListContainer" class="notification-list"><p class="utility-empty">Loading notifications...</p></div><button id="markAllNotificationsRead" class="utility-primary" type="button">Mark all as read</button></div>';
+        try {
+            const res = await apiFetch('notifications');
+            if (window.location.hash !== '#notifications') return;
+            const notes = res?.notifications || [];
+            const list = document.getElementById('noteListContainer');
+            if (!list) return;
+            list.innerHTML = notes.length ? notes.map(n => `
+                <div class="notification-row utility-notification-row" style="opacity:${n.is_read ? '.62' : '1'}">
+                    <div class="utility-notification-copy">
+                        <strong>${utilityEscape(n.title)}${n.type === 'update' ? ' 🚀' : ''}</strong>
+                        <p>${utilityEscape(n.message)}</p>
+                        <small>${n.created_at ? utilityEscape(new Date(n.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })) : ''}</small>
+                    </div>
+                    <button type="button" class="utility-delete" aria-label="Delete notification" data-notification-id="${utilityEscape(n.id)}">Delete</button>
+                </div>`).join('') : '<p class="utility-empty">No notifications yet.</p>';
+            list.querySelectorAll('[data-notification-id]').forEach(button => {
+                button.addEventListener('click', event => window.deleteNotification(button.dataset.notificationId, event));
+            });
+            const markAll = document.getElementById('markAllNotificationsRead');
+            if (markAll) {
+                markAll.hidden = !notes.some(note => !note.is_read);
+                markAll.onclick = () => window.markNotificationsRead();
+            }
+        } catch (error) {
+            const list = document.getElementById('noteListContainer');
+            if (list) list.innerHTML = `<p class="utility-empty">Could not load notifications: ${utilityEscape(error.message || 'Please try again.')}</p>`;
+        }
+    }
+}
+
+window.closeUtilityPage = function() {
+    if (window.location.hash) window.location.hash = '';
+};
+
+// Lightweight hash router for dedicated detail and account pages.
 window.router = function router() {
     const match = window.location.hash.match(/^#match\/(.+)$/);
     const view = document.getElementById('matchView');
     const dashboard = document.querySelector('.dashboard-main');
+    const utilityView = document.getElementById('utilityView');
+    const utilityRoute = window.location.hash.match(/^#(chat|history|notifications|profile|funds)$/)?.[1];
+    restoreUtilityElements();
     if (match) {
         if (dashboard) dashboard.hidden = true;
+        if (utilityView) utilityView.hidden = true;
         if (view) view.hidden = false;
+        document.body.classList.remove('utility-route-open');
         window.renderMatchView?.(decodeURIComponent(match[1]));
         return;
     }
     if (view) { view.hidden = true; view.innerHTML = ''; }
+    if (utilityRoute) {
+        if (dashboard) dashboard.hidden = true;
+        if (utilityView) utilityView.hidden = false;
+        document.body.classList.add('utility-route-open');
+        renderUtilityPage(utilityRoute);
+        return;
+    }
+    if (utilityView) utilityView.hidden = true;
+    document.body.classList.remove('utility-route-open');
     if (dashboard) dashboard.hidden = false;
     document.body.classList.remove('match-view-open');
 };
@@ -384,34 +507,12 @@ window.renderBalanceDisplay = function() {
 }
 
 window.closeWalletModal = function() {
-    const modal = document.getElementById('walletModal');
-    if (modal) modal.remove();
+    if (window.location.hash === '#funds') window.location.hash = '';
 }
 
 window.openWalletModal = function() {
-    const existing = document.getElementById('walletModal');
-    if (existing) return existing.remove();
-
-    const user = JSON.parse(localStorage.getItem("user_data") || "{}");
-    const balance = user.balance || 0;
-    const cardHtml = typeof window.renderBalanceCard === 'function'
-        ? window.renderBalanceCard(balance)
-        : '';
-
-    const modalHtml = `
-        <div id="walletModal" class="wallet-modal" onclick="if(event.target === this) window.closeWalletModal()">
-            <div class="wallet-panel" onclick="event.stopPropagation()">
-                <div class="wallet-header">
-                    <h3>Funds</h3>
-                    <button class="wallet-close" type="button" onclick="window.closeWalletModal()" aria-label="Close funds">✕</button>
-                </div>
-                <div id="walletBalanceCard" class="balance-card-dark wallet-balance-card">
-                    ${cardHtml}
-                </div>
-            </div>
-        </div>
-    `;
-    document.body.insertAdjacentHTML('beforeend', modalHtml);
+    if (window.location.hash !== '#funds') window.location.hash = '#funds';
+    else window.router?.();
 }
 
 /**
@@ -993,9 +1094,9 @@ window.deleteNotification = async function(id, event) {
             
             const container = document.getElementById('noteListContainer');
             if (container && !container.querySelector('.notification-row')) {
-                container.innerHTML = '<div style="color:#555; text-align:center; padding:40px 20px; font-size:0.9rem;">no notification or caught up</div>';
-                const readAllBtn = container.parentElement.querySelector('button[onclick*="markNotificationsRead"]');
-                if (readAllBtn) readAllBtn.remove();
+                container.innerHTML = '<p class="utility-empty">No notifications yet.</p>';
+                const readAllBtn = document.getElementById('markAllNotificationsRead');
+                if (readAllBtn) readAllBtn.hidden = true;
             }
             updateNotificationBadge();
         }
@@ -1003,44 +1104,16 @@ window.deleteNotification = async function(id, event) {
 };
 
 window.toggleNotificationCenter = async function() {
-    let modal = document.getElementById('notificationModal');
-    if (modal) return modal.remove();
-
-    try {
-        const res = await apiFetch('notifications');
-        const notes = res?.notifications || [];
-        
-        const modalHtml = `
-            <div id="notificationModal" onclick="if(event.target === this) this.remove()" style="position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:100010; display:flex; justify-content:center; align-items:center; backdrop-filter: blur(4px);">
-                <div style="background:#1a1b23; width:90%; max-width:400px; padding:25px; border-radius:16px; border:1px solid #333; position: relative;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-                        <h3 style="color:white; margin:0; font-size: 1.1rem;">Notifications Center</h3>
-                        <button onclick="document.getElementById('notificationModal').remove()" style="background:none; border:none; color:gray; font-size:1.5rem; cursor:pointer;">✕</button>
-                    </div>
-                    <div id="noteListContainer" style="max-height:400px; overflow-y:auto;">
-                        ${notes.length ? notes.map(n => `
-                            <div class="notification-row" style="padding:15px 0; border-bottom:1px solid #222; opacity: ${n.is_read ? '0.6' : '1'}; display: flex; justify-content: space-between; align-items: flex-start;">
-                                <div style="flex: 1; padding-right: 10px;">
-                                    <div style="color:${n.type === 'update' ? '#ffaa00' : '#00ff88'}; font-size:0.85rem; font-weight:bold;">${n.title} ${n.type === 'update' ? '🚀' : ''}</div>
-                                    <div style="color:#eee; font-size:0.8rem; margin-top:5px; line-height: 1.4;">${n.message}</div>
-                                    <div style="color:#555; font-size:0.65rem; margin-top:8px;">${new Date(n.created_at).toLocaleString([], {dateStyle:'medium', timeStyle:'short'})}</div>
-                                </div>
-                                <button onclick="window.deleteNotification('${n.id}', event)" style="background:none; border:none; color:#ff4d4d; opacity: 0.6; font-size:1rem; cursor:pointer; padding: 5px;">🗑️</button>
-                            </div>
-                        `).join('') : '<div style="color:#555; text-align:center; padding:40px 20px;">no notification or caught up</div>'}
-                    </div>
-                    ${notes.length ? `<button onclick="window.markNotificationsRead()" style="width:100%; margin-top:20px; background:#111; border:1px solid #333; color:#aaa; padding:12px; border-radius:10px; font-weight: bold; cursor:pointer; font-size: 0.8rem;">Mark all as read</button>` : ''}
-                </div>
-            </div>
-        `;
-        document.body.insertAdjacentHTML('beforeend', modalHtml);
-    } catch (e) { console.error(e); }
+    if (window.location.hash !== '#notifications') window.location.hash = '#notifications';
+    else window.router?.();
 };
 
 window.markNotificationsRead = async function() {
-    await apiFetch('notifications/read-all', { method: 'POST' });
-    document.getElementById('notificationModal')?.remove();
-    updateNotificationBadge();
+    try {
+        await apiFetch('notifications/read-all', { method: 'POST' });
+        updateNotificationBadge();
+        if (window.location.hash === '#notifications') window.router?.();
+    } catch (error) { console.error('Could not mark notifications as read:', error); }
 };
 
 async function updateNotificationBadge() {
@@ -1462,13 +1535,10 @@ function activateModules() {
             header.insertBefore(assistWrap, searchWrap.nextSibling);
 
             document.getElementById('assistantToggle').onclick = () => {
-                const box = document.getElementById('assistantBox');
-                if (!box) return;
-                box.classList.toggle('active');
-                if (box.classList.contains('active')) document.getElementById('assistantInput')?.focus();
+                window.location.hash = '#chat';
             };
             document.getElementById('assistantClose').onclick = () => {
-                document.getElementById('assistantBox')?.classList.remove('active');
+                window.closeUtilityPage();
             };
 
             const chatStorageKey = 'polysoko_chat_history_v1';
@@ -1616,13 +1686,8 @@ function activateModules() {
     }
 }
 function toggleAccountCenter() {
-    const el = document.getElementById("accountCenter");
-    if (!el) return;
-
-    const isOpen = el.classList.toggle("active");
-    if (isOpen) {
-        renderSuperAdminProfile();
-    }
+    if (window.location.hash === '#profile') window.closeUtilityPage?.();
+    else window.location.hash = '#profile';
 }
 
 async function renderSuperAdminProfile() {
