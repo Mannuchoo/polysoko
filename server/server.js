@@ -7,6 +7,7 @@ import { createBotRouter } from './src/routes/bot.js';
 import adminAuth from './src/middleware/adminAuth.js';
 import { fetchFootballOdds, oddsForFixture } from './src/services/footballOdds.js';
 import { FixtureDataCache, footballRequest } from './src/services/footballApiClient.js';
+import { getFootballAnalytics } from './src/services/sportsService.js';
 import { priceMarket } from './src/services/oddsEngine.js';
 import {
     THREE_WAY_BACKFILL_SQL,
@@ -197,7 +198,7 @@ const MPESA_B2C_SHORTCODE = process.env.MPESA_B2C_SHORTCODE || (MPESA_ENV === 's
 const MPESA_B2C_INITIATOR = process.env.MPESA_B2C_INITIATOR || process.env.MPESA_INITIATOR;
 const MPESA_B2C_SECURITY_CREDENTIAL = process.env.MPESA_B2C_SECURITY_CREDENTIAL || process.env.MPESA_SECURITY_CREDENTIAL;
 const MPESA_B2C_COMMAND_ID = process.env.MPESA_B2C_COMMAND_ID || 'BusinessPayment';
-const API_SPORTS_KEY = process.env.SPORTS_API_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY;
+const API_SPORTS_KEY = process.env.API_FOOTBALL_KEY || process.env.SPORTS_API_KEY || process.env.API_SPORTS_KEY || process.env.FOOTBALL_API_KEY;
 const sportsSyncDaysConfig = Number(process.env.SPORTS_SYNC_DAYS || 2);
 const SPORTS_SYNC_DAYS = Number.isFinite(sportsSyncDaysConfig)
     ? Math.max(1, Math.min(sportsSyncDaysConfig, 2))
@@ -7679,6 +7680,23 @@ io.on('connection', (socket) => {
 // Backend: server.js
 // server.js
 const footballMatchDetailsCache = new Map();
+app.get('/api/football/analytics/:id', async (req, res) => {
+    try {
+        const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
+        if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: 'Invalid fixture ID' });
+        const analytics = await getFootballAnalytics(fixtureId, {
+            apiFootballKey: API_SPORTS_KEY,
+            sportsDbKey: process.env.SPORTS_DB_KEY || process.env.THESPORTSDB_KEY || process.env.THE_SPORTS_DB_KEY,
+            request: async (url, params) => {
+                const result = await footballRequest(API_SPORTS_KEY, url, { params });
+                return { data: result.data, error: result.error };
+            }
+        });
+        res.json(analytics);
+    } catch (error) {
+        res.status(error.message === 'Invalid fixture ID' ? 400 : 503).json({ error: 'Match analytics are temporarily unavailable.' });
+    }
+});
 // The starting XI and the match statistics do not change once they are
 // published, so they are kept far longer than the live score.
 const footballFixtureDataCache = new FixtureDataCache();

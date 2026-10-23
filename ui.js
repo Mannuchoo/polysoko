@@ -658,6 +658,15 @@ function createMarketCard(m) {
                  onerror="this.style.display='none';" />`
         : '';
 
+    const sportsAnalytics = isFootball ? `
+        <section class="sports-analytics" data-fixture="${escapeHtml(m.id)}" style="margin:10px 0 4px; padding:10px; border:1px solid #25313b; border-radius:10px; background:#0c1218;" onclick="event.stopPropagation();">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;">
+                <span style="font-size:.72rem;color:#aab6c2;">MATCH RESULT · ${escapeHtml(m.sideA || '')} vs ${escapeHtml(m.sideB || '')}${m.startTime ? ` · ${escapeHtml(new Date(m.startTime).toISOString())}` : ''}</span>
+                <button type="button" class="sports-analytics-toggle" data-fixture="${escapeHtml(m.id)}" onclick="window.toggleSportsAnalytics(event, this)" style="border:1px solid #00d1ff66;background:#00d1ff12;color:#8ceaff;border-radius:7px;padding:5px 8px;font-size:.7rem;cursor:pointer;">View form & lineups</button>
+            </div>
+            <div class="sports-analytics-content" hidden style="padding-top:9px;font-size:.78rem;color:#d5dce3;"></div>
+        </section>` : '';
+
     return `
 <div class="market-card ${isNews ? 'news-style' : ''}" 
      data-id="${m.id}" 
@@ -692,7 +701,7 @@ function createMarketCard(m) {
         `
     }
 
-    ${''}
+    ${sportsAnalytics}
 
     <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
         ${miniProbBar}
@@ -704,6 +713,44 @@ function createMarketCard(m) {
 </div>
 `;
 }
+
+window.toggleSportsAnalytics = async function(event, button) {
+    event?.stopPropagation();
+    const panel = button?.closest('.sports-analytics');
+    const content = panel?.querySelector('.sports-analytics-content');
+    if (!panel || !content) return;
+    if (!content.hidden) {
+        content.hidden = true;
+        button.textContent = 'View form & lineups';
+        return;
+    }
+    content.hidden = false;
+    button.textContent = 'Loading analytics…';
+    if (content.dataset.loaded === '1') {
+        button.textContent = 'Hide analytics';
+        return;
+    }
+    content.innerHTML = '<span style="color:#82909d;">Loading recent form and available lineups…</span>';
+    try {
+        const response = await fetch(window.apiUrl(`/api/football/analytics/${encodeURIComponent(button.dataset.fixture || '')}`));
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Analytics unavailable');
+        const formRow = (label, values) => `<div style="display:flex;align-items:center;gap:5px;margin:6px 0;"><strong style="width:62px;color:#aab6c2;">${label}</strong>${(values || []).length ? values.map(value => {
+            const color = value === 'W' ? '#16a34a' : value === 'D' ? '#d49b22' : '#dc3d4b';
+            return `<span title="${value === 'W' ? 'Win' : value === 'D' ? 'Draw' : 'Loss'}" style="display:inline-grid;place-items:center;width:22px;height:22px;border-radius:5px;background:${color};color:white;font-weight:800;">${value}</span>`;
+        }).join('') : '<span style="color:#78838e;">Form unavailable</span>'}</div>`;
+        const lineup = (label, players) => `<div style="min-width:180px;flex:1;"><strong style="display:block;color:#aab6c2;margin:6px 0;">${label}</strong>${players?.length ? `<ol style="margin:0;padding-left:20px;">${players.map(player => `<li>${escapeHtml(player.name)}${player.position ? ` <small style="color:#77838e;">${escapeHtml(player.position)}</small>` : ''}</li>`).join('')}</ol>` : '<span style="color:#78838e;">Starting XI has not been published.</span>'}</div>`;
+        const star = data.starPlayer ? `<div style="margin-top:9px;padding:7px 9px;border-radius:7px;background:#f5c84218;color:#f5d976;">⭐ Player to watch: <strong>${escapeHtml(data.starPlayer.name)}</strong>${data.starPlayer.team ? ` · ${escapeHtml(data.starPlayer.team)}` : ''}${data.starPlayer.goals || data.starPlayer.assists ? ` · ${Number(data.starPlayer.goals || 0)} goals, ${Number(data.starPlayer.assists || 0)} assists` : ''}</div>` : '';
+        const badge = (url, label) => url ? `<img src="${escapeHtml(url)}" alt="${label} badge" loading="lazy" referrerpolicy="no-referrer" style="width:22px;height:22px;object-fit:contain;vertical-align:middle;margin-right:5px;" onerror="this.remove();">` : '';
+        const badges = `<div style="display:flex;gap:12px;align-items:center;margin-bottom:6px;">${badge(data.teamBadges?.home, 'Home')}${badge(data.teamBadges?.away, 'Away')}</div>`;
+        content.innerHTML = `${badges}${formRow('Home', data.homeTeamForm)}${formRow('Away', data.awayTeamForm)}${star}<details style="margin-top:9px;"><summary style="cursor:pointer;color:#8ceaff;">View lineups</summary><div style="display:flex;gap:14px;flex-wrap:wrap;padding-top:7px;">${lineup('Home starting 11', data.lineups?.home)}${lineup('Away starting 11', data.lineups?.away)}</div></details>`;
+        content.dataset.loaded = '1';
+        button.textContent = 'Hide analytics';
+    } catch (error) {
+        content.innerHTML = `<span style="color:#e5a2a2;">${escapeHtml(error.message || 'Match analytics are temporarily unavailable.')}</span>`;
+        button.textContent = 'Retry analytics';
+    }
+};
 
 // The implied probability of every outcome on a market, as whole percents
 // that add up to 100. A three-way market reports home/draw/away; a binary
