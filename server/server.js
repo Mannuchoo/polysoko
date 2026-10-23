@@ -389,11 +389,14 @@ async function getMpesaAccessToken() {
         throw new Error('M-Pesa consumer key and secret are not configured.');
     }
 
+    const basicCredentials = Buffer.from(`${MPESA_CONSUMER_KEY.trim()}:${MPESA_CONSUMER_SECRET.trim()}`).toString('base64');
     const tokenRes = await axios.get(
         `${MPESA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
-        { auth: { username: MPESA_CONSUMER_KEY, password: MPESA_CONSUMER_SECRET } }
+        { headers: { Authorization: `Basic ${basicCredentials}` }, timeout: 15000 }
     );
-    return tokenRes.data.access_token;
+    const accessToken = tokenRes.data?.access_token;
+    if (!accessToken) throw new Error('Safaricom OAuth did not return an access token.');
+    return accessToken;
 }
 
 function mpesaTimestamp() {
@@ -6116,10 +6119,13 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
     }
 
     try {
+        const formattedPhone = normalizePhone(req.user.phone);
+        if (!/^254[17]\d{8}$/.test(formattedPhone || '')) {
+            return res.status(400).json({ success: false, code: 'INVALID_ACCOUNT_PHONE', message: 'Your account does not have a valid Kenyan M-Pesa number. Update your registered phone number before depositing.' });
+        }
         const accessToken = await getMpesaAccessToken();
         const timestamp = mpesaTimestamp();
         const password = Buffer.from(`${MPESA_STK_SHORTCODE}${MPESA_STK_PASSKEY}${timestamp}`).toString('base64');
-        const formattedPhone = normalizePhone(req.user.phone);
         const callbackUrl = STK_CALLBACK_URL;
         const roundedAmount = Math.round(amount);
         console.log(`M-Pesa STK callback URL: ${callbackUrl}`);
@@ -6141,12 +6147,20 @@ app.post('/api/stkpush', authenticate, async (req,res)=>{
         await dbRun(`INSERT INTO transactions (user_phone, type, amount, reference, internal_id, status) VALUES (?, 'stk_request', ?, ?, ?, 'pending')`,
             [req.user.phone, roundedAmount, stkRes.data.CheckoutRequestID, stkRes.data.MerchantRequestID || null]);
         emitAdminEvent('mpesaLogUpdate', { phone: req.user.phone, amount: roundedAmount, status: 'pending', reference: stkRes.data.CheckoutRequestID });
-        res.json({ success:true, checkoutRequestId: stkRes.data.CheckoutRequestID, merchantRequestId: stkRes.data.MerchantRequestID });
+        res.json({ success:true, checkoutRequestId: stkRes.data.CheckoutRequestID, merchantRequestId: stkRes.data.MerchantRequestID, phone: formattedPhone });
    } catch(err) {
     console.error("M-Pesa STK Push Error:", err.response ? err.response.data : err.message);
+    const providerData = err.response?.data;
+    const providerMessage = typeof providerData === 'string'
+        ? providerData
+        : providerData?.errorMessage || providerData?.ResponseDescription || providerData?.error_description || providerData?.error || err.message || '';
+    const invalidDarajaToken = /invalid access token/i.test(`${providerMessage} ${JSON.stringify(providerData || {})}`) || err.response?.status === 401;
     res.status(500).json({ 
         success: false, 
-        message: err.response ? (err.response.data.errorMessage || err.response.data.ResponseDescription) : "Server Error" 
+        code: invalidDarajaToken ? 'MPESA_ACCESS_TOKEN_INVALID' : 'MPESA_STK_FAILED',
+        message: invalidDarajaToken
+            ? 'Safaricom rejected the M-Pesa access token. Confirm the M-Pesa environment and credentials configured on the server match.'
+            : (providerMessage || 'M-Pesa could not start the deposit. Please try again.')
     });
    }
 });

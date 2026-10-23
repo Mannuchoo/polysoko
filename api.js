@@ -647,6 +647,19 @@ window.handleWithdrawSubmit = async function(event) {
 };
 window.triggerDeposit = function() {
     let modal = document.getElementById('depositModal');
+    const hasCachedPhone = () => {
+        try { return !!JSON.parse(localStorage.getItem('user_data') || '{}').phone; }
+        catch { return false; }
+    };
+    const updateDepositPhone = () => {
+        const phoneDisplay = document.getElementById('depositRegisteredPhone');
+        if (!phoneDisplay) return;
+        try {
+            const account = JSON.parse(localStorage.getItem('user_data') || '{}');
+            const phone = String(account.phone || '').replace(/[^\d+]/g, '');
+            phoneDisplay.textContent = phone || 'your registered M-Pesa number';
+        } catch { phoneDisplay.textContent = 'your registered M-Pesa number'; }
+    };
     
     if (!modal) {
         console.log("Deposit modal missing. Creating universal instance...");
@@ -659,6 +672,7 @@ window.triggerDeposit = function() {
                     </div>
                     <div class="modal-body" style="text-align: center;">
                         <p style="color: #00ff88; font-size: 0.85rem; margin-bottom:15px; font-weight:bold;">Instant M-PESA Deposit</p>
+                        <p style="color:#aaa;font-size:.82rem;margin:0 0 16px;">STK prompt will be sent to <strong id="depositRegisteredPhone" style="color:#fff;">your registered M-Pesa number</strong></p>
                         
                         <div style="text-align: left; margin-bottom: 20px;">
                             <label style="color: #888; font-size: 0.75rem; display: block; margin-bottom: 5px;">AMOUNT (sKES)</label>
@@ -679,10 +693,14 @@ window.triggerDeposit = function() {
                 </div>
             </div>`;
         document.body.insertAdjacentHTML('beforeend', modalHtml);
+        updateDepositPhone();
+        if (!hasCachedPhone() && window.fetchProfile) window.fetchProfile().then(updateDepositPhone).catch(() => {});
         return;
     }
 
     modal.style.display = 'flex';
+    updateDepositPhone();
+    if (!hasCachedPhone() && window.fetchProfile) window.fetchProfile().then(updateDepositPhone).catch(() => {});
 };
 window.handleDepositSubmit = async function(event) {
     const amountInput = document.getElementById('depositAmount');
@@ -737,7 +755,7 @@ window.handleDepositSubmit = async function(event) {
         });
 
         if (result.success) {
-            alert("STK Push sent! Check your phone to enter your M-PESA PIN.");
+            alert(`STK Push sent to ${result.phone || 'your registered number'}! Check your phone to enter your M-PESA PIN.`);
             document.getElementById('depositModal').style.display = 'none';
             if (window.fetchProfile) await window.fetchProfile();
             if (window.loadHistory) window.loadHistory();
