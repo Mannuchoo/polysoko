@@ -1071,6 +1071,26 @@ async function ensureDbColumn(tableName, columnName, definition) {
     }
 }
 
+let adminPinStorageReady;
+function ensureAdminPinStorage() {
+    if (!adminPinStorageReady) {
+        adminPinStorageReady = (async () => {
+            await dbRun(`CREATE TABLE IF NOT EXISTS admin_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                pin_hash TEXT
+            )`);
+            await ensureDbColumn('admin_settings', 'pin_hash', 'TEXT');
+            await dbRun(`INSERT INTO admin_settings (id, created_at, updated_at) VALUES (1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING`);
+        })().catch((error) => {
+            adminPinStorageReady = null;
+            throw error;
+        });
+    }
+    return adminPinStorageReady;
+}
+
 // Adds a column, creating the table first if it does not exist yet.
 //
 // The boot migration creates the tables, but its statements are dispatched
@@ -2858,7 +2878,7 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
     addColumnSafely('users', 'avatar_mime', 'TEXT');
     addColumnSafely('users', 'avatar_data', 'BLOB');
 
-    // Minimal admin settings metadata; admin credentials and identity are environment-managed.
+    // Admin identity stays environment-managed; the PIN hash is added lazily by ensureAdminPinStorage().
     db.run(`CREATE TABLE IF NOT EXISTS admin_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -6564,8 +6584,38 @@ app.post('/api/admin/delete-market', authenticateAdmin, async (req, res) => {
     });
 });
 
-// Admin panel sign-in uses the same phone/password credentials as the account
-// stored in users, then verifies that account is the resolved SuperAdmin.
+// Password-based login remains available for explicit legacy recovery, while
+// the main site uses the signed-in account identity check below.
+// A signed-in user can enter the console without a second credential prompt
+// only when their verified account phone is the single configured admin phone.
+app.get('/api/admin/access', authenticate, async (req, res) => {
+    const adminPhone = await resolveAdminPhone();
+    const userPhone = normalizePhone(req.user?.phone);
+    return res.json({ success: true, isSuperAdmin: Boolean(adminPhone && userPhone === adminPhone) });
+});
+
+app.post('/api/admin/claim-session', authenticate, async (req, res) => {
+    try {
+        await jwtSecretReady;
+        const adminPhone = await resolveAdminPhone();
+        const userPhone = normalizePhone(req.user?.phone);
+        if (!adminPhone || userPhone !== adminPhone) {
+            return res.status(403).json({ success: false, code: 'ADMIN_ACCESS_REQUIRED', message: 'This signed-in account is not the configured SuperAdmin account.' });
+        }
+        const adminUser = await dbGet(`SELECT id FROM users WHERE phone = ?`, [adminPhone]);
+        if (!adminUser) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured SuperAdmin account does not exist.' });
+        const token = signJwt({ id: adminUser.id, phone: adminPhone, isAdmin: true }, { expiresIn: '1d' });
+        await dbRun(`UPDATE users SET role='admin' WHERE phone=?`, [adminPhone]).catch(() => {});
+        if (typeof global.addActivityLog === 'function') {
+            global.addActivityLog(adminPhone, 'admin_session_claim', 'SuperAdmin opened the console using the signed-in account', req.ip || '', req.headers['user-agent'] || '');
+        }
+        return res.json({ success: true, token, message: 'SuperAdmin session ready.' });
+    } catch (error) {
+        console.error('[ADMIN] Could not promote the signed-in SuperAdmin session:', error.message || error);
+        return res.status(503).json({ success: false, message: 'Could not verify the SuperAdmin account. Please try again.' });
+    }
+});
+
 app.post('/api/admin/login', adminPinLimiter, async (req, res) => {
     try {
         await jwtSecretReady;
@@ -6627,16 +6677,18 @@ app.post('/api/admin/pin-login', adminPinLimiter, async (req, res) => {
         return res.status(400).json({ success: false, message: "Please enter a valid 6-digit PIN." });
     }
     
-    const configuredAdminPin = String(process.env.ADMIN_PIN || '');
-    if (!configuredAdminPin) {
-        return res.status(503).json({ success: false, code: 'ADMIN_PIN_NOT_CONFIGURED', message: 'Set ADMIN_PIN in the server environment.' });
+    let pinValid = false;
+    try {
+        await ensureAdminPinStorage();
+        const settings = await dbGet(`SELECT pin_hash FROM admin_settings WHERE id = 1`);
+        if (!settings?.pin_hash) {
+            return res.status(503).json({ success: false, code: 'ADMIN_PIN_NOT_CONFIGURED', message: 'Open Admin Console while signed in to your SuperAdmin account to set an Admin PIN.' });
+        }
+        pinValid = await bcrypt.compare(String(pin), settings.pin_hash);
+    } catch (error) {
+        console.error('[ADMIN] PIN storage could not be read:', error.message || error);
+        return res.status(503).json({ success: false, code: 'ADMIN_PIN_STORAGE_UNAVAILABLE', message: 'Admin PIN storage is unavailable. Sign in to your SuperAdmin account and set a new PIN.' });
     }
-    if (!/^\d{6}$/.test(configuredAdminPin)) {
-        return res.status(503).json({ success: false, code: 'ADMIN_PIN_MISCONFIGURED', message: 'ADMIN_PIN must contain exactly six digits.' });
-    }
-    const supplied = Buffer.from(String(pin));
-    const configured = Buffer.from(configuredAdminPin);
-    const pinValid = supplied.length === configured.length && crypto.timingSafeEqual(supplied, configured);
     const adminUser = await dbGet(`SELECT id FROM users WHERE phone = ?`, [adminPhone]);
     if (!adminUser) return res.status(503).json({ success: false, code: 'ADMIN_NOT_CONFIGURED', message: 'The configured admin account does not exist.' });
     
@@ -6700,19 +6752,46 @@ app.post('/api/admin/master-login', authLimiter, async (req, res) => {
     res.json({ success: true, token, message: "Master access granted." });
 });
 
-// Check if admin PIN has been set up
-app.get('/api/admin/pin-status', authenticateAdmin, (_req, res) => {
-    res.json({ success: true, hasPin: Boolean(process.env.ADMIN_PIN) });
+// PINs are stored as bcrypt hashes in the application database, so changing a
+// PIN does not require editing deployment secrets or retaining plaintext.
+app.get('/api/admin/pin-status', authenticateAdmin, async (_req, res) => {
+    try {
+        await ensureAdminPinStorage();
+        const settings = await dbGet(`SELECT pin_hash FROM admin_settings WHERE id = 1`);
+        return res.json({ success: true, hasPin: Boolean(settings?.pin_hash) });
+    } catch (error) {
+        return res.status(503).json({ success: false, message: 'Could not read Admin PIN status.' });
+    }
 });
 
-// PIN changes are deployment configuration changes. Never persist submitted PINs
-// in the application database; update ADMIN_PIN in the service environment.
-app.post('/api/admin/setup-pin', authenticateAdmin, (_req, res) => {
-    res.status(409).json({ success: false, code: 'ADMIN_PIN_ENV_MANAGED', message: 'Configure ADMIN_PIN in the server environment.' });
-});
-app.post('/api/admin/change-pin', authenticateAdmin, (_req, res) => {
-    res.status(409).json({ success: false, code: 'ADMIN_PIN_ENV_MANAGED', message: 'Configure ADMIN_PIN in the server environment.' });
-});
+async function saveAdminPin(req, res) {
+    try {
+        const adminPhone = await resolveAdminPhone();
+        if (!adminPhone || normalizePhone(req.user?.phone) !== adminPhone) {
+            return res.status(403).json({ success: false, code: 'ADMIN_ACCESS_REQUIRED', message: 'Only the configured SuperAdmin can change the Admin PIN.' });
+        }
+        const newPin = String(req.body?.newPin || '');
+        const confirmPin = String(req.body?.confirmPin || '');
+        if (!/^\d{6}$/.test(newPin)) {
+            return res.status(400).json({ success: false, message: 'The new PIN must contain exactly six digits.' });
+        }
+        if (newPin !== confirmPin) {
+            return res.status(400).json({ success: false, message: 'The PIN entries do not match.' });
+        }
+        await ensureAdminPinStorage();
+        const pinHash = await bcrypt.hash(newPin, 12);
+        await dbRun(`UPDATE admin_settings SET pin_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, [pinHash]);
+        if (typeof global.addActivityLog === 'function') {
+            global.addActivityLog(adminPhone, 'admin_pin_changed', 'SuperAdmin changed the Admin PIN', req.ip || '', req.headers['user-agent'] || '');
+        }
+        return res.json({ success: true, message: 'Admin PIN updated.' });
+    } catch (error) {
+        console.error('[ADMIN] Could not update Admin PIN:', error.message || error);
+        return res.status(503).json({ success: false, message: 'Could not update the Admin PIN. Please try again.' });
+    }
+}
+app.post('/api/admin/setup-pin', authenticateAdmin, saveAdminPin);
+app.post('/api/admin/change-pin', authenticateAdmin, saveAdminPin);
 
 app.post('/api/admin/wire-funds', authenticateAdmin, async (req, res) => {
     const { amount, type } = req.body;

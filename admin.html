@@ -1437,18 +1437,7 @@ function esc(str) {
 <div id="changePinModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:10002; justify-content:center; align-items:center;">
     <div style="background:#1a1b23; width:95%; max-width:400px; padding:30px; border-radius:20px; border:1px solid #333; text-align:center;">
         <div style="font-size:2rem; margin-bottom:10px;">🔑</div>
-        <h3 style="color:var(--mu-red); margin:0 0 15px 0;">Admin PIN is managed by the server</h3>
-        <div style="margin-bottom:15px;">
-            <label style="color:#888; font-size:0.7rem; display:block; text-align:left; margin-bottom:5px;">CURRENT PIN</label>
-            <div style="display:flex; gap:8px; justify-content:center;">
-                <input type="password" class="pin-modal-input" maxlength="1" inputmode="numeric" pattern="[0-9]" data-group="current" data-idx="0" style="width:45px;height:55px;background:#000;border:2px solid #333;border-radius:10px;color:white;font-size:1.6rem;font-weight:bold;text-align:center;outline:none;-webkit-text-security:disc;">
-                <input type="password" class="pin-modal-input" maxlength="1" inputmode="numeric" pattern="[0-9]" data-group="current" data-idx="1" style="width:45px;height:55px;background:#000;border:2px solid #333;border-radius:10px;color:white;font-size:1.6rem;font-weight:bold;text-align:center;outline:none;-webkit-text-security:disc;">
-                <input type="password" class="pin-modal-input" maxlength="1" inputmode="numeric" pattern="[0-9]" data-group="current" data-idx="2" style="width:45px;height:55px;background:#000;border:2px solid #333;border-radius:10px;color:white;font-size:1.6rem;font-weight:bold;text-align:center;outline:none;-webkit-text-security:disc;">
-                <input type="password" class="pin-modal-input" maxlength="1" inputmode="numeric" pattern="[0-9]" data-group="current" data-idx="3" style="width:45px;height:55px;background:#000;border:2px solid #333;border-radius:10px;color:white;font-size:1.6rem;font-weight:bold;text-align:center;outline:none;-webkit-text-security:disc;">
-                <input type="password" class="pin-modal-input" maxlength="1" inputmode="numeric" pattern="[0-9]" data-group="current" data-idx="4" style="width:45px;height:55px;background:#000;border:2px solid #333;border-radius:10px;color:white;font-size:1.6rem;font-weight:bold;text-align:center;outline:none;-webkit-text-security:disc;">
-                <input type="password" class="pin-modal-input" maxlength="1" inputmode="numeric" pattern="[0-9]" data-group="current" data-idx="5" style="width:45px;height:55px;background:#000;border:2px solid #333;border-radius:10px;color:white;font-size:1.6rem;font-weight:bold;text-align:center;outline:none;-webkit-text-security:disc;">
-            </div>
-        </div>
+        <h3 style="color:var(--mu-red); margin:0 0 15px 0;">Set or change your Admin PIN</h3>
         <div style="margin-bottom:15px;">
             <label style="color:#888; font-size:0.7rem; display:block; text-align:left; margin-bottom:5px;">NEW 6-DIGIT PIN</label>
             <div style="display:flex; gap:8px; justify-content:center;">
@@ -1588,6 +1577,17 @@ function hideAdminLoginGate() {
     if (gate) gate.style.display = 'none';
 }
 
+function setAdminSessionToken(token) {
+    localStorage.setItem('token', token);
+    // Refresh Socket.IO auth because this page may have opened with the basic
+    // user token before the server confirmed the matching SuperAdmin account.
+    socket.auth = { token };
+    if (typeof socket.disconnect === 'function' && typeof socket.connect === 'function') {
+        socket.disconnect();
+        socket.connect();
+    }
+}
+
 const ADMIN_IDLE_LOCK_MS = 5 * 60 * 1000;
 let adminIdleLockTimer = null;
 
@@ -1629,14 +1629,7 @@ async function submitInlineAdminLogin() {
         if (!data.success || !data.token) {
             throw new Error(data.message || 'Admin login failed.');
         }
-        localStorage.setItem('token', data.token);
-        // The page can be opened with a basic user's token. Re-authenticate the
-        // socket with the newly issued SuperAdmin token after the PIN succeeds.
-        socket.auth = { token: data.token };
-        if (typeof socket.disconnect === 'function' && typeof socket.connect === 'function') {
-            socket.disconnect();
-            socket.connect();
-        }
+        setAdminSessionToken(data.token);
         if (pinInput) pinInput.value = '';
         if (status) status.textContent = '';
         await initAdminAfterLogin();
@@ -2043,10 +2036,22 @@ async function initAdminAfterLogin() {
     try {
         await API.get('/admin/session');
     } catch (error) {
-        // API.request removes the token only when the server explicitly marks it
-        // invalid or expired. Keep it across network and server startup failures.
-        showAdminLoginGate(error.message || 'Could not verify your admin session. Please try again.');
-        return;
+        // Main-site sign-in tokens identify the user but do not carry admin
+        // privileges. Let the server promote only the configured SuperAdmin
+        // phone, then verify the newly issued admin token.
+        if (!localStorage.getItem('token')) {
+            showAdminLoginGate(error.message || 'Could not verify your admin session. Please try again.');
+            return;
+        }
+        try {
+            const claim = await API.post('/admin/claim-session', {});
+            if (!claim.success || !claim.token) throw new Error(claim.message || 'Could not verify this SuperAdmin account.');
+            setAdminSessionToken(claim.token);
+            await API.get('/admin/session');
+        } catch (claimError) {
+            showAdminLoginGate(claimError.message || 'Enter your Admin PIN to continue.');
+            return;
+        }
     }
     hideAdminLoginGate();
     resetAdminIdleLock();
@@ -3121,8 +3126,32 @@ function getModalPin(group) {
     return Array.from(document.querySelectorAll(`.pin-modal-input[data-group="${group}"]`)).map(i => i.value).join('');
 }
 
-window.submitChangePin = function() {
-    document.getElementById('changePinError').textContent = 'Update ADMIN_PIN in the server environment to change the admin PIN.';
+window.submitChangePin = async function() {
+    const errorEl = document.getElementById('changePinError');
+    const successEl = document.getElementById('changePinSuccess');
+    const button = document.getElementById('changePinBtn');
+    const newPin = getModalPin('new');
+    const confirmPin = getModalPin('confirm');
+    errorEl.textContent = '';
+    successEl.textContent = '';
+    if (!/^\d{6}$/.test(newPin)) {
+        errorEl.textContent = 'Enter a new 6-digit PIN.';
+        return;
+    }
+    if (newPin !== confirmPin) {
+        errorEl.textContent = 'The PIN entries do not match.';
+        return;
+    }
+    if (button) button.disabled = true;
+    try {
+        const result = await API.post('/admin/change-pin', { newPin, confirmPin });
+        successEl.textContent = result.message || 'Admin PIN saved.';
+        document.querySelectorAll('.pin-modal-input').forEach(input => { input.value = ''; });
+    } catch (error) {
+        errorEl.textContent = error.message || 'Could not save the Admin PIN.';
+    } finally {
+        if (button) button.disabled = false;
+    }
 };
 
 </script>

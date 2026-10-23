@@ -47,7 +47,7 @@ window.onload = async () => {
 
         // If this user is the configured SuperAdmin, simplify the sidebar to theme only and add Admin entry
         try {
-            const adminStats = await apiFetch('admin/stats');
+            const adminStats = await apiFetch('admin/access');
             if (adminStats && adminStats.isSuperAdmin) {
                 const mainSidebar = document.getElementById('mainSidebar');
                 if (mainSidebar) {
