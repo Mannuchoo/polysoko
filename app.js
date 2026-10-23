@@ -734,7 +734,7 @@ window.openAdminMarketEditor = async function() {
                         </div>
                         <button onclick="document.getElementById('marketEditorModal').remove()" style="background:none; border:none; color:#fff; font-size:1.4rem; cursor:pointer;">✕</button>
                     </div>
-                    <div style="background:#0e1116; border:1px solid #222; border-radius:14px; padding:14px; margin-bottom:18px; color:#bbb; font-size:0.85rem;">Tip: Click Edit and then use Rephrase to update the title and content quickly. Choose GPT or Gemini if your environment supports it.</div>
+                    <div style="background:#0e1116; border:1px solid #222; border-radius:14px; padding:14px; margin-bottom:18px; color:#bbb; font-size:0.85rem;">Tip: Click Edit and use Groq AI to sharpen the title and content before saving.</div>
                     <div style="display:grid; grid-template-columns:1fr; gap:10px;">
                         ${marketsHtml}
                     </div>
@@ -751,9 +751,9 @@ window.openAdminMarketEditor = async function() {
 
 window.openMarketEditModal = async function(marketId) {
     try {
-        const res = await apiFetch('admin/all-markets');
-        if (!res?.success) return alert('Unable to fetch market details.');
-        const market = res.markets.find(m => m.id === marketId);
+        const res = await apiFetch(`admin/market/${encodeURIComponent(marketId)}`);
+        if (!res?.success) return alert(res?.message || 'Unable to fetch market details.');
+        const market = res.market;
         if (!market) return alert('Market not found.');
 
         const modalHtml = `
@@ -773,11 +773,7 @@ window.openMarketEditModal = async function(marketId) {
                         <input id="marketEditTitle" value="${market.title || ''}" style="width:100%; padding:12px; border-radius:10px; border:1px solid #222; background:#000; color:#fff;" />
                         <label style="color:#888; font-size:0.8rem;">Description / Content</label>
                         <textarea id="marketEditContent" rows="6" style="width:100%; padding:12px; border-radius:10px; border:1px solid #222; background:#000; color:#fff;">${market.content || market.description || ''}</textarea>
-                        <label style="color:#888; font-size:0.8rem;">Rephrase Engine</label>
-                        <select id="marketRephraseEngine" style="width:100%; padding:12px; border-radius:10px; border:1px solid #222; background:#000; color:#fff;">
-                            <option value="gpt">GPT</option>
-                            <option value="gemini">Gemini</option>
-                        </select>
+                        <div style="color:#888; font-size:0.8rem;">AI provider: Groq</div>
                         <div style="display:flex; gap:10px; flex-wrap:wrap;">
                             <button onclick="window.rephraseMarketText('${market.id}')" style="flex:1; min-width:160px; background:#00d1ff; color:black; border:none; padding:12px; border-radius:10px; font-weight:800; cursor:pointer;">Rephrase with AI</button>
                             <button onclick="window.saveMarketEdits('${market.id}')" style="flex:1; min-width:160px; background:#00ff88; color:black; border:none; padding:12px; border-radius:10px; font-weight:800; cursor:pointer;">Save Changes</button>
@@ -799,7 +795,6 @@ window.openMarketEditModal = async function(marketId) {
 window.rephraseMarketText = async function(marketId) {
     const title = document.getElementById('marketEditTitle')?.value || '';
     const content = document.getElementById('marketEditContent')?.value || '';
-    const engine = document.getElementById('marketRephraseEngine')?.value || 'gpt';
     const statusEl = document.getElementById('marketRephraseStatus');
     if (!title && !content) return alert('Provide a title or description first.');
 
@@ -807,7 +802,7 @@ window.rephraseMarketText = async function(marketId) {
     try {
         const result = await apiFetch('admin/rephrase-market', {
             method: 'POST',
-            body: { title, content, engine }
+            body: { title, content }
         });
         if (!result?.success) {
             statusEl.innerText = result?.message || 'Rephrase failed.';
@@ -816,7 +811,7 @@ window.rephraseMarketText = async function(marketId) {
 
         document.getElementById('marketEditTitle').value = result.rephrased?.title || title;
         document.getElementById('marketEditContent').value = result.rephrased?.description || content;
-        statusEl.innerText = `Rephrased using ${result.engine || engine}. Review and save.`;
+        statusEl.innerText = `Rephrased using ${result.engine || 'Groq'}. Review and save.`;
     } catch (err) {
         console.error(err);
         statusEl.innerText = 'AI rephrase failed. Check the console.';
@@ -834,16 +829,16 @@ window.saveMarketEdits = async function(marketId) {
     try {
         const res = await apiFetch('admin/update-market', {
             method: 'POST',
-            body: { id: marketId, title, content, media_url: null, media_type: 'auto' }
+            body: { id: marketId, title, content }
         });
-        if (!res?.success) {
+        if (!res?.success || !res.market || String(res.market.title || '').trim() !== title) {
             statusEl.innerText = res?.message || 'Save failed.';
             return;
         }
         statusEl.innerText = 'Market updated successfully.';
         showToast('Market saved successfully');
         const editorRow = [...document.querySelectorAll('[data-market-editor-row]')].find(row => row.dataset.marketEditorRow === String(marketId));
-        if (editorRow) editorRow.querySelector('[data-market-editor-title]').textContent = title;
+        if (editorRow) editorRow.querySelector('[data-market-editor-title]').textContent = res.market.title;
         document.getElementById('marketRephraseModal')?.remove();
         document.getElementById('marketEditorModal')?.remove();
     } catch (err) {

@@ -2309,6 +2309,7 @@ async function editUnverifiedMarket(marketId) {
     const data = await API.get(`/admin/market/${encodeURIComponent(marketId)}`);
     if (!data?.success) return alert(data?.message || 'Could not load market details.');
     const m = data.market;
+    const sourceContext = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || {});
     const form = document.createElement('div');
     form.dataset.marketEdit = 'true';
     form.style.cssText = 'display:grid;gap:8px;margin-top:12px;padding:12px;background:#08090b;border-radius:8px;';
@@ -2331,8 +2332,9 @@ async function editUnverifiedMarket(marketId) {
         try {
             payload.deadline = new Date(payload.deadline).toISOString();
             saveButton.disabled = true;
-            saveButton.textContent = 'Saving…';
+            saveButton.textContent = 'Groq is reviewing…';
             message.textContent = '';
+            payload.sourceContext = sourceContext;
             const saved = await API.post('/admin/edit-unverified-market', payload);
             if (!saved?.success || !saved.market) throw new Error(saved?.message || 'Could not save edits.');
             const updated = saved.market;
@@ -2364,7 +2366,7 @@ async function editUnverifiedMarket(marketId) {
                 link.style.cssText = 'display:inline-block;margin-top:10px;color:#91caff;';
                 mediaPreview.appendChild(link);
             }
-            message.textContent = 'Changes saved successfully.';
+            message.textContent = 'Groq reviewed the edits and the saved market was reloaded from the database.';
             message.style.color = '#00e887';
             saveButton.textContent = 'Saved';
         } catch (error) {

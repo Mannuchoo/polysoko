@@ -214,10 +214,6 @@ const SETTLEMENT_BACKLOG_LIMIT = Number.isFinite(Number(process.env.SETTLEMENT_B
 const SETTLEMENT_SUSPENDED_LIMIT = Number.isFinite(Number(process.env.SETTLEMENT_SUSPENDED_LIMIT))
     ? Math.max(1, Number(process.env.SETTLEMENT_SUSPENDED_LIMIT))
     : 1;    // max api-sports calls per suspended-market sweep run
-// gemini-2.0-flash and gemini-2.0-flash-lite were retired and now answer 404.
-// The free tier allows 20 requests per day per model, so several live models
-// are listed to keep working when one model's quota runs out.
-const DEFAULT_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview'];
 // AfricasTalking validates its credentials at construction time and throws
 // ("Username can't be blank") when AT_USERNAME / AT_API_KEY are absent. That throw
 // happened at module scope, so the process died before binding a port and Railway
@@ -1166,7 +1162,7 @@ const personaConfig = personaRaw.split(/\r?\n/).reduce((acc, line) => {
 }, { keywords: [], instructions: '', tone: 'High-Energy', role: 'Elite Analyst' });
 
 function buildNewsQuestion(headline) {
-    // Frozen: automated market titles must be generated and validated by Gemini.
+    // Frozen: automated market titles must be generated and validated by Groq.
     return null;
     /* legacy local headline builder retained temporarily for source compatibility */
     const clean = String(headline || '')
@@ -2080,164 +2076,27 @@ if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     console.error('[FATAL CONFIG] EMAIL_USER / EMAIL_PASS are not set; transactional email will not send.');
 }
 
-// --- AI helpers: retry on 429 and fallback between OpenAI <-> Gemini ---
-async function callOpenAI(model, messages, opts = {}) {
-    const maxAttempts = 3;
-    let attempt = 0;
-    while (attempt < maxAttempts) {
-        try {
-            const res = await axios.post('https://api.openai.com/v1/chat/completions', {
-                model,
-                messages,
-                temperature: opts.temperature ?? 0.6,
-                max_tokens: opts.max_tokens ?? 320
-            }, {
-                headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' }
-            });
-            return res.data?.choices?.[0]?.message?.content || null;
-        } catch (err) {
-            const status = err?.response?.status;
-            if (status === 429) {
-                attempt++;
-                const delay = 300 * Math.pow(2, attempt);
-                await new Promise(r => setTimeout(r, delay));
-                continue;
-            }
-            throw err;
-        }
-    }
-    const e = new Error('OpenAI rate-limited');
-    e.code = 429;
-    throw e;
+// All generated text in the app uses Groq, including chat and market editing.
+async function callAI({ messages = [], promptText = '' }) {
+    const apiKey = String(process.env.GROQ_API_KEY || '').trim();
+    if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
+    const model = String(process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim();
+    const payloadMessages = Array.isArray(messages) && messages.length
+        ? messages
+        : [{ role: 'user', content: String(promptText || '') }];
+    const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+        model,
+        messages: payloadMessages,
+        temperature: 0.6,
+        max_tokens: 320
+    }, {
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 25000
+    });
+    const text = response.data?.choices?.[0]?.message?.content?.trim();
+    if (!text) throw new Error('Groq returned an empty response.');
+    return { engine: 'groq', text };
 }
-
-async function callGemini(promptText, opts = {}) {
-    const modelCandidates = [
-        opts.model,
-        process.env.GEMINI_MODEL,
-        ...DEFAULT_GEMINI_MODELS
-    ].filter(Boolean);
-    const models = [...new Set(modelCandidates)];
-    const maxAttempts = 3;
-
-    for (const model of models) {
-        let attempt = 0;
-        while (attempt < maxAttempts) {
-            try {
-                const body = {
-                    contents: [{ parts: [{ text: promptText }] }],
-                    generationConfig: {
-                        temperature: opts.temperature ?? 0.6,
-                        maxOutputTokens: opts.maxOutputTokens ?? 320
-                    }
-                };
-                const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, body);
-                return res.data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-            } catch (err) {
-                const status = err?.response?.status;
-                if (status === 404 || status === 400) {
-                    console.warn(`Gemini model unavailable: ${model} (${status})`);
-                    break;
-                }
-                if (status === 429) {
-                    const detail = String(err?.response?.data?.error?.message || '');
-                    // A daily free-tier quota does not clear by waiting a few
-                    // seconds, so move to the next model instead of retrying.
-                    if (detail.includes('Quota exceeded') || detail.includes('exceeded your current quota')) {
-                        console.warn(`Gemini model ${model} hit its daily quota; trying the next model.`);
-                        break;
-                    }
-                    attempt++;
-                    const delay = 300 * Math.pow(2, attempt);
-                    await new Promise(r => setTimeout(r, delay));
-                    continue;
-                }
-                throw err;
-            }
-        }
-    }
-    const e = new Error(`No configured Gemini model could generate content. Tried: ${models.join(', ')}`);
-    e.code = 'NO_GEMINI_MODEL';
-    throw e;
-}
-
-async function callAI({ engine = 'gpt', messages = null, promptText = '', suppressErrors = false }) {
-    const localText = buildLocalAIReply({ engine, messages, promptText });
-    if (localText) return { engine: 'polysoko-local', text: localText };
-    return {
-        engine: 'polysoko-local',
-        text: suppressErrors ? null : 'PolySoko Chat is ready. Ask about markets, bets, deposits, withdrawals, profile photos, sports, or account safety.'
-    };
-    if (suppressErrors) return { engine: 'polysoko-local', text: null };
-
-    // Priority 1: OpenAI (only if engine is gpt and key is available)
-    const useOpenAI = engine === 'gpt' && !!process.env.OPENAI_API_KEY;
-    const useGemini = !!process.env.GEMINI_API_KEY;
-
-    if (useOpenAI) {
-        try {
-            const resp = await callOpenAI('gpt-4o', messages, { temperature: 0.6, max_tokens: 320 });
-            if (resp) return { engine: 'openai', text: resp };
-        } catch (err) {
-            if (suppressErrors) return { engine: 'none', text: null };
-            console.error("❌ OpenAI Error:", err.response?.status || err.message);
-            if (suppressErrors) return { engine: 'none', text: null };
-            if (!useGemini) throw err; // Only throw if we can't fall back to Gemini
-        }
-    }
-
-    if (useGemini) {
-        try {
-            const resp = await callGemini(promptText || (messages?.map(m => m.content).join('\n') || ''), { temperature: 0.6, maxOutputTokens: 320 });
-            if (resp) return { engine: 'gemini', text: resp };
-        } catch (err) {
-            if (suppressErrors) return { engine: 'none', text: null };
-            console.error("❌ Gemini Error:", err.response?.status || err.message);
-            if (suppressErrors) return { engine: 'none', text: null };
-            throw err;
-        }
-    }
-
-    return { engine: 'none', text: null };
-}
-
-function buildLocalAIReply({ engine = '', messages = null, promptText = '' } = {}) {
-    const latest = Array.isArray(messages)
-        ? [...messages].reverse().find((m) => m.role === 'user')?.content || ''
-        : promptText;
-    const text = String(latest || promptText || '').trim();
-    const lower = text.toLowerCase();
-    const original = text.replace(/^title:\s*/i, '').replace(/\s+/g, ' ').trim();
-
-    if (!text) return null;
-
-    if (engine === 'headline-bot' || engine === 'market-editor' || /rewrite|rephrase|sharper|clearer|generate.*prediction market|current price|24h change/i.test(text)) return null;
-
-    if (lower.includes('avatar') || lower.includes('profile picture') || lower.includes('photo')) {
-        return 'Open Profile, choose a PNG, JPG, WebP, or GIF under 5MB, then press Save. If the old photo stays visible, refresh once after the save because browsers can cache images.';
-    }
-    if (lower.includes('deposit') || lower.includes('mpesa') || lower.includes('m-pesa')) {
-        return `Use Deposit, enter the amount, then approve the M-Pesa prompt. Never share your PIN or OTP with anyone claiming to help from chat.`;
-    }
-    if (lower.includes('withdraw')) {
-        return 'Open Withdrawals, enter at least 100 sKES, and submit. If it fails, check your balance first, then ask an admin to review the withdrawal log.';
-    }
-    if (lower.includes('bet') || lower.includes('market') || lower.includes('odds')) {
-        return 'Open the market card, compare the two sides, then stake only what you are comfortable risking. Live and boosted markets can change quickly, so check the status before confirming.';
-    }
-    if (lower.includes('settle') || lower.includes('won') || lower.includes('lost')) {
-        return 'Settlements run from confirmed market results. If a bet should be settled, open Admin and use the settlement controls for closed markets.';
-    }
-    if (lower.includes('sport') || lower.includes('football') || lower.includes('nba') || lower.includes('nfl')) {
-        return 'Sports are grouped by subcategory now. Open Sports, pick Football, NBA, NFL, Basketball, Baseball, Hockey, Volleyball, Rugby, Handball, or AFL, and matches will appear under their leagues.';
-    }
-    if (lower.includes('password') || lower.includes('login') || lower.includes('security')) {
-        return 'For account safety, use reset password from the login page and ignore anyone asking for your password, OTP, wallet private key, or M-Pesa PIN.';
-    }
-
-    return 'I can help with PolySoko markets, sports, deposits, withdrawals, profile photos, and account safety. Tell me what you are trying to do and I will guide you through the next step.';
-}
-
 function cleanMarketTitle(value) {
     const text = String(value || '').replace(/\s+-\s+[^-]+$/, '').replace(/\s+/g, ' ').trim();
     if (!text) return 'Market update';
@@ -4885,6 +4744,7 @@ app.get('/api/admin/pending-settlements', authenticateAdmin, async (req, res) =>
 // ADMIN ROUTE for single market details
 app.get('/api/admin/market/:id', authenticateAdmin, async (req, res) => {
     try {
+        res.set('Cache-Control', 'no-store');
         const { id } = req.params;
         const market = await dbGet(`SELECT * FROM markets WHERE id = ? LIMIT 1`, [id]);
         if (!market) {
@@ -6383,14 +6243,25 @@ app.get('/api/my-bets', authenticate, (req, res) => {
     });
 });
 // --- ADMIN ROUTES ---
-app.post('/api/admin/update-market', authenticateAdmin, (req, res) => {
-    const { id, title, content, media_url, media_type, sideA, sideB, sideC, oddsA, oddsB, oddsC } = req.body;
+app.post('/api/admin/update-market', authenticateAdmin, async (req, res) => {
+    const { id, title, content, media_url, media_type, sideA, sideB, sideC, oddsA, oddsB, oddsC } = req.body || {};
+    if (!id || !String(title || '').trim()) {
+        return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
+    }
 
     // The outcome labels and prices are only written when the admin supplied
     // them, so an older admin client that only sends the copy fields does not
     // wipe a market's sides.
-    const sets = ['title = ?', 'content = ?', 'media_url = ?', 'media_type = ?'];
-    const params = [title, content, media_url || null, media_type || 'auto'];
+    const sets = ['title = ?', 'content = ?'];
+    const params = [String(title).trim(), content ?? ''];
+    if (media_url !== undefined) {
+        sets.push('media_url = ?');
+        params.push(media_url || null);
+    }
+    if (media_type !== undefined) {
+        sets.push('media_type = ?');
+        params.push(media_type || 'auto');
+    }
 
     const pushText = (column, value) => {
         if (value === undefined || value === null) return;
@@ -6413,22 +6284,20 @@ app.post('/api/admin/update-market', authenticateAdmin, (req, res) => {
     pushNumber('oddsC', oddsC);
 
     params.push(id);
-
-    db.run(`
-        UPDATE markets
-        SET ${sets.join(', ')}
-        WHERE id = ?
-    `, params, function(err) {
-        if (err) return res.status(500).json({ success: false, message: err.message });
-
-        if (typeof emitMarkets === "function") emitMarkets();
-
-        res.json({ success: true });
-    });
+    try {
+        const result = await dbRun(`UPDATE markets SET ${sets.join(', ')} WHERE id = ?`, params);
+        if (!result?.changes) return res.status(404).json({ success: false, message: 'Market was not found; no changes were saved.' });
+        const market = await dbGet('SELECT * FROM markets WHERE id = ?', [id]);
+        if (typeof emitMarkets === 'function') emitMarkets();
+        return res.json({ success: true, market: normalizeMarketRow(market) });
+    } catch (err) {
+        console.error('[admin] market edit failed:', err.message);
+        return res.status(500).json({ success: false, message: 'Market edit could not be saved.' });
+    }
 });
 
 app.post('/api/admin/rephrase-market', authenticateAdmin, async (req, res) => {
-    const { title, content, engine = 'gpt' } = req.body;
+    const { title, content } = req.body;
     if (!title && !content) {
         return res.status(400).json({ success: false, message: 'Provide title or description text to rephrase.' });
     }
@@ -6442,8 +6311,8 @@ app.post('/api/admin/rephrase-market', authenticateAdmin, async (req, res) => {
     ];
 
     try {
-        // Use helper that handles retries and provider fallback
-        const aiResp = await callAI({ engine: 'market-editor', messages, promptText: `${prompt}\n\n${originalText}` });
+        // Use Groq as the sole AI provider
+        const aiResp = await callAI({ messages, promptText: `${prompt}\n\n${originalText}` });
         let responseText = aiResp?.text;
         let usedEngine = aiResp?.engine || 'none';
 
@@ -6472,7 +6341,7 @@ app.post('/api/admin/rephrase-market', authenticateAdmin, async (req, res) => {
 
 // Simple AI chat endpoint for assistant UI
 app.post('/api/ai/chat', authenticate, async (req, res) => {
-    const { message, engine = 'gpt', history = [] } = req.body;
+    const { message, history = [] } = req.body;
     if (!message) return res.status(400).json({ success: false, message: 'Missing message' });
 
     const user = await dbGet(`SELECT name, balance FROM users WHERE phone=?`, [req.user.phone]).catch(() => null);
@@ -6496,14 +6365,14 @@ app.post('/api/ai/chat', authenticate, async (req, res) => {
     ];
 
     try {
-        const aiResp = await callAI({ engine, messages, promptText: `${systemPrompt}\n\n${message}` });
+        const aiResp = await callAI({ messages, promptText: `${systemPrompt}\n\n${message}` });
         if (!aiResp || !aiResp.text) {
-            return res.json({ success: true, engine: 'local', reply: 'I can help with that, but the AI service is unavailable right now. Try again shortly or use the admin tools for urgent bet settlement.' });
+            return res.status(503).json({ success: false, message: 'Groq AI is unavailable right now. Please try again shortly.' });
         }
         return res.json({ success: true, engine: aiResp.engine, reply: aiResp.text });
     } catch (err) {
         console.error('AI chat failed:', err.message || err);
-        return res.json({ success: true, engine: 'local', reply: 'Chat is online, but the AI provider failed. Please try again shortly.' });
+        return res.status(503).json({ success: false, message: 'Groq AI is unavailable right now. Please try again shortly.' });
     }
 });
 
@@ -6575,6 +6444,7 @@ app.get('/api/admin/mpesa-status', authenticateAdmin, (req, res) => {
 });
 
 app.get('/api/admin/all-markets', authenticateAdmin, (req, res) => {
+    res.set('Cache-Control', 'no-store');
     db.all("SELECT * FROM markets ORDER BY timestamp DESC", (err, rows) => {
         if (err) return res.status(500).json({ success: false, message: "Database error" });
         res.json({ success: true, markets: rows || [] });
@@ -7662,6 +7532,7 @@ app.get('/api/admin/pending-markets', authenticateAdmin, async (req, res) => {
 
 app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticateAdmin, async (req, res) => {
     try {
+        res.set('Cache-Control', 'no-store');
         const markets = await dbAll(`
             SELECT m.*, m.creator as creator_phone, u.name as creator_name
             FROM markets m
@@ -7682,7 +7553,7 @@ app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticat
 });
 
 app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res) => {
-    const { marketId, title, description, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
+    const { marketId, title, description, sourceContext, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
     if (!marketId || !String(title || '').trim()) return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
     try {
         const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
@@ -7695,7 +7566,7 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
         if (due.getTime() <= Date.now()) return res.status(400).json({ success: false, message: 'This deadline has passed. Choose a future date and time, then save again.' });
         const generated = await generateMarketFromNews({
             title: String(title).trim(),
-            body: String(description || title).trim(),
+            body: [String(description || '').trim(), String(sourceContext || '').trim()].filter(Boolean).join('\n\n').slice(0, 10000) || String(title).trim(),
             requiredDeadline: due.toISOString(),
             imageUrl: cleanImage,
             videoUrl: cleanVideo
@@ -7705,11 +7576,17 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
         const mediaUrl = finalVideo || finalImage;
         const mediaType = finalVideo ? 'video' : (finalImage ? 'image' : null);
         const content = `Action/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nDeadline: ${generated.deadlineAt}\nResolution: ${generated.resolutionCriteria}`;
-        await dbRun(
+        const updateResult = await dbRun(
             `UPDATE markets SET title=?, description=?, content=?, category=?, event_end_time=?, startTime=?, media_url=?, media_type=?, image_url=?, video_url=?, sideA=?, sideB=?, ai_headline_generated=1, headline_version=2, status='draft' WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`,
             [generated.title, generated.resolutionCriteria, content, category || 'general', generated.deadlineAt, generated.deadlineAt, mediaUrl, mediaType, finalImage, finalVideo, sideA || 'YES', sideB || 'NO', marketId]
         );
+        if (!updateResult?.changes) {
+            return res.status(409).json({ success: false, message: 'Market was not saved because it is no longer editable. Refresh the review list and try again.' });
+        }
         const updatedMarket = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
+        if (!updatedMarket || updatedMarket.title !== generated.title) {
+            return res.status(500).json({ success: false, message: 'Market update did not persist. Please refresh and retry.' });
+        }
         emitMarkets();
         res.json({ success: true, market: normalizeMarketRow(updatedMarket) });
     } catch (e) {

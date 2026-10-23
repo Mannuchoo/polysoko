@@ -3,57 +3,13 @@ import OpenAI from 'openai';
 // Groq retired the previous Llama default for developer-tier projects in
 // August 2026. Keep this on a currently supported model unless overridden.
 const DEFAULT_MODEL = 'openai/gpt-oss-120b';
-// The Gemini free tier allows only 20 requests per day per model, so a single
-// model runs dry after a couple of dozen chats. Every model in this chain
-// carries its own daily quota, which multiplies the budget the bot can serve.
-const DEFAULT_GEMINI_MODELS = [
-  'gemini-3.8-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite',
-  'gemini-3-flash-preview',
-  'gemini-2.5-flash'
-];
 const REQUEST_TIMEOUT_MS = 25000;
 let groqClient;
-let geminiClient;
-// Models whose daily quota is spent stay skipped for the life of the process,
-// so one request discovers them instead of every request paying for the 429.
-const exhaustedGeminiModels = new Set();
 function getGroqClient() {
   const apiKey = String(process.env.GROQ_API_KEY || '').trim();
   if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
   if (!groqClient) groqClient = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1', maxRetries: 0 });
   return groqClient;
-}
-function getGeminiClient() {
-  const apiKey = String(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) throw new Error('Gemini chat fallback is not configured.');
-  if (!geminiClient) {
-    geminiClient = new OpenAI({
-      apiKey,
-      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-      maxRetries: 0
-    });
-  }
-  return geminiClient;
-}
-function hasGroqKey() {
-  return Boolean(String(process.env.GROQ_API_KEY || '').trim());
-}
-function hasGeminiKey() {
-  return Boolean(String(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim());
-}
-// A daily free-tier quota error means the model stays unusable until the quota
-// resets. A short-window rate limit is a different problem and is not fatal.
-function isDailyQuotaError(error) {
-  if (Number(error?.status) !== 429) return false;
-  const message = String(error?.message || '').toLowerCase();
-  return message.includes('quota exceeded') || message.includes('exceeded your current quota') || message.includes('free_tier');
-}
-function geminiModelChain() {
-  const configured = String(process.env.GEMINI_CHAT_MODEL || '').trim();
-  const models = [...new Set(configured ? [configured, ...DEFAULT_GEMINI_MODELS] : DEFAULT_GEMINI_MODELS)];
-  return models.filter(model => !exhaustedGeminiModels.has(model));
 }
 const MARKET_VISIBILITY = `
   status IN ('open', 'upcoming', 'live') AND COALESCE(settled, 0)=0
@@ -129,9 +85,9 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
   const messages = [{ role: 'system', content: systemPrompt }, ...safeHistory, { role: 'user', content: String(message).slice(0, 2000) }];
   const toolHandlers = { getHighRiskMarkets: () => getHighRiskMarkets(dbAll), getTrendingMarkets: () => getTrendingMarkets(dbAll) };
 
-  const runProvider = async ({ client, model, provider }) => {
-    // Each provider gets a fresh conversation because an interrupted tool call
-    // from the first provider cannot be resumed by the fallback provider.
+  const runGroq = async () => {
+    const client = getGroqClient();
+    const model = String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim();
     const providerMessages = messages.map(item => ({ ...item }));
     for (let turn = 0; turn < 4; turn++) {
       const payload = await client.chat.completions.create({
@@ -143,13 +99,13 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
         max_tokens: 600
       }, { timeout: REQUEST_TIMEOUT_MS });
       const choice = payload.choices?.[0];
-      if (!choice?.message) throw new Error(`${provider} returned an empty chat response.`);
+      if (!choice?.message) throw new Error('Groq returned an empty chat response.');
       providerMessages.push(choice.message);
       const calls = choice.message.tool_calls || [];
       if (!calls.length) {
         const reply = String(choice.message.content || '').trim();
-        if (!reply) throw new Error(`${provider} returned an empty chat response.`);
-        return { reply, model: payload.model || model, provider };
+        if (!reply) throw new Error('Groq returned an empty chat response.');
+        return { reply, model: payload.model || model, provider: 'Groq' };
       }
       for (const call of calls) {
         const name = call.function?.name;
@@ -158,58 +114,7 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
         providerMessages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
       }
     }
-    throw new Error(`${provider} could not finish the market lookup.`);
+    throw new Error('Groq could not finish the market lookup.');
   };
-
-  let groqError;
-  if (hasGroqKey()) {
-    try {
-      return await runProvider({
-        client: getGroqClient(),
-        model: String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim(),
-        provider: 'Groq'
-      });
-    } catch (error) {
-      groqError = error;
-      console.warn('[sokobot] Groq unavailable; trying Gemini fallback:', error.message);
-    }
-  } else {
-    groqError = new Error('GROQ_API_KEY is not configured.');
-  }
-
-  if (!hasGeminiKey()) {
-    const error = new Error('Both Groq and Gemini chat providers are unavailable.');
-    error.cause = { groq: groqError, gemini: new Error('Gemini chat fallback is not configured.') };
-    throw error;
-  }
-
-  const client = getGeminiClient();
-  const chain = geminiModelChain();
-  if (!chain.length) {
-    const error = new Error('Both Groq and Gemini chat providers are unavailable.');
-    error.cause = { groq: groqError, gemini: new Error('Every configured Gemini model has exhausted its daily quota.') };
-    throw error;
-  }
-
-  let lastGeminiError;
-  for (const model of chain) {
-    try {
-      return await runProvider({ client, model, provider: 'Gemini' });
-    } catch (error) {
-      lastGeminiError = error;
-      if (isDailyQuotaError(error)) {
-        // The quota resets daily, so stop using this model for the rest of
-        // this process and let the next model in the chain serve the request.
-        exhaustedGeminiModels.add(model);
-        console.warn(`[sokobot] Gemini model ${model} hit its daily quota; trying the next model.`);
-        continue;
-      }
-      console.warn(`[sokobot] Gemini model ${model} failed; trying the next model:`, error.message);
-    }
-  }
-
-  console.error('[sokobot] Gemini fallback failed:', lastGeminiError?.message);
-  const error = new Error('Both Groq and Gemini chat providers are unavailable.');
-  error.cause = { groq: groqError, gemini: lastGeminiError };
-  throw error;
+  return runGroq();
 }

@@ -12,12 +12,11 @@ export function createBotRouter({ dbAll, authenticate }) {
       return res.json({ success: true, engine: result.provider.toLowerCase(), model: result.model, reply: result.reply });
     } catch (error) {
       console.error('[sokobot] request failed:', error.message);
-      const notConfigured = error.message === 'GROQ_API_KEY is not configured.'
-        || error.message === 'Gemini chat fallback is not configured.';
+      const notConfigured = error.message === 'GROQ_API_KEY is not configured.';
       return res.status(notConfigured ? 503 : 502).json({
         success: false,
         message: notConfigured
-          ? 'PolySoko AI is not configured on the backend. Set GROQ_API_KEY or GEMINI_API_KEY in the server environment.'
+          ? 'PolySoko AI is not configured on the backend. Set GROQ_API_KEY in the server environment.'
           : 'PolySoko AI is temporarily unavailable. Please try again shortly.'
       });
     }
