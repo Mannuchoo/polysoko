@@ -61,7 +61,15 @@ export async function generateMarketFromNews(rawArticleData) {
   const suppliedVideo = validHttpUrl(article.videoUrl || article.video_url || media.videoUrl || media.video_url || media.embedUrl);
   const suppliedDeadline = clean(article.requiredDeadline);
   const required = suppliedDeadline ? validateDeadline(suppliedDeadline) : null;
-  const prompt = `Extract one objectively resolvable prediction market from this source. Use only facts supported by the source. Extract all four required components in this order: [Action/Event], [Subject], [Condition], [Exact Timestamp/Deadline]. The displayed title will be phrased as a natural, grammatically correct Yes/No question: "Will [Subject] [Action/Event] [Condition] by [Exact Timestamp/Deadline]?" Use the subject before its action in that question. The action/event must be a bare verb phrase in base form after "Will" ("threaten to revoke", never "threatens to revoke" and never "will threaten"). The condition must be a short phrase that reads naturally after the action, preferably beginning with a preposition such as "at", "in", "for", "under", or "during". Keep the event and condition concise, avoid duplicated subjects or deadlines, and use correct capitalization, possessives, articles, and punctuation. The deadline must be an exact future ISO 8601 timestamp with timezone. If no trusted deadline is supplied and the source does not support an explicit future deadline, return an empty deadline. ${required ? `Use this trusted deadline exactly, without changing it: ${required.timestamp}.` : ''} Condition must name the relevant context or resolution source; do not leave it empty. Resolution criteria must define one observable Yes/No rule and the source/event used to settle it. Do not make up media links; return supplied media URLs only. If the subject/action/context cannot be grounded in the source or the result is not definitively resolvable, return empty mandatory fields.\n\nSource title: ${title}\nSource body: ${body}\nTrusted deadline: ${required?.timestamp || 'none'}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
+  const marketTopic = clean(article.marketTopic || article.topic || 'market');
+  const country = clean(article.country || article.marketCountry || '');
+  const source = clean(article.source?.name || article.source || '');
+  const newsStory = /news|sports|politics|technology|developing/i.test(marketTopic);
+  const topicGuidance = newsStory
+    ? `This is ${marketTopic}${country ? ` coverage for ${country}` : ''}${source ? ` from ${source}` : ''}. Prefer a Kenya-specific developing story whenever the source is Kenyan; preserve the real people, institutions, places, and events named by the source. Only use a concrete developing story with a clear subject and an observable next step or result. Reject evergreen topics, opinion, vague speculation, and stories that only describe completed events.`
+    : `This is a ${marketTopic} market${country ? ` for ${country}` : ''}${source ? ` from ${source}` : ''}. Extract a concise, objectively resolvable event grounded in the supplied data.`;
+  const horizonGuidance = newsStory ? 'News and sports news deadlines must be at least 48 hours from now.' : 'Use the trusted deadline exactly when one is supplied.';
+  const prompt = `Extract one objectively resolvable prediction market from this source. Use only facts supported by the source. ${topicGuidance}\n\nReturn a concise marketHeader: a plain, short display headline of 4–9 words, no more than 72 characters, grounded in the source. It should name the subject and developing action, contain no filler or source attribution, and not be phrased as a question.\n\nAlso extract all four required resolution components in this order: [Action/Event], [Subject], [Condition], [Exact Timestamp/Deadline]. The full contract question is phrased as a natural, grammatically correct Yes/No question: "Will [Subject] [Action/Event] [Condition] by [Exact Timestamp/Deadline]?" Use the subject before its action in that question. The action/event must be a bare verb phrase in base form after "Will" ("pass the bill", never "passes the bill" and never "will pass the bill"). The condition must be a short phrase that reads naturally after the action and identifies the relevant context or resolution source. Keep all fields concise and avoid duplicated subjects or deadlines. The deadline must be an exact future ISO 8601 timestamp with timezone. ${horizonGuidance} ${required ? `Use this trusted deadline exactly, without changing it: ${required.timestamp}.` : 'If the source does not support a concrete future deadline, return an empty deadline.'} Resolution criteria must define one observable Yes/No rule and the source/event used to settle it. Do not make up media links; return supplied media URLs only. If the subject, developing action, condition, or resolution cannot be grounded in the source, return empty mandatory fields.\n\nSource title: ${title}\nSource body: ${body}\nCountry/context: ${country || 'not specified'}\nTopic: ${marketTopic}\nTrusted deadline: ${required?.timestamp || 'none'}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
 
   const client = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1', maxRetries: 0 });
   const response = await client.chat.completions.create({
@@ -69,7 +77,7 @@ export async function generateMarketFromNews(rawArticleData) {
     temperature: 0.1,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: 'Extract grounded, objectively resolvable prediction markets. Return only a JSON object with subject, actionEvent, condition, deadline, resolutionCriteria, imageUrl, and videoUrl fields. Every field must be a string.' },
+      { role: 'system', content: 'Extract one concise, source-grounded, objectively resolvable prediction market. Return only a JSON object with marketHeader, subject, actionEvent, condition, deadline, resolutionCriteria, imageUrl, and videoUrl fields. Every field must be a string. Keep marketHeader to 72 characters or fewer.' },
       { role: 'user', content: prompt }
     ]
   });
@@ -82,7 +90,12 @@ export async function generateMarketFromNews(rawArticleData) {
   const subject = clean(result.subject);
   const actionEvent = clean(result.actionEvent);
   const condition = clean(result.condition);
+  const marketHeader = clean(result.marketHeader).replace(/\s+/g, ' ');
   const resolutionCriteria = clean(result.resolutionCriteria);
+  const headerWords = marketHeader ? marketHeader.split(/\s+/).length : 0;
+  if (marketHeader.length > 72 || headerWords < 4 || headerWords > 9 || marketHeader.includes('?')) {
+    throw new Error('Groq output is missing a concise 4–9 word market header (maximum 72 characters, no question mark).');
+  }
   if (!subject || !actionEvent || !condition || !resolutionCriteria) {
     throw new Error('Groq output is missing an action event, subject, condition, or resolution criteria.');
   }
@@ -96,6 +109,7 @@ export async function generateMarketFromNews(rawArticleData) {
 
   return {
     title: formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt: deadline.timestamp }),
+    marketHeader,
     subject,
     actionEvent,
     condition,

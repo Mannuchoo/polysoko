@@ -623,7 +623,9 @@ function createMarketCard(m) {
     const isMovies = normalizeCategory(m.category) === 'movies';
     const sourceHeadline = isNews ? String(m.displayHeadline || m.rawHeadline || '').trim() : '';
     const titleFallback = m.sideA && m.sideB ? `${m.sideA} vs ${m.sideB}` : "";
-    const rawDisplayTitle = isNews ? (m.betQuestion || m.title) : (m.title || titleFallback);
+    const rawDisplayTitle = (isNews || isMovies)
+        ? (m.marketHeader || (isNews ? (m.betQuestion || m.title) : m.title))
+        : (m.title || titleFallback);
     const safeTitle = (rawDisplayTitle || "").replace(/'/g, "\\'");
     const displayTitle = escapeHtml(rawDisplayTitle) || 'Market';
 

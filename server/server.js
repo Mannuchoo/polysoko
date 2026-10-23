@@ -991,6 +991,7 @@ function normalizeMarketRow(market) {
         oddsA: market.oddsA ?? market.oddsa,
         oddsB: market.oddsB ?? market.oddsb,
         oddsC: market.oddsC ?? market.oddsc ?? null,
+        marketHeader: market.marketHeader || extractContentField(market.content, 'Market Header') || null,
         draw_volume: Number(market.draw_volume || 0),
         // PostgreSQL returns BIGINT values as strings (including "0"), which
         // JavaScript treats as truthy. Normalize this flag for UI consumers.
@@ -1000,6 +1001,7 @@ function normalizeMarketRow(market) {
 
 const SPORTS_MARKET_SQL = "(LOWER(COALESCE(category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(sport,'')) <> '' OR id LIKE 'sp_%' OR id LIKE 'fb_%' OR country='Football')";
 const AI_HEADLINE_MARKET_SQL = "(id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' AND id NOT LIKE 'tmdb_%' AND id NOT LIKE 'crypto_%' AND id NOT LIKE 'env_%' OR COALESCE(ai_headline_generated,0)=1) AND (id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' OR COALESCE(headline_version,0)>=2)";
+const NEWS_MARKET_HORIZON_SQL = "(id NOT LIKE 'news_%' AND id NOT LIKE 'tech_%' AND id NOT LIKE 'geo_%' OR COALESCE(event_end_time,startTime,timestamp) > NOW() + INTERVAL '48 hours')";
 const isSportsMarket = market => {
     const category = String(market?.category || '').toLowerCase();
     return ['sports', 'football', 'soccer'].includes(category) || Boolean(String(market?.sport || '').trim()) ||
@@ -1600,6 +1602,10 @@ const NEWS_CATEGORY_PATTERNS = {
     ]
 };
 
+const NEWS_MARKET_LIFETIME_HOURS = 7 * 24;
+const NEWS_STORY_MAX_AGE_HOURS = 72;
+const SPORTS_NEWS_PATTERN = /\b(sport|football|soccer|rugby|cricket|athletics|tennis|basketball|volleyball|golf|formula one|f1|boxing|mma|marathon|harambee stars|fkf|premier league|champions league|afcon|fifa|olympics|world cup|transfer window|match|fixture|tournament|finals?)\b/i;
+
 function createMatchNewsQuery(teamA, teamB) {
     const safeTeamA = teamA ? teamA.replace(/[^a-zA-Z0-9 ]/g, ' ').trim() : '';
     const safeTeamB = teamB ? teamB.replace(/[^a-zA-Z0-9 ]/g, ' ').trim() : '';
@@ -1625,12 +1631,12 @@ function classifyNewsArticle(title, content = '') {
     const hasMatch = (patterns) => patterns.some((pattern) => pattern.test(text));
     // Politics has priority when a story also mentions technology or business.
     if (hasMatch(NEWS_CATEGORY_PATTERNS.politics)) {
-        return { category: 'politics', sideA: 'LIKELY', sideB: 'UNLIKELY', expiryHours: 48, prefix: 'geo' };
+        return { category: 'politics', sideA: 'LIKELY', sideB: 'UNLIKELY', expiryHours: NEWS_MARKET_LIFETIME_HOURS, prefix: 'geo' };
     }
     if (hasMatch(NEWS_CATEGORY_PATTERNS.tech)) {
-        return { category: 'tech', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'tech' };
+        return { category: 'tech', sideA: 'YES', sideB: 'NO', expiryHours: NEWS_MARKET_LIFETIME_HOURS, prefix: 'tech' };
     }
-    return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: 24, prefix: 'news' };
+    return { category: 'news', sideA: 'YES', sideB: 'NO', expiryHours: NEWS_MARKET_LIFETIME_HOURS, prefix: 'news' };
 }
 
 async function normalizeNewsArticle(article) {
@@ -1641,11 +1647,18 @@ async function normalizeNewsArticle(article) {
     const classification = classifyNewsArticle(rawHeadline, content);
     const sourceName = typeof article.source === 'string' ? article.source : article.source?.name;
     const publishedAt = article.publishedAt || article.published_at || article.published || new Date().toISOString();
+    const publishedMs = Date.parse(publishedAt);
+    if (Number.isFinite(publishedMs) && (Date.now() - publishedMs > NEWS_STORY_MAX_AGE_HOURS * 60 * 60 * 1000 || publishedMs > Date.now() + 60 * 60 * 1000)) return null;
+    const country = article.marketCountry || article.country || sourceName || 'GLOBAL';
+    const marketTopic = article.marketTopic || (SPORTS_NEWS_PATTERN.test(`${rawHeadline} ${content}`) ? 'sports news' : classification.category);
     const hash = crypto.createHash('md5').update(`${rawHeadline}|${sourceName || ''}|${publishedAt}`).digest('hex');
     const expiresAt = new Date(Date.now() + classification.expiryHours * 60 * 60 * 1000).toISOString();
     const id = `${classification.prefix}_${hash}`;
     const existing = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime) > NOW()`, [id]);
-    if (existing && Number(existing.headline_version || 0) >= 2) return { ...normalizeMarketRow(existing), _persisted: true };
+    const existingDeadline = Date.parse(existing?.event_end_time || existing?.eventEndTime || existing?.startTime || existing?.starttime || '');
+    if (existing && Number(existing.headline_version || 0) >= 2 && existingDeadline > Date.now() + 48 * 60 * 60 * 1000) {
+        return { ...normalizeMarketRow(existing), _persisted: true };
+    }
     if (existing) {
         // Old generated headlines may contain malformed grammar. Hide them while
         // they are regenerated so a failed AI pass cannot leave a bad title live.
@@ -1654,6 +1667,9 @@ async function normalizeNewsArticle(article) {
     const generated = await generateMarketFromNews({
         title: rawHeadline,
         body: content,
+        marketTopic,
+        country,
+        source: sourceName,
         requiredDeadline: expiresAt,
         media_url: article.urlToImage || article.image || article.media_url || null,
         imageUrl: article.urlToImage || article.image || article.media_url || null,
@@ -1663,14 +1679,15 @@ async function normalizeNewsArticle(article) {
         id,
         title: generated.title,
         description: generated.resolutionCriteria,
-        content: `Headline: ${rawHeadline}\nDescription: ${content}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
+        content: `Headline: ${rawHeadline}\nMarket Header: ${generated.marketHeader}\nDescription: ${content}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
         media_url: generated.imageUrl || generated.videoUrl || null,
         media_type: generated.videoUrl ? 'video' : 'image',
         image_url: generated.imageUrl,
         video_url: generated.videoUrl,
         category: classification.category,
-        country: article.country || sourceName || 'GLOBAL',
+        country,
         source: sourceName || 'GLOBAL',
+        marketHeader: generated.marketHeader,
         sideA: classification.sideA,
         sideB: classification.sideB,
         url: article.url || article.link || null,
@@ -1820,12 +1837,12 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
          WHERE (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
            AND COALESCE(headline_version,0)>=2
            AND COALESCE(admin_verified,0)=1 AND COALESCE(ai_headline_generated,0)=1 AND status IN ('open','upcoming','live')
-           AND COALESCE(event_end_time, startTime, timestamp) > NOW()
-         ORDER BY timestamp DESC
+           AND COALESCE(event_end_time, startTime, timestamp) > NOW() + INTERVAL '48 hours'
+         ORDER BY CASE WHEN LOWER(COALESCE(country,'')) LIKE '%kenya%' THEN 0 ELSE 1 END, timestamp DESC
          LIMIT ?`,
         [limit]
     );
-    const newestCachedAt = cachedNews.length ? new Date(cachedNews[0].timestamp).getTime() : 0;
+    const newestCachedAt = cachedNews.reduce((latest, article) => Math.max(latest, Date.parse(article.timestamp || '') || 0), 0);
     const cacheFresh = Number.isFinite(newestCachedAt) && Date.now() - newestCachedAt < 2 * 60 * 60 * 1000;
     const cachedArticles = [];
     for (const article of cachedNews) {
@@ -1861,36 +1878,62 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
     }
     if (!force && cachedNews.length >= 12 && cacheFresh) return cachedArticles;
 
-    // Pull a broad, international set of current headlines plus a general
-    // article search. NewsAPI returns at most 100 articles per request.
-    const countries = ['ke', 'us', 'gb', 'in'];
-    const requests = [
-        ...countries.map(country =>
-            axios.get('https://newsapi.org/v2/top-headlines', {
-                params: { country, pageSize: 100, apiKey },
-                timeout: 10000
-            }).catch(error => {
-                console.warn(`[news] NewsAPI top-headlines (${country}) failed: ${error.response?.status || error.message}`);
-                return { data: { articles: [] } };
+    // Fetch recent local reporting first, then sports coverage and the broader
+    // international feed. Each source is tagged so Groq keeps the Kenya context.
+    const recentFrom = new Date(Date.now() - NEWS_STORY_MAX_AGE_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const requestSpecs = [
+        {
+            country: 'Kenya', topic: 'Kenyan developing news', priority: 0,
+            label: 'Kenya top headlines',
+            request: axios.get('https://newsapi.org/v2/top-headlines', {
+                params: { country: 'ke', pageSize: 100, apiKey }, timeout: 10000
             })
-        ),
-        axios.get('https://newsapi.org/v2/everything', {
-            params: {
-                q: 'news OR politics OR election OR economy OR business OR technology OR science OR health OR sports OR entertainment',
-                language: 'en',
-                sortBy: 'publishedAt',
-                pageSize: 100,
-                apiKey
-            },
-            timeout: 10000
-        }).catch(error => {
-            console.warn(`[news] NewsAPI everything failed: ${error.response?.status || error.message}`);
-            return { data: { articles: [] } };
-        })
+        },
+        {
+            country: 'Kenya', topic: 'Kenyan developing news', priority: 0,
+            label: 'Kenya focused search',
+            request: axios.get('https://newsapi.org/v2/everything', {
+                params: {
+                    q: 'Kenya OR Kenyan OR Nairobi OR Mombasa OR Kisumu OR Nakuru OR Eldoret OR "Harambee Stars" OR "Kenya Premier League" OR FKF OR "Gor Mahia" OR "AFC Leopards" OR IEBC OR "William Ruto"',
+                    from: recentFrom, language: 'en', sortBy: 'publishedAt', pageSize: 100, apiKey
+                }, timeout: 10000
+            })
+        },
+        {
+            country: 'International', topic: 'sports news', priority: 1,
+            label: 'sports news',
+            request: axios.get('https://newsapi.org/v2/everything', {
+                params: {
+                    q: 'football OR soccer OR rugby OR cricket OR athletics OR tennis OR basketball OR "Harambee Stars" OR FKF OR AFCON OR FIFA OR Olympics',
+                    from: recentFrom, language: 'en', sortBy: 'publishedAt', pageSize: 100, apiKey
+                }, timeout: 10000
+            })
+        },
+        {
+            country: 'International', topic: 'developing news', priority: 3,
+            label: 'international search',
+            request: axios.get('https://newsapi.org/v2/everything', {
+                params: {
+                    q: 'politics OR election OR economy OR business OR technology OR science OR health OR entertainment',
+                    from: recentFrom, language: 'en', sortBy: 'publishedAt', pageSize: 100, apiKey
+                }, timeout: 10000
+            })
+        }
     ];
-
-    const responses = await Promise.all(requests);
-    const articles = responses.flatMap(response => response.data?.articles || []);
+    const responses = await Promise.all(requestSpecs.map(spec => spec.request.catch(error => {
+        console.warn(`[news] NewsAPI ${spec.label} failed: ${error.response?.status || error.message}`);
+        return { data: { articles: [] } };
+    })));
+    const articles = responses.flatMap((response, index) => (response.data?.articles || []).map(article => ({
+        ...article,
+        marketCountry: requestSpecs[index].country,
+        marketTopic: requestSpecs[index].topic,
+        sourcePriority: requestSpecs[index].priority
+    }))).sort((left, right) => {
+        const priorityDifference = Number(left.sourcePriority) - Number(right.sourcePriority);
+        if (priorityDifference) return priorityDifference;
+        return (Date.parse(right.publishedAt || '') || 0) - (Date.parse(left.publishedAt || '') || 0);
+    });
     const seen = new Set();
     const processedMarkets = [];
 
@@ -1960,15 +2003,16 @@ async function syncTmdbMarkets() {
             });
 
             const items = Array.isArray(response.data?.results) ? response.data.results.slice(0, endpoint.limit) : [];
-            const expiryTime = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+            const expiryTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
             for (const item of items) {
                 const title = item.title || item.name || item.original_name || item.original_title || 'Unnamed';
                 const idSource = `${endpoint.path}_${item.id || title}`;
                 const hash = crypto.createHash('md5').update(idSource).digest('hex');
                 const marketId = `tmdb_${endpoint.categorySuffix}_${hash}`;
-                const existing = await dbGet(`SELECT id FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [marketId]);
-                if (existing) continue;
+                const existing = await dbGet(`SELECT id, event_end_time, startTime FROM markets WHERE id=? AND COALESCE(ai_headline_generated,0)=1 AND COALESCE(event_end_time,startTime)>NOW()`, [marketId]);
+                const existingDeadline = Date.parse(existing?.event_end_time || existing?.startTime || '');
+                if (existing && existingDeadline > Date.now() + 48 * 60 * 60 * 1000) continue;
                 const listName = endpoint.path.replace(/^\//, '').replace(/\//g, ' ');
                 const overview = item.overview || item.description || `TMDB entry for ${title}.`;
                 const mediaUrl = item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null;
@@ -1984,7 +2028,7 @@ async function syncTmdbMarkets() {
                 ].join('\n');
                 let generated;
                 try {
-                    generated = await generateMarketFromNews({ title, body: `${content}\nCurrent TMDB list: ${listName}. Resolve by checking whether this title is present in that exact TMDB list at the trusted deadline.`, requiredDeadline: expiryTime, imageUrl: mediaUrl });
+                    generated = await generateMarketFromNews({ title, body: `${content}\nCurrent TMDB list: ${listName}. Resolve by checking whether this title is present in that exact TMDB list at the trusted deadline.`, marketTopic: 'movies and film', country: 'International', requiredDeadline: expiryTime, imageUrl: mediaUrl });
                 } catch (error) {
                     console.warn(`[tmdb] Groq rejected ${title}: ${error.message}`);
                     continue;
@@ -1993,7 +2037,8 @@ async function syncTmdbMarkets() {
                     id: marketId,
                     title: generated.title,
                     description: generated.resolutionCriteria,
-                    content: `${content}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
+                    content: `${content}\nMarket Header: ${generated.marketHeader}\nAction/Event: ${generated.actionEvent}\nSubject: ${generated.subject}\nCondition: ${generated.condition}\nExact deadline: ${generated.deadlineAt}\nResolution criteria: ${generated.resolutionCriteria}`,
+                    marketHeader: generated.marketHeader,
                     media_url: mediaUrl,
                     media_type: 'image',
                     category: 'movies',
@@ -2977,7 +3022,7 @@ const emitBalance = (phone) => {
 };
 
 const emitMarkets = () => {
-    const sql = `SELECT * FROM markets WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open','live','upcoming') AND COALESCE(event_end_time,startTime) > NOW() ORDER BY category ASC, title ASC`;
+    const sql = `SELECT * FROM markets WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND ${NEWS_MARKET_HORIZON_SQL} AND status IN ('open','live','upcoming') AND COALESCE(event_end_time,startTime) > NOW() ORDER BY category ASC, title ASC`;
     db.all(sql, [], (err, rows) => {
         if (err) return console.error("❌ DB Error:", err.message);
         const markets = (rows || []).map(normalizeMarketRow);
@@ -4619,7 +4664,7 @@ app.get('/api/markets/preview', async (req, res) => {
     try {
         const rows = await dbAll(
             `SELECT * FROM markets
-             WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open', 'upcoming', 'live')
+            WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND ${NEWS_MARKET_HORIZON_SQL} AND status IN ('open', 'upcoming', 'live')
                AND NOT (
                     (category='sports' OR category='football' OR id LIKE 'sp_%' OR id LIKE 'fb_%')
                     AND (
@@ -4678,7 +4723,7 @@ const marketsRouteHandler = async (req, res) => {
         const rows = await dbAll(
             `SELECT *
              FROM markets
-             WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND status IN ('open', 'upcoming', 'live')
+             WHERE (COALESCE(admin_verified,0)=1 OR ${SPORTS_MARKET_SQL}) AND ${AI_HEADLINE_MARKET_SQL} AND ${NEWS_MARKET_HORIZON_SQL} AND status IN ('open', 'upcoming', 'live')
                AND COALESCE(event_end_time, startTime) > NOW()
                AND (
                      startTime IS NULL
@@ -7965,6 +8010,7 @@ app.get('/api/football/details/:id', async (req, res) => {
                 const newsRes = await axios.get(`https://newsapi.org/v2/everything`, {
                     params: {
                         q: query,
+                        from: new Date(Date.now() - NEWS_STORY_MAX_AGE_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10),
                         language: 'en',
                         pageSize: 5,
                         sortBy: 'publishedAt',
@@ -7975,6 +8021,7 @@ app.get('/api/football/details/:id', async (req, res) => {
                     title: article.title,
                     description: article.description,
                     source: article.source?.name,
+                    publishedAt: article.publishedAt,
                     url: article.url,
                     image: article.urlToImage
                 }));
@@ -7983,12 +8030,14 @@ app.get('/api/football/details/:id', async (req, res) => {
             }
         }
 
-        // Persist any related news from the football API into the markets table
+        // Turn recent NewsAPI coverage about this API-Sports fixture into drafts.
         if (Array.isArray(relatedNews) && relatedNews.length) {
             for (const article of relatedNews) {
                 try {
                     const newsMarket = await normalizeNewsArticle({
                         ...article,
+                        marketTopic: 'sports news',
+                        marketCountry: fixture?.league?.country || 'International',
                         source: article.source || 'API-FOOTBALL',
                         publishedAt: article.publishedAt || new Date().toISOString()
                     });
@@ -8057,7 +8106,7 @@ app.get('/api/news/everything', async (req, res) => {
                  WHERE category IN ('news','tech','politics')
                    AND (id LIKE 'news_%' OR id LIKE 'tech_%' OR id LIKE 'geo_%')
                    AND COALESCE(admin_verified,0)=1 AND COALESCE(ai_headline_generated,0)=1 AND status IN ('open','upcoming','live')
-                   AND COALESCE(event_end_time, startTime, timestamp) > NOW()
+                   AND COALESCE(event_end_time, startTime, timestamp) > NOW() + INTERVAL '48 hours'
                  ORDER BY timestamp DESC LIMIT 500`
             );
             const articles = cached.map((row) => {
@@ -8082,6 +8131,7 @@ function buildNewsMarket(market) {
     const deadline = processed.event_end_time || processed.eventEndTime || processed.startTime || processed.starttime;
     processed.rawHeadline = cleanHeadline;
     processed.displayHeadline = cleanHeadline;
+    processed.marketHeader = processed.marketHeader || extractContentField(processed.content, 'Market Header') || cleanHeadline;
     processed.betQuestion = processed.title;
     processed.persona_script = processed.persona_script || buildPersonaInsight(processed.title);
     processed.sideA = processed.sideA || 'YES';
@@ -8496,7 +8546,7 @@ const startServer = async () => {
             runSafely('syncNewsApiMarkets', async () => {
                 const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
                 emitMarkets();
-                console.log(`[news] Published ${articles.length} NewsAPI markets.`);
+                console.log(`[news] Processed ${articles.length} NewsAPI story candidates for draft review.`);
             });
             runSafely('refreshBoostedMarkets', refreshBoostedMarkets);
             runSafely('runSettlementEngine', runSettlementEngine);
@@ -8510,7 +8560,7 @@ const startServer = async () => {
             setInterval(() => runSafely('syncNewsApiMarkets', async () => {
                 const articles = await syncNewsApiMarkets({ force: true, limit: 500 });
                 emitMarkets();
-                console.log(`[news] Refreshed ${articles.length} NewsAPI markets.`);
+                console.log(`[news] Refreshed ${articles.length} NewsAPI story candidates.`);
             }), 7200000); // Refresh News and Politics every 2 hours.
             setInterval(refreshBoostedMarkets, 86400000);
             setInterval(syncWeatherMarkets, 86400000);
