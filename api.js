@@ -436,27 +436,57 @@ async function fetchTransactions() {
 }
 
 
-window.placeBet = async function(marketId, side, amount) {
+window.placeBet = async function(input, side, amount) {
     const token = localStorage.getItem("token");
     if (!token) return alert("Login required"), false;
+
+    const order = input && typeof input === 'object'
+        ? input
+        : { marketId: input, outcome: side, amount };
+    const stake = Number(order.amount);
+    if (!order.marketId || !order.outcome || !Number.isFinite(stake) || stake <= 0) {
+        alert('Enter a valid selection and stake.');
+        return false;
+    }
+    let user = JSON.parse(localStorage.getItem("user_data") || "{}");
+    if (!Number.isFinite(Number(user.balance)) && typeof window.fetchProfile === 'function') {
+        try { await window.fetchProfile(); } catch { /* Backend still validates the final balance. */ }
+        user = JSON.parse(localStorage.getItem("user_data") || "{}");
+    }
+    const balance = Number(user.balance);
+    if (!Number.isFinite(balance)) {
+        alert('Unable to verify your balance. Refresh your account and try again.');
+        return false;
+    }
+    if (Number.isFinite(balance) && stake > balance) {
+        alert('Insufficient balance for this stake.');
+        return false;
+    }
 
     try {
         const data = await apiFetch('place-bet', {
             method: "POST",
-            body: { marketId, side, amount }
+            body: {
+                marketId: order.marketId,
+                side: order.outcome,
+                amount: stake,
+                price: order.price,
+                contract: order.contract || undefined
+            }
         });
 
         if (data.success) {
-            const user = JSON.parse(localStorage.getItem("user_data") || "{}");
-            if (user.balance !== undefined) {
-                user.balance = Number(user.balance) - amount;
+            if (Number.isFinite(balance)) {
+                user.balance = Math.max(0, balance - stake);
                 localStorage.setItem("user_data", JSON.stringify(user));
             }
             if (typeof window.renderBalanceDisplay === 'function') window.renderBalanceDisplay();
 
             if (typeof window.refreshBets === "function") {
-                await window.refreshBets('active'); 
+                await window.refreshBets('active');
             }
+
+            try { await window.fetchProfile?.(); } catch { /* The balance socket will reconcile the display. */ }
 
             alert("Bet confirmed!");
             return true;

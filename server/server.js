@@ -6,9 +6,11 @@ import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js
 import { createBotRouter } from './src/routes/bot.js';
 import adminAuth from './src/middleware/adminAuth.js';
 import { fetchFootballOdds, oddsForFixture } from './src/services/footballOdds.js';
+import { fetchAllFootballOdds } from './src/services/sportsOdds.js';
 import { FixtureDataCache, footballRequest } from './src/services/footballApiClient.js';
 import { getFootballAnalytics } from './src/services/sportsService.js';
 import { priceMarket } from './src/services/oddsEngine.js';
+import { classifyProviderMarket, providerOutcomeWins } from './src/services/matchBetContracts.js';
 import {
     THREE_WAY_BACKFILL_SQL,
     THREE_WAY_COLUMNS,
@@ -2605,7 +2607,12 @@ CREATE TABLE IF NOT EXISTS bets (
     reference TEXT,
     category TEXT,
     commence_time TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    contract_type TEXT,
+    contract_market TEXT,
+    contract_outcome TEXT,
+    contract_source TEXT,
+    contract_bookmaker TEXT
 )
 `);
 db.run(`
@@ -2832,6 +2839,11 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
     addColumnSafely('bets', 'is_boosted', 'INTEGER DEFAULT 0');
     addColumnSafely('bets', 'transaction_id', 'INTEGER');
     addColumnSafely('bets', 'reference', 'TEXT');
+    addColumnSafely('bets', 'contract_type', 'TEXT');
+    addColumnSafely('bets', 'contract_market', 'TEXT');
+    addColumnSafely('bets', 'contract_outcome', 'TEXT');
+    addColumnSafely('bets', 'contract_source', 'TEXT');
+    addColumnSafely('bets', 'contract_bookmaker', 'TEXT');
 
     // The three-way columns and their backfill live in
     // ensureThreeWayMarkets() below. They have to run in order (the columns
@@ -3935,6 +3947,35 @@ const settleMarket = async (marketId, winningSide) => {
     }
 };
 
+const providerSettlementCache = new Map();
+async function getProviderSettlementContext(marketId, market, providerBets) {
+    const fixtureId = String(marketId || '').replace(/^fb_/, '');
+    const cached = providerSettlementCache.get(fixtureId);
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
+    if (!/^\d+$/.test(fixtureId) || !API_SPORTS_KEY) return null;
+    const fixtureResult = await footballRequest(API_SPORTS_KEY, 'https://v3.football.api-sports.io/fixtures', { params: { id: fixtureId } });
+    const fixture = fixtureResult.data?.[0];
+    if (fixtureResult.error || !fixture) return null;
+    const finalStatuses = new Set(['FT', 'AET', 'PEN', 'AWD', 'WO']);
+    if (!finalStatuses.has(String(fixture.fixture?.status?.short || '').toUpperCase())) return null;
+    const needsEvents = providerBets.some(bet => bet.contract_type === 'first_goal');
+    let events = [];
+    if (needsEvents) {
+        const eventsResult = await footballRequest(API_SPORTS_KEY, 'https://v3.football.api-sports.io/fixtures/events', { params: { fixture: fixtureId } });
+        if (eventsResult.error) return null;
+        events = Array.isArray(eventsResult.data) ? eventsResult.data : [];
+    }
+    const data = {
+        homeName: fixture.teams?.home?.name || market.sideA,
+        awayName: fixture.teams?.away?.name || market.sideB,
+        goals: { home: fixture.goals?.home, away: fixture.goals?.away },
+        events
+    };
+    providerSettlementCache.set(fixtureId, { data, expiresAt: Date.now() + 5 * 60 * 1000 });
+    if (providerSettlementCache.size > 300) providerSettlementCache.delete(providerSettlementCache.keys().next().value);
+    return data;
+}
+
 // Pays the winning bets, marks the rest lost, and closes the market.
 // Shared by every settlement path so a three-way market and a binary market
 // settle through exactly the same code.
@@ -3946,6 +3987,32 @@ const settleMarketBets = async (marketId, market, winningSide) => {
             WHERE market_id = ?
             AND status = 'active'
         `, [marketId]);
+
+        const providerBets = bets.filter(bet => bet.contract_type);
+        let contractResults = new Map();
+        if (providerBets.length) {
+            const context = await getProviderSettlementContext(marketId, market, providerBets);
+            if (!context) {
+                console.warn(`[settlement] Waiting for final provider data for contract bets on ${marketId}.`);
+                return { success: false, pendingContracts: providerBets.length };
+            }
+            for (const bet of providerBets) {
+                const isWinner = providerOutcomeWins({
+                    contractType: bet.contract_type,
+                    marketName: bet.contract_market,
+                    selection: bet.contract_outcome,
+                    homeName: context.homeName,
+                    awayName: context.awayName,
+                    goals: context.goals,
+                    events: context.events
+                });
+                if (isWinner === null) {
+                    console.warn(`[settlement] Unsupported provider contract ${bet.contract_market} / ${bet.contract_outcome} on ${marketId}; holding settlement.`);
+                    return { success: false, pendingContracts: providerBets.length };
+                }
+                contractResults.set(bet.id, isWinner);
+            }
+        }
 
         if (!bets.length) {
             console.log("⚠️ No active bets found.");
@@ -3965,7 +4032,17 @@ const settleMarketBets = async (marketId, market, winningSide) => {
         for (const bet of bets) {
             totalStake += Number(bet.amount || 0);
 
-            const isWinner = isWinningBetSide(bet.picked, winningSide, market);
+            const contractResult = bet.contract_type ? contractResults.get(bet.id) : undefined;
+            const isWinner = bet.contract_type ? contractResult === true : isWinningBetSide(bet.picked, winningSide, market);
+
+            if (contractResult === 'push') {
+                const refund = Number(bet.amount || 0);
+                await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, bet.user_phone]);
+                await dbRun(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE type='bet' AND (bet_id=? OR id=?)`, [refund, bet.id, bet.transaction_id || -1]);
+                await dbRun(`UPDATE bets SET status='cancelled' WHERE id=? AND status='active'`, [bet.id]);
+                emitBalance(bet.user_phone);
+                continue;
+            }
 
             if (isWinner) {
                 const payout = Number((Number(bet.amount || 0) * Number(bet.odds || 1)).toFixed(2));
@@ -5749,7 +5826,7 @@ app.post('/api/change-password', authenticate, async (req, res) => {
     }
 });
 app.post('/api/place-bet', authenticate, async (req, res) => {
-    const { marketId, side, amount } = req.body;
+    const { marketId, side, amount, contract } = req.body;
     const stake = parseFloat(amount);
 
     if (!marketId) return res.status(400).json({ success: false, message: "Missing Market ID" });
@@ -5768,27 +5845,55 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         // Resolve the requested side against the market's own outcomes. The
         // client may send the canonical key (HOME/DRAW/AWAY), the legacy
         // binary alias (YES/NO), or the label the user tapped (a team name).
-        const sideKey = resolveSideKey(side, market);
-        if (!sideKey) return res.status(400).json({ success: false, message: "Invalid side" });
-        const col = volumeColumnForSide(sideKey);
-        if (!col) return res.status(400).json({ success: false, message: "Invalid side" });
-        // A draw can only be bet on when the market actually offers it.
-        if (sideKey === 'DRAW' && !supportsDraw(market)) {
-            return res.status(400).json({ success: false, message: "This market does not offer a draw." });
+        let sideKey = null;
+        let col = null;
+        let baseOdds = 0;
+        let pickedSide = '';
+        let verifiedContract = null;
+        if (contract) {
+            const type = classifyProviderMarket(contract.market);
+            if (!isSportsMarket(market) || !/^fb_\d+$/.test(String(marketId)) || !type || type !== String(contract.type || '')) {
+                return res.status(400).json({ success: false, message: 'This provider market is not supported for betting.' });
+            }
+            const providerOdds = await fetchAllFootballOdds(marketId, {
+                homeTeam: market.sideA, awayTeam: market.sideB, startTime: market.startTime, status: market.status
+            });
+            const normalize = value => String(value || '').trim().toLowerCase();
+            const quote = providerOdds.markets.find(item => normalize(item.market) === normalize(contract.market) && normalize(item.source) === normalize(contract.source) && normalize(item.bookmaker) === normalize(contract.bookmaker));
+            const choice = quote?.outcomes?.find(item => normalize(item.label) === normalize(contract.selection) && !item.suspended);
+            const requestedPrice = Number(contract.price);
+            if (!choice || !Number.isFinite(requestedPrice) || Math.abs(Number(choice.price) - requestedPrice) > 0.001) {
+                return res.status(409).json({ success: false, message: 'That provider quote has changed or is no longer available. Refresh the match odds.' });
+            }
+            baseOdds = Number(choice.price);
+            pickedSide = String(choice.label);
+            verifiedContract = {
+                type,
+                market: String(quote.market),
+                outcome: pickedSide,
+                source: String(quote.source),
+                bookmaker: String(quote.bookmaker)
+            };
+        } else {
+            // Native PolySoko 1X2 or YES/NO contract.
+            sideKey = resolveSideKey(side, market);
+            if (!sideKey) return res.status(400).json({ success: false, message: "Invalid side" });
+            col = volumeColumnForSide(sideKey);
+            if (!col) return res.status(400).json({ success: false, message: "Invalid side" });
+            if (sideKey === 'DRAW' && !supportsDraw(market)) {
+                return res.status(400).json({ success: false, message: "This market does not offer a draw." });
+            }
+            baseOdds = sideOdds(sideKey, market);
+            pickedSide = sideLabel(sideKey, market) || sideKey;
         }
-
-        const baseOdds = sideOdds(sideKey, market);
         if (!Number.isFinite(baseOdds) || baseOdds <= 0) {
             return res.status(400).json({ success: false, message: "This outcome is not available right now." });
         }
-        // Store the market's own label so the bet history and the order book
-        // show the team the user actually picked.
-        const pickedSide = sideLabel(sideKey, market) || sideKey;
 
         const user = await dbGet(`SELECT is_upgraded, upgrade_expiry FROM users WHERE phone = ?`, [req.user.phone]);
 
         const isElite = user && Number(user.is_upgraded) === 1 && new Date(user.upgrade_expiry || 0) > new Date();
-        const isBoostedMarket = Number(market.is_boosted || 0) === 1;
+        const isBoostedMarket = !verifiedContract && Number(market.is_boosted || 0) === 1;
         const boostedOdds = isElite && isBoostedMarket ? Number((baseOdds * 1.10).toFixed(2)) : baseOdds;
         const isBoostedBet = isElite && isBoostedMarket ? 1 : 0;
 
@@ -5809,7 +5914,7 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
             }
 
         // Update market volume
-        await dbRun(`UPDATE markets SET ${col} = ${col} + ? WHERE id=?`, [stake, marketId]);
+        if (!verifiedContract) await dbRun(`UPDATE markets SET ${col} = ${col} + ? WHERE id=?`, [stake, marketId]);
 
         // Insert transaction log
         const txInsert = await dbRun(`
@@ -5820,9 +5925,9 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
 
         // Insert actual bet record
         const betInsert = await dbRun(`
-            INSERT INTO bets (user_phone, market_id, event, picked, amount, odds, status, category, commence_time, is_boosted, transaction_id, reference)
-            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-        `, [req.user.phone, marketId, market.title, pickedSide, stake, boostedOdds, market.category || 'general', market.startTime || null, isBoostedBet, transactionId, reference]);
+            INSERT INTO bets (user_phone, market_id, event, picked, amount, odds, status, category, commence_time, is_boosted, transaction_id, reference, contract_type, contract_market, contract_outcome, contract_source, contract_bookmaker)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [req.user.phone, marketId, verifiedContract ? `${market.title} · ${verifiedContract.market}` : market.title, pickedSide, stake, boostedOdds, market.category || 'general', market.startTime || null, isBoostedBet, transactionId, reference, verifiedContract?.type || null, verifiedContract?.market || null, verifiedContract?.outcome || null, verifiedContract?.source || null, verifiedContract?.bookmaker || null]);
 
         const betId = betInsert.lastID;
             await dbRun(`UPDATE transactions SET bet_id=? WHERE id=?`, [betId, transactionId]);
@@ -5834,7 +5939,7 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
         }
 
         // Run background tasks after commit
-        recalculateOdds(marketId).catch(e => console.error("Odds error:", e.message));
+        if (!verifiedContract) recalculateOdds(marketId).catch(e => console.error("Odds error:", e.message));
         emitMarkets();
         emitBalance(req.user.phone);
         io.to(req.user.phone).emit('betPlaced', betRow);
@@ -7719,7 +7824,13 @@ app.get('/api/football/details/:id', async (req, res) => {
         const fixtureId = String(req.params.id || '').replace(/^fb_/, '');
         if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: 'Invalid fixture ID' });
         const cached = footballMatchDetailsCache.get(fixtureId);
-        if (cached && cached.expiresAt > Date.now()) return res.json(cached.data);
+        if (cached && cached.expiresAt > Date.now()) {
+            const cachedStatus = cached.data?.fixture?.fixture?.status?.short;
+            if (['LIVE', '1H', 'HT', '2H', 'ET', 'P'].includes(cachedStatus)) {
+                io.emit('liveOddsUpdated', { marketId: `fb_${fixtureId}`, odds: cached.data.odds || [], updatedAt: new Date().toISOString() });
+            }
+            return res.json(cached.data);
+        }
         const apiKey = API_SPORTS_KEY;
         if (!apiKey) return res.status(503).json({ error: 'Sports API key is not configured' });
 
@@ -7747,6 +7858,23 @@ app.get('/api/football/details/:id', async (req, res) => {
             request('Predictions', 'https://v3.football.api-sports.io/predictions', { fixture: fixtureId })
         ]);
         const fixture = fixtureResult.data[0] || null;
+        const homeId = fixture?.teams?.home?.id;
+        const awayId = fixture?.teams?.away?.id;
+        const leagueId = fixture?.league?.id;
+        const season = fixture?.league?.season;
+        const [headToHeadResult, standingsResult] = await Promise.all([
+            homeId && awayId ? request('Head to head', 'https://v3.football.api-sports.io/fixtures/headtohead', { h2h: `${homeId}-${awayId}`, last: 5 }) : Promise.resolve({ data: [], error: 'Team data unavailable' }),
+            leagueId && season ? request('Standings', 'https://v3.football.api-sports.io/standings', { league: leagueId, season }) : Promise.resolve({ data: [], error: 'League data unavailable' })
+        ]);
+        const providerOdds = await fetchAllFootballOdds(fixtureId, {
+            homeTeam: fixture?.teams?.home?.name || market?.sideA,
+            awayTeam: fixture?.teams?.away?.name || market?.sideB,
+            startTime: fixture?.fixture?.date || market?.startTime,
+            status: fixture?.fixture?.status?.short === 'LIVE' || fixture?.fixture?.status?.short === '1H' || fixture?.fixture?.status?.short === '2H' ? 'live' : market?.status
+        });
+        if (fixture?.fixture?.status?.short === 'LIVE' || ['1H', 'HT', '2H', 'ET', 'P'].includes(fixture?.fixture?.status?.short)) {
+            io.emit('liveOddsUpdated', { marketId: `fb_${fixtureId}`, odds: providerOdds.markets, updatedAt: new Date().toISOString() });
+        }
         const lineupsData = lineupsResult.data;
         const teamA = fixture?.teams?.home?.name || lineupsData[0]?.team?.name || '';
         const teamB = fixture?.teams?.away?.name || lineupsData[1]?.team?.name || '';
@@ -7807,8 +7935,12 @@ app.get('/api/football/details/:id', async (req, res) => {
             lineups: lineupsData,
             events: eventsResult.data,
             predictions: predictionsResult.data,
+            headToHead: headToHeadResult.data,
+            standings: standingsResult.data?.[0]?.league?.standings?.[0] || [],
+            odds: providerOdds.markets,
+            oddsSources: providerOdds.sources,
             relatedNews,
-            sectionErrors: { fixture: fixtureResult.error, stats: statsResult.error, lineups: lineupsResult.error, events: eventsResult.error, predictions: predictionsResult.error }
+            sectionErrors: { fixture: fixtureResult.error, stats: statsResult.error, lineups: lineupsResult.error, events: eventsResult.error, predictions: predictionsResult.error, headToHead: headToHeadResult.error, standings: standingsResult.error, odds: Object.values(providerOdds.errors).join(' ') || null }
         };
         footballMatchDetailsCache.set(fixtureId, { data: result, expiresAt: Date.now() + 45 * 1000 });
         if (footballMatchDetailsCache.size > 300) {

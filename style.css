@@ -1097,6 +1097,68 @@ main {
     width: 100%;
 }
 
+/* Shareable, full-screen sports fixture view */
+.match-detail-view[hidden] { display: none; }
+.match-detail-view { position: fixed; inset: 0; z-index: 1200; overflow: auto; background: #080b10; color: #e7edf3; padding: 18px clamp(14px, 4vw, 56px) 48px; }
+.match-view-shell { width: min(1180px, 100%); margin: 0 auto; }
+.match-view-header { display:flex; align-items:center; gap:16px; color:#9aa7b5; font-size:.78rem; border-bottom:1px solid #202832; padding:8px 0 16px; }
+.match-back { border:1px solid #2a3540; background:#111820; color:#e6edf3; border-radius:8px; padding:9px 13px; cursor:pointer; }
+.match-view-status { margin-left:auto; color:#00ff88; font-weight:800; }
+.match-hero { text-align:center; padding:36px 16px 28px; }
+.match-meta { color:#8c9aa8; font-size:.76rem; text-transform:uppercase; letter-spacing:.08em; }
+.match-hero h1 { margin:12px 0 8px; font-size:clamp(1.6rem,4vw,3rem); }
+.match-hero h1 span { color:#6d7885; font-size:.7em; }
+.match-hero p { color:#9ba7b3; margin:8px 0; }
+.match-hero strong { color:#00ff88; font-size:.85rem; }
+.match-center-banner { min-height:150px; display:flex; align-items:center; gap:22px; padding:18px 24px; border:1px solid #28343d; border-radius:14px; background:linear-gradient(110deg,#10251d,#101820 60%,#14251d); }
+.pitch-art { width:210px; height:115px; flex:none; border:2px solid #4d8668; border-radius:8px; display:grid; place-items:center; background:repeating-linear-gradient(90deg,transparent 0 49%,#315d451c 50% 100%),linear-gradient(0deg,#193a2a,#142b21); position:relative; }
+.pitch-art:before { content:""; position:absolute; inset:0 35%; border:1px solid #4d8668; border-radius:50%; }
+.pitch-art:after { content:""; position:absolute; left:50%; top:0; bottom:0; border-left:1px solid #4d8668; }
+.pitch-art span { position:relative; z-index:1; font-size:1.5rem; }
+.match-center-info { display:flex; flex-direction:column; gap:8px; }
+.match-center-info small { color:#00ff88; font-weight:800; letter-spacing:.1em; }
+.match-center-info b { font-size:1.25rem; }
+.match-center-info span { color:#98a5b2; font-size:.82rem; }
+.match-info-tabs,.match-interaction nav { display:flex; gap:8px; overflow:auto; border-bottom:1px solid #222b34; margin-top:20px; }
+.match-info-tabs button,.match-interaction nav button { color:#aab5bf; background:transparent; border:0; border-bottom:2px solid transparent; padding:13px 16px; white-space:nowrap; cursor:pointer; }
+.match-info-tabs button.active,.match-interaction nav button.active { color:#00ff88; border-bottom-color:#00ff88; }
+.match-content-panel { min-height:120px; padding:18px 4px; }
+.match-content-panel h2,.match-markets h2 { font-size:1.05rem; margin:8px 0 14px; }
+.match-loading,.match-content-panel>p,.match-interaction>div>p { color:#98a5b2; }
+.match-officials { display:flex; gap:10px; padding:12px 0; color:#92a0ad; font-size:.82rem; }
+.match-officials b { color:#e1e7ec; }
+.match-data-row { display:grid; grid-template-columns:1fr 2fr; gap:12px; padding:10px 12px; border-bottom:1px solid #202832; color:#9eabb8; font-size:.82rem; }
+.match-data-row b { color:#e5ebf0; text-align:right; }
+.match-table-heading,.match-table-row { grid-template-columns:44px 1fr 50px; }
+.match-market-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
+.match-contract-card { background:#10161d; border:1px solid #25303a; border-radius:12px; padding:14px; }
+.match-contract-card h3 { font-size:.85rem; margin:0 0 12px; }
+.match-contract-outcomes { display:flex; gap:8px; }
+.match-contract-outcomes button { display:flex; flex:1; flex-direction:column; gap:8px; padding:10px 6px; background:#14221c; color:#dfffea; border:1px solid #00ff8844; border-radius:8px; cursor:pointer; }
+.match-contract-outcomes button b { color:#00ff88; }
+.match-provider-section { grid-column:1 / -1; }
+.match-provider-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin:20px 0 10px; }
+.match-provider-heading h3 { margin:0; font-size:.95rem; }
+.match-provider-heading small { color:#84909d; font-size:.72rem; }
+.match-provider-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
+.match-provider-card { padding:12px; }
+.match-provider-meta { display:flex; justify-content:space-between; gap:8px; margin-bottom:8px; color:#84909d; font-size:.66rem; }
+.match-provider-meta span:first-child { color:#00d1a2; font-weight:700; }
+.match-provider-outcomes { display:grid; grid-template-columns:repeat(auto-fit,minmax(80px,1fr)); gap:6px; }
+.match-provider-outcome { display:flex; flex-direction:column; gap:4px; min-width:0; padding:8px; border:1px solid #26343d; border-radius:7px; background:#0b1015; font-size:.7rem; color:#aebbc6; overflow-wrap:anywhere; }
+.match-provider-outcome.provider-odds-btn { width:100%; text-align:left; cursor:pointer; font:inherit; transition:border-color .15s,background .15s; }
+.match-provider-outcome.provider-odds-btn:hover { border-color:#00ff88; background:#112019; }
+.match-provider-outcome.provider-odds-btn b { color:#00ff88; }
+.match-provider-outcome b { color:#fff; font-size:.82rem; }
+.match-provider-outcome.suspended { opacity:.55; text-decoration:line-through; }
+.match-provider-outcome small { color:#ffb454; font-size:.62rem; text-decoration:none; }
+.match-provider-empty { padding:14px; border:1px dashed #303a43; border-radius:9px; color:#84909d; font-size:.8rem; }
+.match-contract-unavailable { opacity:.55; }
+.match-contract-unavailable p { color:#84909d; font-size:.78rem; margin:0; }
+.match-interaction { margin-top:24px; border:1px solid #25303a; border-radius:12px; padding:0 16px 16px; }
+.match-chat-open { background:#00ff88; border:0; border-radius:7px; padding:9px 13px; font-weight:800; cursor:pointer; }
+@media(max-width:640px) { .match-detail-view { padding:10px 12px 30px; } .match-center-banner { padding:12px; gap:12px; } .pitch-art { width:125px; height:85px; } .match-center-info b { font-size:1rem; } .match-view-header { gap:9px; font-size:.68rem; } }
+
 .sports-page-header {
     display: flex;
     gap: 10px;

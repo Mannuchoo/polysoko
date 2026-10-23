@@ -1514,6 +1514,14 @@ async function openMarket(id, openInNewTab = false) {
     const m = window.marketMap?.[id];
     if (!m) return;
 
+    // Sports fixtures have a shareable, full-screen route. News and other
+    // markets retain their existing detail modal.
+    if (isSportsMarket(m) && (isFootballFixtureMarket(m) || /^fb_/i.test(id))) {
+        localStorage.setItem("last_market_id", id);
+        window.location.hash = `#match/${encodeURIComponent(id)}`;
+        return;
+    }
+
     const body = document.getElementById("modalBody");
     if (!body) return;
     
@@ -1592,6 +1600,189 @@ async function openMarket(id, openInNewTab = false) {
 
     loadOrderBook(id).catch((err) => console.warn("Order book failed:", err.message));
 }
+
+let activeMatchDetails = null;
+let activeMatchDetailsId = null;
+let matchCountdownTimer = null;
+window.renderMatchView = async function renderMatchView(marketId) {
+    const root = document.getElementById('matchView');
+    if (!root) return;
+    const market = window.marketMap?.[marketId] || state.allMarkets?.find(item => String(item.id) === String(marketId));
+    if (!market) {
+        root.innerHTML = `<section class="match-view-shell"><button class="match-back" onclick="window.location.hash=''">← All markets</button><p>Match data is still loading…</p></section>`;
+        return;
+    }
+    if (activeMatchDetailsId !== marketId) { activeMatchDetails = null; activeMatchDetailsId = marketId; }
+    const home = market.sideA || String(market.title || '').split(/\s+vs\s+/i)[0] || 'Home';
+    const away = market.sideB || String(market.title || '').split(/\s+vs\s+/i)[1] || 'Away';
+    const kickoff = market.startTime || market.event_start_time || market.eventStartTime;
+    const kickoffDate = kickoff ? new Date(kickoff) : null;
+    const kickoffLabel = kickoffDate && !Number.isNaN(kickoffDate.getTime()) ? kickoffDate.toLocaleString(undefined, { dateStyle:'full', timeStyle:'short' }) : 'Kickoff time unavailable';
+    const category = [market.sport || 'Soccer', market.country, market.league].filter(Boolean).map(escapeHtml).join(' | ');
+    const title = escapeHtml(market.betQuestion || market.title || `${home} vs ${away}`);
+    root.innerHTML = `
+      <div class="match-view-shell">
+        <header class="match-view-header"><button class="match-back" onclick="window.location.hash=''">← Sports</button><span>${category}</span><span class="match-view-status">${escapeHtml(String(market.status || 'upcoming').toUpperCase())}</span></header>
+        <section class="match-hero"><div class="match-meta">${category}</div><h1>${escapeHtml(home)} <span>vs</span> ${escapeHtml(away)}</h1><p>${kickoffLabel}</p><strong id="matchCountdown">${market.status === 'live' ? 'LIVE NOW' : 'Kickoff countdown loading…'}</strong></section>
+        <section class="match-center-banner"><div class="pitch-art" aria-hidden="true"><span>⚽</span></div><div class="match-center-info"><small>MATCH CENTER</small><b>${escapeHtml(home)} vs ${escapeHtml(away)}</b><span id="matchBannerCountdown">${kickoffLabel}</span></div></section>
+        <nav class="match-info-tabs" aria-label="Match information"><button class="active" data-match-tab="match">Match</button><button data-match-tab="head-to-head">Head to Head</button><button data-match-tab="standings">Standings</button><button data-match-tab="lineups">Lineups</button></nav>
+        <section id="matchInfoContent" class="match-content-panel"><p class="match-loading">Loading match details…</p></section>
+        <section class="match-markets"><h2>Match markets</h2><div class="match-market-grid" id="matchMarketGrid"></div></section>
+        <section class="match-interaction"><nav><button class="active" data-interaction-tab="markets">Markets</button><button data-interaction-tab="builder">Bet Builder</button><button data-interaction-tab="chat">Chat</button></nav><div id="matchInteractionContent"></div></section>
+      </div>`;
+    root.onclick = async (event) => {
+        const infoTab = event.target.closest('[data-match-tab]');
+        const interactionTab = event.target.closest('[data-interaction-tab]');
+        if (infoTab) {
+            root.querySelectorAll('[data-match-tab]').forEach(btn => btn.classList.toggle('active', btn === infoTab));
+            renderMatchInfoTab(infoTab.dataset.matchTab, market, activeMatchDetails);
+        }
+        if (interactionTab) {
+            root.querySelectorAll('[data-interaction-tab]').forEach(btn => btn.classList.toggle('active', btn === interactionTab));
+            renderMatchInteractionTab(interactionTab.dataset.interactionTab, market);
+        }
+        const providerBtn = event.target.closest('.provider-odds-btn');
+        if (providerBtn) {
+            event.stopPropagation();
+            window.selectOutcome(providerBtn.dataset.id, providerBtn.dataset.option, Number(providerBtn.dataset.odds));
+            return;
+        }
+        const betBtn = event.target.closest('.bet-btn');
+        if (betBtn) { event.stopPropagation(); window.selectOutcome(betBtn.dataset.id, betBtn.dataset.choice, Number(betBtn.dataset.odds)); }
+    };
+    document.body.classList.add('match-view-open');
+    renderMatchMarketGrid(market, activeMatchDetails?.odds);
+    renderMatchInteractionTab('markets', market);
+    root.querySelectorAll('[data-match-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.matchTab === 'match'));
+    renderMatchInfoTab('match', market, activeMatchDetails);
+    if (matchCountdownTimer) clearInterval(matchCountdownTimer);
+    const updateCountdown = () => {
+        const el = document.getElementById('matchCountdown');
+        const banner = document.getElementById('matchBannerCountdown');
+        if (!el || !kickoffDate || Number.isNaN(kickoffDate.getTime())) return;
+        const remaining = kickoffDate.getTime() - Date.now();
+        if (remaining <= 0) { el.textContent = market.status === 'live' ? 'LIVE NOW' : 'Kickoff time reached'; return; }
+        const days = Math.floor(remaining / 86400000), hours = Math.floor(remaining % 86400000 / 3600000), minutes = Math.floor(remaining % 3600000 / 60000), seconds = Math.floor(remaining % 60000 / 1000);
+        const value = `Kickoff in ${days}d ${hours}h ${minutes}m ${seconds}s`;
+        el.textContent = value; if (banner) banner.textContent = value;
+    };
+    updateCountdown(); matchCountdownTimer = setInterval(updateCountdown, 1000);
+    try {
+        const data = await fetchMatchDetails(marketId);
+        if (window.location.hash !== `#match/${encodeURIComponent(marketId)}`) return;
+        activeMatchDetails = data;
+        const activeTab = root.querySelector('[data-match-tab].active')?.dataset.matchTab || 'match';
+        renderMatchMarketGrid(market, data?.odds);
+        renderMatchInfoTab(activeTab, market, data);
+    } catch (error) { renderMatchInfoTab('match', market, null); }
+};
+
+function renderMatchInfoTab(tab, market, data) {
+    const panel = document.getElementById('matchInfoContent'); if (!panel) return;
+    if (!data) { panel.innerHTML = `<p class="match-loading">Match information is temporarily unavailable.</p>`; return; }
+    if (tab === 'lineups') {
+        const rows = data.lineups;
+        const teams = Array.isArray(rows) ? rows : [];
+        const fixture = data.fixture || {};
+        const details = fixture.fixture?.referee || fixture.referee;
+        const managers = teams.map(team => team.coach?.name).filter(Boolean);
+        panel.innerHTML = `<h2>Starting lineups</h2>${teams.length ? renderLineups(teams) : `<p>${escapeHtml(data.sectionErrors?.lineups || 'Starting lineups have not been published yet.')}</p>`}<div class="match-officials"><span>Managers</span><b>${escapeHtml(managers.join(' · ') || 'Not announced')}</b></div><div class="match-officials"><span>Referee</span><b>${escapeHtml(details || 'Not announced')}</b></div>`;
+        return;
+    }
+    if (tab === 'head-to-head') {
+        const rows = data.headToHead || [];
+        panel.innerHTML = `<h2>Head to head</h2>${rows.length ? rows.map(row => `<div class="match-data-row">${escapeHtml(row.fixture?.date ? new Date(row.fixture.date).toLocaleDateString() : '')}<b>${escapeHtml(row.teams?.home?.name || '')} ${row.goals?.home ?? '-'} : ${row.goals?.away ?? '-'} ${escapeHtml(row.teams?.away?.name || '')}</b></div>`).join('') : '<p>Recent head-to-head results are not available.</p>'}`;
+        return;
+    }
+    if (tab === 'standings') {
+        const rows = data.standings || [];
+        panel.innerHTML = `<h2>${escapeHtml(data.fixture?.league?.name || market.league || 'League')} standings</h2>${rows.length ? `<div class="match-data-row match-table-heading"><span>#</span><span>Club</span><span>Pts</span></div>${rows.map(row => `<div class="match-data-row match-table-row"><span>${row.rank ?? ''}</span><span>${escapeHtml(row.team?.name || '')}</span><b>${row.points ?? ''}</b></div>`).join('')}` : '<p>Standings are not available for this fixture.</p>'}`;
+        return;
+    }
+    panel.innerHTML = renderMatchCenter(data);
+}
+
+function renderMatchMarketGrid(market, providerOdds = []) {
+    const grid = document.getElementById('matchMarketGrid'); if (!grid) return;
+    const platformMarket = `<article class="match-contract-card"><h3>PolySoko · Match Result</h3><div class="match-contract-outcomes">${getMarketOutcomes(market).map(outcome => `<button class="bet-btn" data-id="${escapeHtml(market.id)}" data-choice="${escapeHtml(outcome.key)}" data-odds="${Number(outcome.odds)}" data-title="${escapeHtml(market.betQuestion || market.title)}"><span>${escapeHtml(outcome.label)}</span><b>${Number(outcome.odds).toFixed(2)}</b></button>`).join('')}</div></article>`;
+    const offers = Array.isArray(providerOdds) ? providerOdds : [];
+    const providerCards = offers.map(offer => {
+        const type = providerContractType(offer.market);
+        return `<article class="match-contract-card match-provider-card"><div class="match-provider-meta"><span>${escapeHtml(offer.source || 'Provider')}</span><span>${escapeHtml(offer.bookmaker || 'Bookmaker')}${offer.live ? ' · LIVE' : ''}</span></div><h3>${escapeHtml(offer.market || 'Market')}</h3><div class="match-provider-outcomes">${(offer.outcomes || []).map(outcome => {
+            const option = JSON.stringify({ type, market: offer.market, selection: outcome.label, source: offer.source, bookmaker: offer.bookmaker });
+            const choice = type && !outcome.suspended
+                ? `<button type="button" class="match-provider-outcome provider-odds-btn" data-id="${escapeHtml(market.id)}" data-option="${escapeHtml(option)}" data-odds="${Number(outcome.price)}"><span>${escapeHtml(outcome.label || '—')}</span><b>${Number(outcome.price).toFixed(2)}</b></button>`
+                : `<span class="match-provider-outcome ${outcome.suspended ? 'suspended' : ''}"><span>${escapeHtml(outcome.label || '—')}</span><b>${Number(outcome.price).toFixed(2)}</b>${outcome.suspended ? '<small>Suspended</small>' : ''}</span>`;
+            return choice;
+        }).join('')}</div></article>`;
+    }).join('');
+    const error = activeMatchDetails?.sectionErrors?.odds;
+    grid.innerHTML = platformMarket + `<div class="match-provider-section"><div class="match-provider-heading"><h3>All provider odds</h3><small>${offers.length ? `${offers.length} bookmaker markets` : error ? escapeHtml(error) : 'Loading provider quotes…'}</small></div><div class="match-provider-grid">${providerCards || `<div class="match-provider-empty">${error ? escapeHtml(error) : 'No bookmaker odds are available from the configured feeds for this fixture.'}</div>`}</div></div>`;
+}
+
+function providerContractType(marketName) {
+    const name = String(marketName || '').toLowerCase();
+    if (/match winner|full.?time result|1x2|match result/.test(name)) return 'match_result';
+    if (/double chance/.test(name)) return 'double_chance';
+    if (/both teams? to score|gg\s*\/\s*ng|\bbtts\b/.test(name)) return 'both_teams_score';
+    if (/over\/under|total goals|match goals|goals over|goal line/.test(name)) return 'total_goals';
+    if (/first (team )?to score|1st (team )?to score|first goal|1st goal/.test(name)) return 'first_goal';
+    return null;
+}
+
+window.selectOutcome = function(marketId, optionType, oddsValue) {
+    if (!localStorage.getItem('token')) {
+        requireAuth();
+        return false;
+    }
+    const market = window.marketMap?.[marketId];
+    if (!market) return alert('This match is no longer available. Refresh the match list.');
+    let contract = null;
+    let pick = String(optionType || '');
+    try {
+        const parsed = JSON.parse(pick);
+        if (parsed && typeof parsed === 'object') {
+            contract = { ...parsed, price: Number(oddsValue) };
+            pick = parsed.selection;
+        }
+    } catch { /* Native market outcome key. */ }
+    const nativeOutcome = getMarketOutcomes(market).find(item => item.key === pick || item.label.toLowerCase() === pick.toLowerCase());
+    if (!contract && !nativeOutcome) return alert('That selection is not available on PolySoko.');
+    const title = contract ? `${market.title || market.betQuestion} · ${contract.market}` : (market.betQuestion || market.title || 'Match Result');
+    window.openBetModal(marketId, title, nativeOutcome?.key || pick, Number(oddsValue), contract);
+    return true;
+};
+
+window.updateMatchProviderOdds = function(marketId, odds) {
+    if (window.location.hash !== `#match/${encodeURIComponent(marketId)}`) return;
+    activeMatchDetails = { ...(activeMatchDetails || {}), odds: Array.isArray(odds) ? odds : [] };
+    if (pendingBet?.marketId === marketId && pendingBet.contract) {
+        const currentOffer = activeMatchDetails.odds.find(offer => offer.market === pendingBet.contract.market && offer.source === pendingBet.contract.source && offer.bookmaker === pendingBet.contract.bookmaker);
+        const currentOutcome = currentOffer?.outcomes?.find(outcome => outcome.label === pendingBet.contract.selection && !outcome.suspended);
+        if (currentOutcome && Number(currentOutcome.price) > 1) {
+            pendingBet.price = Number(currentOutcome.price);
+            pendingBet.contract.price = pendingBet.price;
+            const pickEl = document.getElementById('modal-pick-display');
+            if (pickEl) pickEl.innerText = `Your Pick: ${pendingBet.contract.selection} · Odds @${pendingBet.price.toFixed(2)} (${(100 / pendingBet.price).toFixed(1)}% implied)`;
+        }
+    }
+    const market = window.marketMap?.[marketId];
+    if (market) renderMatchMarketGrid(market, activeMatchDetails.odds);
+};
+
+function renderMatchInteractionTab(tab, market) {
+    const panel = document.getElementById('matchInteractionContent'); if (!panel) return;
+    if (tab === 'markets') panel.innerHTML = '<p>Select an outcome in Match markets above to place a bet.</p>';
+    else if (tab === 'builder') panel.innerHTML = '<p>Choose available match outcomes above to build your bet slip.</p>';
+    else panel.innerHTML = `<p>Ask about ${escapeHtml(market.title || 'this match')} in PolySoko chat.</p><button type="button" class="match-chat-open" onclick="document.getElementById('assistantToggle')?.click()">Open match chat</button>`;
+}
+
+window.updateMatchMarket = function(id) {
+    const market = window.marketMap?.[id];
+    if (!market || window.location.hash !== `#match/${encodeURIComponent(id)}`) return;
+    renderMatchMarketGrid(market, activeMatchDetails?.odds);
+    renderMatchInteractionTab(document.querySelector('[data-interaction-tab].active')?.dataset.interactionTab || 'markets', market);
+};
 function closeMarket() {
     const modal = document.getElementById("richModal");
     const body = document.getElementById("modalBody");
@@ -1780,6 +1971,7 @@ function handleOutsideClick(e) {
 window.handleOutsideClick = handleOutsideClick;
 
 document.addEventListener("click", (e) => {
+    if (e.target.closest('#matchView')) return;
     const modal = document.getElementById('bet-modal');
     if (modal && modal.style.display === 'flex') return;
 
@@ -1855,7 +2047,7 @@ console.log("Statuses:", allBets.map(b => b.status));
 
 let pendingBet = null;
 
-window.openBetModal = function (marketId, title, pick) {
+window.openBetModal = function (marketId, title, pick, price = null, contract = null) {
     if (!localStorage.getItem("token")) {
         if (requireAuth()) return;
     }
@@ -1863,7 +2055,9 @@ window.openBetModal = function (marketId, title, pick) {
     pendingBet = {
         marketId,
         title: title || "Market",
-        pick
+        pick,
+        price: Number.isFinite(Number(price)) ? Number(price) : null,
+        contract
     };
 
     const titleEl = document.getElementById('modal-market-title');
@@ -1876,7 +2070,11 @@ window.openBetModal = function (marketId, title, pick) {
     const pickLabel = outcome ? outcome.label : pick;
 
     if (titleEl) titleEl.innerText = pendingBet.title;
-    if (pickEl) pickEl.innerText = `Your Pick: ${pickLabel}`;
+    if (pickEl) {
+        const terms = pendingBet.price && pendingBet.price > 1
+            ? ` · Odds @${pendingBet.price.toFixed(2)} (${(100 / pendingBet.price).toFixed(1)}% implied)` : '';
+        pickEl.innerText = `Your Pick: ${contract?.selection || pickLabel}${terms}`;
+    }
 
     const input = document.getElementById('bet-amount-input');
     if (input) input.value = 10;
@@ -1908,37 +2106,17 @@ async function processConfirmedBet() {
     btn.innerText = "Placing Bet...";
 
     try {
-        const response = await fetch(window.apiUrl('/api/place-bet'), {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${localStorage.getItem('token')}`
-            },
-            body: JSON.stringify({
-                marketId: pendingBet.marketId,
-                side: pendingBet.pick,
-                amount: amount
-            })
+        const succeeded = await window.placeBet({
+            marketId: pendingBet.marketId,
+            outcome: pendingBet.pick,
+            amount,
+            price: pendingBet.price,
+            contract: pendingBet.contract
         });
 
-        const result = await response.json();
-
-        if (result.success) {
-            alert("Bet Placed Successfully!");
+        if (succeeded) {
             closeBetModal();
-
-            if (typeof refreshBets === 'function') {
-                refreshBets('active');
-            }
-
-            if (typeof fetchProfile === 'function') {
-                fetchProfile();
-            }
-
-        } else {
-            alert(result.message || "Failed to place bet");
         }
-
     } catch (err) {
         console.error("Bet error:", err);
         alert("Connection error. Try again.");

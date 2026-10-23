@@ -91,6 +91,8 @@ window.onload = async () => {
             console.error("Invalid markets response");
         }
 
+        window.router?.();
+
         if (typeof window.setCategory === "function") {
             window.setCategory(window.state.category);
         }
@@ -270,11 +272,25 @@ function initSocket() {
         window.state.allMarkets = processed;
         window.allMarketsSource = processed;
         if (typeof syncMarketMap === "function") syncMarketMap(processed);
-        applyStateAndRender();
+        const matchRoute = window.location.hash.match(/^#match\/(.+)$/);
+        if (matchRoute) {
+            const matchId = decodeURIComponent(matchRoute[1]);
+            const updatedMatch = marketsById.get(matchId);
+            if (updatedMatch && window.marketMap) window.marketMap[matchId] = updatedMatch;
+            window.updateMatchMarket?.(matchId);
+        } else {
+            applyStateAndRender();
+        }
     });
 
     socket.on("match_update", (update) => {
         updateMatchRealtime?.(update);
+    });
+
+    socket.on("liveOddsUpdated", (payload) => {
+        if (payload?.marketId && Array.isArray(payload.odds)) {
+            window.updateMatchProviderOdds?.(String(payload.marketId), payload.odds);
+        }
     });
 
     socket.on("balanceUpdate", (data) => {
@@ -309,7 +325,7 @@ function initSocket() {
 window.cleanupSocketListeners = function() {
     if (!socket) return;
     const events = ['connect', 'connect_error', 'mpesaLogUpdate', 'marketsUpdated', 
-                     'match_update', 'balanceUpdate', 'betPlaced', 'newNotification', 'winningPayout'];
+                     'match_update', 'liveOddsUpdated', 'balanceUpdate', 'betPlaced', 'newNotification', 'winningPayout'];
     events.forEach(evt => socket.removeAllListeners(evt));
     socket.disconnect();
     socket = null;
@@ -319,6 +335,23 @@ window.cleanupSocketListeners = function() {
 window.addEventListener('beforeunload', () => {
     window.cleanupSocketListeners?.();
 });
+
+// Lightweight hash router for dedicated sports match pages.
+window.router = function router() {
+    const match = window.location.hash.match(/^#match\/(.+)$/);
+    const view = document.getElementById('matchView');
+    const dashboard = document.querySelector('.dashboard-main');
+    if (match) {
+        if (dashboard) dashboard.hidden = true;
+        if (view) view.hidden = false;
+        window.renderMatchView?.(decodeURIComponent(match[1]));
+        return;
+    }
+    if (view) { view.hidden = true; view.innerHTML = ''; }
+    if (dashboard) dashboard.hidden = false;
+    document.body.classList.remove('match-view-open');
+};
+window.addEventListener('hashchange', window.router);
 
 // Cleanup when the assistant panel is closed
 window.cleanupAssistantListeners = function() {
