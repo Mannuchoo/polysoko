@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './aiProvider.js';
 
 const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b';
 
@@ -72,7 +73,7 @@ export async function generateMarketFromNews(rawArticleData) {
   const prompt = `Extract one objectively resolvable prediction market from this source. Use only facts supported by the source. ${topicGuidance}\n\nReturn a concise marketHeader: a plain, short display headline of 4–9 words, no more than 72 characters, grounded in the source. It should name the subject and developing action, contain no filler or source attribution, and not be phrased as a question.\n\nAlso extract all four required resolution components in this order: [Action/Event], [Subject], [Condition], [Exact Timestamp/Deadline]. The full contract question is phrased as a natural, grammatically correct Yes/No question: "Will [Subject] [Action/Event] [Condition] by [Exact Timestamp/Deadline]?" Use the subject before its action in that question. The action/event must be a bare verb phrase in base form after "Will" ("pass the bill", never "passes the bill" and never "will pass the bill"). The condition must be a short phrase that reads naturally after the action and identifies the relevant context or resolution source. Keep all fields concise and avoid duplicated subjects or deadlines. The deadline must be an exact future ISO 8601 timestamp with timezone and must be the actual future milestone in the source, not a deadline invented from when the article was fetched. ${horizonGuidance} ${required ? `Use this trusted deadline exactly, without changing it: ${required.timestamp}.` : 'For news, use only a concrete future date/time explicitly supported by the supplied source. If the source does not establish an upcoming milestone with a deadline at least 48 hours from now, or if the decisive event/result already happened, return empty strings for marketHeader, subject, actionEvent, condition, deadline, and resolutionCriteria.'} Resolution criteria must define one observable Yes/No rule and the source/event used to settle it. Do not make up media links; return supplied media URLs only. If the subject, developing action, condition, or resolution cannot be grounded in the source, return empty mandatory fields.\n\nSource title: ${title}\nSource body: ${body}\nCountry/context: ${country || 'not specified'}\nTopic: ${marketTopic}\nTrusted deadline: ${required?.timestamp || 'none'}\nImage URL: ${suppliedImage || ''}\nVideo URL: ${suppliedVideo || ''}`;
 
   const client = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1', maxRetries: 0 });
-  const response = await client.chat.completions.create({
+  const request = {
     model: String(process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL).trim(),
     temperature: 0.1,
     response_format: { type: 'json_object' },
@@ -80,7 +81,19 @@ export async function generateMarketFromNews(rawArticleData) {
       { role: 'system', content: 'Extract one concise, source-grounded, objectively resolvable prediction market. For news and sports news, reject events already completed or outcomes already known. Never invent future milestones or deadlines to turn completed news into a market. If not marketable, return empty strings for marketHeader, subject, actionEvent, condition, deadline, and resolutionCriteria. Return only a JSON object with marketHeader, subject, actionEvent, condition, deadline, resolutionCriteria, imageUrl, and videoUrl fields. Every field must be a string. Keep marketHeader to 72 characters or fewer.' },
       { role: 'user', content: prompt }
     ]
-  });
+  };
+  let response;
+  try {
+    response = await client.chat.completions.create(request);
+  } catch (error) {
+    const geminiKey = getGeminiApiKey();
+    if (!isGroqRateLimitError(error) || !geminiKey) throw error;
+    console.warn('[ai] Groq rate limit reached for market generation; retrying with Gemini.');
+    response = await new OpenAI({ apiKey: geminiKey, baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', maxRetries: 0 }).chat.completions.create({
+      ...request,
+      model: getGeminiModel()
+    });
+  }
   const text = response.choices?.[0]?.message?.content;
   if (!text) throw new Error('Groq returned an empty structured response.');
   let result;

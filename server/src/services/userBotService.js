@@ -1,15 +1,23 @@
 import OpenAI from 'openai';
+import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './aiProvider.js';
 
 // Groq retired the previous Llama default for developer-tier projects in
 // August 2026. Keep this on a currently supported model unless overridden.
 const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 const REQUEST_TIMEOUT_MS = 25000;
 let groqClient;
+let geminiClient;
 function getGroqClient() {
   const apiKey = String(process.env.GROQ_API_KEY || '').trim();
   if (!apiKey) throw new Error('GROQ_API_KEY is not configured.');
   if (!groqClient) groqClient = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1', maxRetries: 0 });
   return groqClient;
+}
+function getGeminiClient() {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) throw new Error('Gemini fallback is not configured.');
+  if (!geminiClient) geminiClient = new OpenAI({ apiKey, baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', maxRetries: 0 });
+  return geminiClient;
 }
 const MARKET_VISIBILITY = `
   status IN ('open', 'upcoming', 'live') AND COALESCE(settled, 0)=0
@@ -85,9 +93,7 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
   const messages = [{ role: 'system', content: systemPrompt }, ...safeHistory, { role: 'user', content: String(message).slice(0, 2000) }];
   const toolHandlers = { getHighRiskMarkets: () => getHighRiskMarkets(dbAll), getTrendingMarkets: () => getTrendingMarkets(dbAll) };
 
-  const runGroq = async () => {
-    const client = getGroqClient();
-    const model = String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim();
+  const runProvider = async ({ client, model, provider }) => {
     const providerMessages = messages.map(item => ({ ...item }));
     for (let turn = 0; turn < 4; turn++) {
       const payload = await client.chat.completions.create({
@@ -104,8 +110,8 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
       const calls = choice.message.tool_calls || [];
       if (!calls.length) {
         const reply = String(choice.message.content || '').trim();
-        if (!reply) throw new Error('Groq returned an empty chat response.');
-        return { reply, model: payload.model || model, provider: 'Groq' };
+        if (!reply) throw new Error(`${provider} returned an empty chat response.`);
+        return { reply, model: payload.model || model, provider };
       }
       for (const call of calls) {
         const name = call.function?.name;
@@ -114,7 +120,14 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
         providerMessages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
       }
     }
-    throw new Error('Groq could not finish the market lookup.');
+    throw new Error(`${provider} could not finish the market lookup.`);
   };
-  return runGroq();
+  try {
+    return await runProvider({ client: getGroqClient(), model: String(process.env.GROQ_MODEL || DEFAULT_MODEL).trim(), provider: 'Groq' });
+  } catch (error) {
+    const geminiKey = getGeminiApiKey();
+    if (!isGroqRateLimitError(error) || !geminiKey) throw error;
+    console.warn('[sokobot] Groq rate limit reached; retrying with Gemini.');
+    return runProvider({ client: getGeminiClient(), model: getGeminiModel(), provider: 'Gemini' });
+  }
 }

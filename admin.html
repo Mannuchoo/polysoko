@@ -1132,6 +1132,13 @@ button, input, select {
         <div style="text-align:center; margin-bottom:30px;">
             <h2 style="margin:0; letter-spacing:1px; text-transform:uppercase;">PolySoko</h2>
         </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:0 0 22px;padding:16px 18px;background:rgba(0,255,136,.07);border:1px solid rgba(0,255,136,.3);border-radius:14px;">
+            <div>
+                <strong style="display:block;color:#00ff88;margin-bottom:4px;">Admin PIN security</strong>
+                <span style="color:#aaa;font-size:.85rem;">Set or change the PIN used when the admin console locks.</span>
+            </div>
+            <button onclick="openChangePinModal()" style="padding:11px 16px;background:#00ff88;color:#07140d;border:0;border-radius:9px;font-weight:800;cursor:pointer;">Set / Change PIN</button>
+        </div>
         <div class="admin-actions-grid">
             <button onclick="showSection('createSection')">
                 <div style="font-size:1.8rem;">🚀</div>
@@ -1383,6 +1390,7 @@ function esc(str) {
         <p><strong>Total platform balance:</strong> <span id="infoTotalBalance">sKES 0.00</span></p>
         <p><strong>Admin Wallet:</strong> <span id="infoWallet">Not set</span></p>
         <p><strong>Business Till:</strong> <span id="infoTill">Not set</span></p>
+        <button onclick="document.getElementById('superAdminInfoModal').classList.remove('active'); openChangePinModal();" style="width:100%;margin:8px 0 12px;padding:12px;background:var(--mu-red);color:white;border:0;border-radius:10px;font-weight:800;cursor:pointer;">🔑 Set or Change Admin PIN</button>
         <button class="close-panel" onclick="document.getElementById('superAdminInfoModal').classList.remove('active')">Close</button>
     </div>
 </div>

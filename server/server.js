@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
+import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './src/services/aiProvider.js';
 import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
 import { createBotRouter } from './src/routes/bot.js';
 import adminAuth from './src/middleware/adminAuth.js';
@@ -2108,15 +2109,31 @@ async function callAI({ messages = [], promptText = '' }) {
     const payloadMessages = Array.isArray(messages) && messages.length
         ? messages
         : [{ role: 'user', content: String(promptText || '') }];
-    const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+    const requestBody = {
         model,
         messages: payloadMessages,
         temperature: 0.6,
         max_tokens: 320
-    }, {
+    };
+    const requestConfig = {
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         timeout: 25000
-    });
+    };
+    let response;
+    try {
+        response = await axios.post('https://api.groq.com/openai/v1/chat/completions', requestBody, requestConfig);
+    } catch (error) {
+        const geminiKey = getGeminiApiKey();
+        if (!isGroqRateLimitError(error) || !geminiKey) throw error;
+        console.warn('[ai] Groq rate limit reached for market editing; retrying with Gemini.');
+        response = await axios.post('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+            ...requestBody,
+            model: getGeminiModel()
+        }, {
+            ...requestConfig,
+            headers: { Authorization: `Bearer ${geminiKey}`, 'Content-Type': 'application/json' }
+        });
+    }
     const text = response.data?.choices?.[0]?.message?.content?.trim();
     if (!text) throw new Error('Groq returned an empty response.');
     return { engine: 'groq', text };
