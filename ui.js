@@ -1,9 +1,21 @@
 const savedCategory = localStorage.getItem("last_category") || "all";
+const initialNavigation = performance.getEntriesByType?.('navigation')?.[0];
+const sportsHashRoute = /^#(?:sports(?:\/|$)|sport\/|match\/)/i.test(window.location.hash);
+if (initialNavigation?.type === 'reload' &&
+    (sportsHashRoute || ['sports', 'football'].includes(savedCategory.toLowerCase()))) {
+    if (sportsHashRoute) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    localStorage.setItem('last_category', 'all');
+    localStorage.removeItem('last_sports_type');
+}
+// Always start a fresh page load at the main market board. Category
+// preferences apply while navigating this page, but must not strand users in
+// the Sports view when they return to the site later.
+const initialCategory = 'all';
 window.state = window.state || {
     allMarkets: [],
     filteredMarkets: [],
-    category: savedCategory === "football" ? "sports" : savedCategory,
-    sportsType: savedCategory === "football" ? "football" : (savedCategory === "sports" ? (localStorage.getItem("last_sports_type") || "") : ""),
+    category: initialCategory === "football" ? "sports" : initialCategory,
+    sportsType: initialCategory === "football" ? "football" : (initialCategory === "sports" ? (localStorage.getItem("last_sports_type") || "") : ""),
     sportsCategories: [],
     search: "",
     loading: true,
@@ -625,7 +637,7 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
         .sort((a, b) => `${a.league || ""} ${a.title || ""}`.localeCompare(`${b.league || ""} ${b.title || ""}`));
 
     html += `
-        ${renderSportsCategoryGrid()}
+        ${routeMode ? '' : renderSportsCategoryGrid()}
         <div class="main-category-label" style="color:#00ff88;font-weight:800;padding:18px 0 10px 0;">${escapeHtml(label).toUpperCase()} MATCHES</div>
     `;
 

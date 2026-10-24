@@ -539,16 +539,32 @@ window.router = function router() {
         return;
     }
     if (view) { view.hidden = true; view.innerHTML = ''; }
-    if (sportsRoute || sportRoute) {
+    const selectedSportRoute = sportRoute?.[1] || sportsRoute?.[1];
+    if (selectedSportRoute) {
         if (dashboard) dashboard.hidden = true;
         if (utilityView) utilityView.hidden = true;
         if (view) view.hidden = true;
         if (sportView) sportView.hidden = false;
         document.body.classList.remove('utility-route-open', 'match-view-open');
-        window.renderSportsRoute?.(sportsRoute ? '' : decodeURIComponent(sportRoute[1]));
+        window.renderSportsRoute?.(decodeURIComponent(selectedSportRoute));
         return;
     }
     if (sportView) { sportView.hidden = true; sportView.innerHTML = ''; }
+    if (sportsRoute) {
+        if (dashboard) dashboard.hidden = false;
+        if (utilityView) utilityView.hidden = true;
+        document.body.classList.remove('utility-route-open', 'match-view-open');
+        window.state.category = 'sports';
+        window.state.sportsType = '';
+        localStorage.setItem('last_category', 'sports');
+        localStorage.removeItem('last_sports_type');
+        document.querySelectorAll('.category-filter-row .pill').forEach(pill => {
+            const category = String(pill.dataset.cat || pill.textContent || '').trim().toLowerCase();
+            pill.classList.toggle('active', category === 'sports');
+        });
+        window.applyStateAndRender?.();
+        return;
+    }
     if (utilityRoute) {
         if (dashboard) dashboard.hidden = true;
         if (sportView) sportView.hidden = true;
