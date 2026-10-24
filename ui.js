@@ -237,7 +237,7 @@ function marketMetaText(value, fallback = '') {
 function isSportsMarket(m) {
     if (isElectronicGameMarket(m)) return false;
     const cat = normalizeCategory(m?.category);
-    const sport = normalizeCategory(m?.sport);
+    const sport = normalizeCategory(marketMetaText(m?.sport));
     const sportKeys = ['sports', 'football', 'nba', 'nfl', 'basketball', 'baseball', 'hockey', 'volleyball', 'rugby', 'handball', 'cricket', 'tennis', 'mma', 'afl'];
     const isFootballNews = isFootballNewsMarket(m);
     return ((sportKeys.includes(cat) || REAL_SPORT_LABELS.has(sport)) && !isFootballNews) ||
@@ -246,7 +246,7 @@ function isSportsMarket(m) {
 
 function sportRouteKeyForMarket(market) {
     const idSport = String(market?.id || '').match(/^sp_([a-z0-9-]+)_/i)?.[1];
-    const raw = market?.sport || idSport || (isFootballFixtureMarket(market) ? 'football' : market?.category);
+    const raw = marketMetaText(market?.sport) || idSport || (isFootballFixtureMarket(market) ? 'football' : market?.category);
     const key = normalizeCategory(normalizeSportLabel(raw));
     return key === 'sports' || key === 'unknown' ? '' : key;
 }
@@ -540,7 +540,7 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
     
     // Determine sport type from: m.sport field, league hints, or category
     const sportLabelFor = (m) => {
-        const sportValue = normalizeSportLabel(m.sport || '');
+        const sportValue = normalizeSportLabel(marketMetaText(m.sport));
         if (sportValue && normalizeCategory(sportValue) !== 'other') return sportValue;
         const cat = normalizeCategory(m.category);
         const idSport = String(m.id || '').match(/^sp_([a-z0-9-]+)_/i)?.[1];
@@ -567,9 +567,9 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
     
     const apiSports = Array.isArray(state.sportsCategories) ? state.sportsCategories : [];
     const apiSportNames = apiSports
-        .map(item => normalizeSportLabel(item?.sport))
+        .map(item => normalizeSportLabel(marketMetaText(item?.sport)))
         .filter(Boolean);
-    const apiSportCounts = new Map(apiSports.map(item => [normalizeCategory(item?.sport), Number(item?.count || 0)]));
+    const apiSportCounts = new Map(apiSports.map(item => [normalizeCategory(marketMetaText(item?.sport)), Number(item?.count || 0)]));
     const sportNames = [...new Set([...apiSportNames, ...source.map(sportLabelFor)])]
         .filter(Boolean)
         .sort((a, b) => a.localeCompare(b));

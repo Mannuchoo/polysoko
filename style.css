@@ -835,6 +835,10 @@ main {
     background: transparent;
 }
 
+/* App routes hide and reveal whole main views with the HTML hidden attribute.
+   The global main display rule above must not make a hidden route visible. */
+main[hidden] { display: none !important; }
+
 .dashboard-main {
     width: 100%;
     max-width: 100%;
