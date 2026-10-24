@@ -45,7 +45,12 @@ function formatStrictMarketTitle({ subject, actionEvent, condition, deadlineAt }
   }
   const subjectText = subject.replace(/[?!.]+$/, '');
   const actionText = actionEvent.replace(/[?!.]+$/, '').replace(/^[A-Z]/, first => first.toLowerCase());
-  const conditionText = condition.replace(/[?!.]+$/, '');
+  // Groq may put the contract deadline into condition despite the prompt.
+  // The title is a readable question; the exact cutoff remains in deadlineAt.
+  const conditionText = condition
+    .replace(/\s+by\s+(?:\d{4}-\d{2}-\d{2}\b.*|[A-Za-z]+\s+\d{1,2},?\s+\d{4}\b.*|\d{1,2}\s+[A-Za-z]+\s+\d{4}\b.*)$/i, '')
+    .replace(/[?!.]+$/, '')
+    .trim();
   return `Will ${subjectText} ${actionText} ${conditionText}?`;
 }
 

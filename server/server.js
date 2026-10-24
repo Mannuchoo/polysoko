@@ -981,10 +981,15 @@ const dbRun = (query, params = []) => new Promise((resolve, reject) => {
 
 // PostgreSQL folds unquoted camelCase identifiers to lowercase. Expose the
 // frontend's established market field names on every HTTP and socket payload.
+function stripQuestionTitleDeadline(title) {
+    return String(title || '').replace(/\s+by\s+(?:\d{4}-\d{2}-\d{2}\b.*|[A-Za-z]+\s+\d{1,2},?\s+\d{4}\b.*|\d{1,2}\s+[A-Za-z]+\s+\d{4}\b.*)\??$/i, '?').trim();
+}
+
 function normalizeMarketRow(market) {
     if (!market) return market;
     return {
         ...market,
+        title: /^(news|tech|geo)[_-]/i.test(String(market.id || '')) ? stripQuestionTitleDeadline(market.title) : market.title,
         startTime: market.startTime ?? market.starttime,
         sideA: market.sideA ?? market.sidea,
         sideB: market.sideB ?? market.sideb,
