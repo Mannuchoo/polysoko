@@ -269,16 +269,40 @@ function initSocket() {
 
         const processed = [...marketsById.values()];
 
+        // Odds and volume snapshots are frequent. Keep the existing cards in
+        // the DOM for those updates and patch their live values in place.
+        const previous = window.state?.allMarkets || [];
+        const dynamicKeys = new Set([
+            'oddsA', 'oddsB', 'oddsC', 'odds_a', 'odds_b', 'odds_c', 'oddsa', 'oddsb', 'oddsc',
+            'home_volume', 'draw_volume', 'away_volume', 'volume', 'total_volume',
+            'yes_probability', 'no_probability', 'probability_yes', 'probability_no'
+        ]);
+        const stableShape = market => JSON.stringify(Object.fromEntries(
+            Object.entries(market || {}).filter(([key]) => !dynamicKeys.has(key)).sort(([a], [b]) => a.localeCompare(b))
+        ));
+        const previousById = new Map(previous.map(market => [String(market?.id || ''), market]));
+        const canPatchLiveValues = previous.length === processed.length && processed.every(market => {
+            const old = previousById.get(String(market?.id || ''));
+            return old && stableShape(old) === stableShape(market);
+        });
+
         window.state.allMarkets = processed;
         window.allMarketsSource = processed;
         if (typeof syncMarketMap === "function") syncMarketMap(processed);
+        if (canPatchLiveValues) {
+            const updatedById = new Map(processed.map(market => [String(market.id), market]));
+            window.state.filteredMarkets = (window.state.filteredMarkets || [])
+                .map(market => updatedById.get(String(market?.id || '')))
+                .filter(Boolean);
+            processed.forEach(market => window.updateMarketCardRealtime?.(market));
+        }
         const matchRoute = window.location.hash.match(/^#match\/(.+)$/);
         if (matchRoute) {
             const matchId = decodeURIComponent(matchRoute[1]);
             const updatedMatch = marketsById.get(matchId);
             if (updatedMatch && window.marketMap) window.marketMap[matchId] = updatedMatch;
             window.updateMatchMarket?.(matchId);
-        } else {
+        } else if (!canPatchLiveValues) {
             applyStateAndRender();
         }
     });
@@ -810,6 +834,8 @@ window.rejectMarket = async function(marketId) {
 };
 
 window.openAdminMarketEditor = async function() {
+    window.location.href = 'admin.html?section=approvedNewsMarketsSection';
+    return;
     try {
         const sanitize = (text) => window.escapeHtml ? window.escapeHtml(text) : String(text || '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
         const res = await apiFetch('admin/all-markets');

@@ -2151,3 +2151,214 @@ html, body {
         display: none;
     }
 }
+
+/* Structured dark market cards and live trading controls. */
+.market-card {
+    --market-surface: #111820;
+    --market-border: #26323d;
+    --market-muted: #94a3b2;
+    width: 100%;
+    min-width: 0;
+    padding: 16px;
+    margin: 0 0 14px;
+    overflow: hidden;
+    color: #f3f6f8;
+    background: linear-gradient(145deg, #141c24 0%, #0e141a 100%);
+    border: 1px solid var(--market-border);
+    border-radius: 16px;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .18), inset 0 1px rgba(255,255,255,.025);
+    transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+
+.market-card:hover {
+    border-color: #3b4b59;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .28);
+}
+
+.market-card.news-style { border-left: 3px solid #10b981 !important; }
+.market-card.crypto-style { border-top-color: rgba(245, 158, 11, .45); }
+.market-card.sports-style { border-top-color: rgba(56, 189, 248, .38); }
+
+.market-card-toprow,
+.market-status-group {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.market-status-group { justify-content: flex-end; flex-wrap: wrap; }
+.market-card-toprow .league-tag {
+    max-width: 58%;
+    padding: 5px 9px;
+    color: #cbd5df !important;
+    background: rgba(255,255,255,.035);
+    border: 1px solid #34414e !important;
+    border-radius: 999px;
+    font-size: .66rem !important;
+    font-weight: 750;
+    letter-spacing: .045em;
+}
+
+.market-verified-badge,
+.market-countdown,
+.market-status-chip,
+.market-meta-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 4px 8px;
+    border: 1px solid #2d3944;
+    border-radius: 999px;
+    background: rgba(255,255,255,.035);
+    color: #aebbc7;
+    font-size: .66rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.market-verified-badge { color: #6ee7b7; border-color: rgba(16,185,129,.35); background: rgba(16,185,129,.08); }
+.market-status-chip { color: #cbd5df !important; }
+.market-status-chip.is-live { color: #fca5a5 !important; border-color: rgba(239,68,68,.4); background: rgba(239,68,68,.1); }
+.market-countdown { max-width: 100%; color: #96a4b1; font-variant-numeric: tabular-nums; }
+
+.market-question-title {
+    min-width: 0;
+    margin: 0;
+    color: #f4f7fa;
+    font-size: clamp(1rem, 2.6vw, 1.2rem);
+    font-weight: 760;
+    line-height: 1.38;
+    letter-spacing: -.015em;
+    overflow-wrap: anywhere;
+}
+
+.market-context-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    margin: 11px 0 13px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.market-context-meta::-webkit-scrollbar { display: none; }
+.market-meta-chip { flex: 0 0 auto; color: #aebbc7; font-weight: 600; }
+.market-confidence { color: #d1d9e0; }
+.market-sentiment-tag { color: #a7f3d0; border-color: rgba(16,185,129,.28); }
+
+.market-actions-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+    width: 100%;
+    min-width: 0;
+    margin-top: 14px;
+}
+.market-actions-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.bet-btn.market-action-button {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    gap: 9px;
+    width: 100%;
+    min-width: 0;
+    min-height: 76px;
+    height: auto;
+    padding: 10px 12px;
+    color: #ecfdf5;
+    background: rgba(16,185,129,.09);
+    border: 1px solid rgba(16,185,129,.42);
+    border-radius: 12px;
+    box-shadow: none;
+    text-align: left;
+    text-transform: none;
+    transition: transform .15s ease, background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.bet-btn.market-action-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    background: rgba(16,185,129,.16);
+    border-color: #10b981;
+    box-shadow: 0 5px 18px rgba(16,185,129,.12);
+}
+.bet-btn.market-action-button--negative {
+    color: #fff1f2;
+    background: rgba(239,68,68,.09);
+    border-color: rgba(239,68,68,.42);
+}
+.bet-btn.market-action-button--negative:hover:not(:disabled) {
+    background: rgba(239,68,68,.16);
+    border-color: #ef4444;
+    box-shadow: 0 5px 18px rgba(239,68,68,.12);
+}
+.bet-btn.market-action-button--draw {
+    color: #fffbeb;
+    background: rgba(245,158,11,.09);
+    border-color: rgba(245,158,11,.42);
+}
+.market-action-heading,
+.market-action-stats {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
+}
+.market-action-heading { justify-content: flex-start; font-size: .86rem; }
+.market-action-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.market-action-arrow { font-size: 1rem; line-height: 1; }
+.market-action-stats { color: #c8d3dc; font-size: .72rem; font-variant-numeric: tabular-nums; }
+.market-action-stats strong { color: inherit; font-size: .76rem; }
+.market-action-stats [data-action-probability] { color: #f5f7fa; font-weight: 800; }
+.bet-btn.market-action-button--compact { min-height: 58px; padding: 8px; gap: 6px; }
+.market-action-button--compact .market-action-heading { font-size: .74rem; }
+.market-action-button--compact .market-action-stats { font-size: .65rem; }
+
+.bet-btn.market-action-button:disabled,
+.bet-btn.market-action-button[aria-busy="true"] {
+    opacity: .48;
+    cursor: not-allowed;
+    filter: saturate(.55);
+}
+.bet-btn.market-action-button:focus-visible { outline: 2px solid #d1fae5; outline-offset: 2px; }
+
+.market-probability { margin-top: 10px; }
+.market-probability-labels {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+    color: #aebbc7;
+    font-size: .69rem;
+    font-weight: 700;
+}
+.market-probability-labels [data-prob-label] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.market-probability-labels [data-prob-label="YES"],
+.market-probability-labels [data-prob-label="HOME"] { color: #6ee7b7; }
+.market-probability-labels [data-prob-label="NO"],
+.market-probability-labels [data-prob-label="AWAY"] { color: #fca5a5; }
+.market-probability-labels [data-prob-label="DRAW"] { color: #fcd34d; }
+.market-probability-track {
+    display: flex;
+    width: 100%;
+    height: 6px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #25313b;
+}
+.market-probability-track [data-prob-segment] { display: block; min-width: 0; background: var(--outcome-color); transition: width .25s ease; }
+
+@media (max-width: 420px) {
+    .market-card { padding: 13px; border-radius: 13px; }
+    .market-card-toprow { align-items: flex-start; }
+    .market-card-toprow .league-tag { max-width: 48%; }
+    .market-status-group { gap: 5px; }
+    .market-status-chip, .market-countdown, .market-verified-badge { font-size: .6rem; padding: 3px 6px; }
+    .bet-btn.market-action-button { min-height: 70px; padding: 9px; }
+    .market-action-stats { font-size: .66rem; }
+    .market-actions-grid--three { gap: 6px; }
+    .market-actions-grid--three .bet-btn.market-action-button { padding: 7px 6px; }
+}

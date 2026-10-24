@@ -937,11 +937,13 @@ button, input, select {
                     </select>
                 </div>
             </div>
-            <div style="margin-top:20px; display:flex; gap:10px; justify-content:flex-end;">
+            <div style="margin-top:16px;display:flex;justify-content:flex-end;color:#8b98a5;font-size:.78rem;" id="marketDraftCacheStatus" role="status"></div>
+            <div style="margin-top:8px; display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
                 <button onclick="clearMarketForm()"
                     style="padding:12px 18px; border-radius:8px; border:1px solid var(--border); background:transparent; color:var(--text);">
                     Clear
                 </button>
+                <button onclick="saveMarketDraft()" style="padding:12px 18px;border-radius:8px;border:1px solid #4b6780;background:#14202b;color:#d8e9f6;font-weight:700;">Save Draft</button>
                 <button onclick="publishMarket()" class="btn-primary">
                     🚀 Publish Market
                 </button>
@@ -992,6 +994,7 @@ button, input, select {
                         <option value="cancelled">Cancelled</option>
                     </select>
                     <button onclick="loadAdminMarkets()" class="btn-primary" style="padding:10px 14px;">Refresh</button>
+                    <button onclick="showSection('approvedNewsMarketsSection')" style="padding:10px 14px;background:#17212c;color:#d9e4ee;border:1px solid #34404c;border-radius:8px;cursor:pointer;">Approved News</button>
                 </div>
             </div>
             <div id="adminMarketList"></div>
@@ -1002,11 +1005,31 @@ button, input, select {
                     ⚖️ Pending Settlements
                     <button onclick="loadPendingSettlements()" style="margin-left:auto; padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:#111; color:var(--text); cursor:pointer; font-size:0.8rem;">↻ Refresh</button>
                 </h3>
-                <p style="font-size:0.75rem;color:#888;margin:0 0 10px 0;">Suspended sports markets awaiting results. Football fixtures settle automatically every 30 minutes; other sports can be settled here.</p>
+                <p style="font-size:0.75rem;color:#888;margin:0 0 10px 0;">Suspended markets and overdue markets that still have active bets but no result. Markets with available provider results settle automatically; unresolved markets can be settled or refunded here.</p>
                 <div id="pendingSettlementsList" style="display:flex;flex-direction:column;gap:8px;"></div>
             </div>
         </div>
     </div>
+
+<div id="approvedNewsMarketsSection" class="admin-section">
+    <div class="stat-card">
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px;margin-bottom:20px;">
+            <div>
+                <h3 style="margin:0;">Approved News Markets</h3>
+                <p class="sub" style="margin:5px 0 0;">Edit or remove approved news and other non-sports markets.</p>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                <input id="approvedNewsSearch" type="search" placeholder="Search approved markets" oninput="filterApprovedNewsMarkets()" style="min-width:190px;padding:10px;background:#000;color:white;border:1px solid var(--border);border-radius:8px;">
+                <select id="approvedNewsStatusFilter" onchange="filterApprovedNewsMarkets()" style="padding:10px;background:#000;color:white;border:1px solid var(--border);border-radius:8px;">
+                    <option value="all">All Statuses</option><option value="draft">Draft</option><option value="pending">Pending</option><option value="open">Open</option><option value="upcoming">Upcoming</option><option value="live">Live</option><option value="suspended">Suspended</option><option value="closed">Closed</option><option value="settled">Settled</option><option value="cancelled">Cancelled</option>
+                </select>
+                <button onclick="loadApprovedNewsMarkets()" class="btn-primary" style="padding:10px 14px;">Refresh</button>
+                <button onclick="showSection('marketsSection')" style="padding:10px 14px;background:#17212c;color:#d9e4ee;border:1px solid #34404c;border-radius:8px;cursor:pointer;">Sports Markets</button>
+            </div>
+        </div>
+        <div id="approvedNewsMarketList"></div>
+    </div>
+</div>
 
 <div id="betsSection" class="admin-section">
     <div class="stat-card">
@@ -1147,6 +1170,10 @@ button, input, select {
             <button onclick="showSection('marketsSection'); loadAdminMarkets();">
                 <div style="font-size:1.8rem;">🛠️</div>
                 <span>Manage Markets</span>
+            </button>
+            <button onclick="showSection('approvedNewsMarketsSection'); loadApprovedNewsMarkets();">
+                <div style="font-size:1.8rem;">&#128240;</div>
+                <span>Approved News Markets</span>
             </button>
             <button onclick="showSection('betsSection'); loadGlobalActiveBets();">
                 <div style="font-size:1.8rem;">📈</div>
@@ -1328,8 +1355,16 @@ button, input, select {
  * 🛡️ XSS PROTECTION: Escapes HTML special characters.
  */
 function esc(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>"']/g, m => ({'&':'&','<':'<','>':'>','"':'"',"'":"&#39;"}[m]));
+    if (str === null || str === undefined) return '';
+    // Legacy API rows can contain objects in title/event fields. Resolve a
+    // useful label before inserting it into admin HTML.
+    if (typeof str === 'object') {
+        const display = str.title ?? str.market_title ?? str.marketTitle ?? str.name ?? str.phone ?? str.label ?? str.text;
+        if (display !== undefined && display !== str) return esc(display);
+        if (Array.isArray(str)) return str.map(esc).filter(Boolean).join(', ');
+        return '';
+    }
+    return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m]));
 }
 </script>
 
@@ -1718,6 +1753,7 @@ window.showSection = function(id, btn, options = {}) {
         if (id === 'marketApprovalsSection') loadPendingMarkets();
         if (id === 'aiMarketReviewSection') loadAiGeneratedMarkets();
         if (id === 'marketsSection') loadAdminMarkets();
+        if (id === 'approvedNewsMarketsSection') loadApprovedNewsMarkets();
         if (id === 'activityLogsSection') loadActivityLogs();
         if (id === 'staySection' && typeof loadStayAdmin === 'function') loadStayAdmin();
     }
@@ -2025,11 +2061,12 @@ function uploadStayPhotos(files) {
 
 /* ================= INIT ================= */
 window.onload = () => {
+    initMarketDraftCache();
     // Sync the transaction filter pill UI on load
     document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
     document.getElementById('txFilterWithdraw')?.classList.add('active');
 
-    const lastView = localStorage.getItem('admin_last_view') || 'adminAccountSection';
+    const lastView = new URLSearchParams(location.search).get('section') || localStorage.getItem('admin_last_view') || 'adminAccountSection';
     if (!localStorage.getItem("token")) {
         showSection(lastView, null, { load: false });
         showAdminLoginGate("Admin session required. Log in to load users, markets, and transactions.");
@@ -2039,7 +2076,7 @@ window.onload = () => {
     initAdminAfterLogin();
 };
 async function initAdminAfterLogin() {
-    const lastView = localStorage.getItem('admin_last_view') || 'adminAccountSection';
+    const lastView = new URLSearchParams(location.search).get('section') || localStorage.getItem('admin_last_view') || 'adminAccountSection';
     showAdminLoginGate('Checking your admin session…');
     try {
         await API.get('/admin/session');
@@ -2068,6 +2105,7 @@ async function initAdminAfterLogin() {
     const startupLoads = [loadAdminTreasury(), loadGlobalActiveBets(), loadTransactions(), loadPendingSettlements()];
     if (lastView === 'usersSection') startupLoads.push(loadAdminUsers());
     if (lastView === 'marketsSection') startupLoads.push(loadAdminMarkets());
+    if (lastView === 'approvedNewsMarketsSection') startupLoads.push(loadApprovedNewsMarkets());
     if (lastView === 'marketApprovalsSection') startupLoads.push(loadPendingMarkets());
     if (lastView === 'aiMarketReviewSection') startupLoads.push(loadAiGeneratedMarkets());
     if (lastView === 'activityLogsSection') startupLoads.push(loadActivityLogs());
@@ -2692,6 +2730,82 @@ async function viewUserDetail(phone) {
 }
 
 /* ================= MARKETS ================= */
+const MARKET_DRAFT_CACHE_KEY = 'polysoko_admin_market_draft_v1';
+let marketDraftId = null;
+
+function readMarketForm() {
+    return {
+        title: document.getElementById('mTitle').value,
+        category: document.getElementById('mCategory').value,
+        startTime: document.getElementById('mExpiry').value,
+        sideA: document.getElementById('mSideA').value,
+        sideB: document.getElementById('mSideB').value,
+        content: document.getElementById('mDescription').value,
+        media_url: document.getElementById('mMediaUrl').value,
+        media_type: document.getElementById('mMediaType').value,
+        draftId: marketDraftId
+    };
+}
+
+function cacheMarketDraft(form = readMarketForm()) {
+    try {
+        localStorage.setItem(MARKET_DRAFT_CACHE_KEY, JSON.stringify({ ...form, cachedAt: new Date().toISOString() }));
+        const status = document.getElementById('marketDraftCacheStatus');
+        if (status) status.textContent = 'Draft cache saved on this device.';
+        return true;
+    } catch (error) {
+        const status = document.getElementById('marketDraftCacheStatus');
+        if (status) status.textContent = 'Could not save local draft cache.';
+        console.warn('Local market draft cache failed:', error);
+        return false;
+    }
+}
+
+function restoreMarketDraftCache() {
+    try {
+        const cached = JSON.parse(localStorage.getItem(MARKET_DRAFT_CACHE_KEY) || 'null');
+        if (!cached) return;
+        marketDraftId = cached.draftId || null;
+        document.getElementById('mTitle').value = cached.title || '';
+        document.getElementById('mCategory').value = cached.category || 'football';
+        document.getElementById('mExpiry').value = cached.startTime || '';
+        document.getElementById('mSideA').value = cached.sideA || 'YES';
+        document.getElementById('mSideB').value = cached.sideB || 'NO';
+        document.getElementById('mDescription').value = cached.content || '';
+        document.getElementById('mMediaUrl').value = cached.media_url || '';
+        document.getElementById('mMediaType').value = cached.media_type || 'auto';
+        const status = document.getElementById('marketDraftCacheStatus');
+        if (status) status.textContent = `Restored local draft${cached.cachedAt ? ` saved ${new Date(cached.cachedAt).toLocaleString()}` : ''}.`;
+    } catch (error) {
+        console.warn('Local market draft cache could not be restored:', error);
+    }
+}
+
+async function saveMarketDraft() {
+    const form = readMarketForm();
+    cacheMarketDraft(form);
+    try {
+        const result = await API.post('/admin/save-market-draft', form);
+        if (!result?.success || !result.draftId) throw new Error(result?.message || 'Draft could not be saved to the server.');
+        marketDraftId = result.draftId;
+        cacheMarketDraft({ ...form, draftId: marketDraftId });
+        const status = document.getElementById('marketDraftCacheStatus');
+        if (status) status.textContent = 'Draft saved to your admin account and cached on this device.';
+    } catch (error) {
+        const status = document.getElementById('marketDraftCacheStatus');
+        if (status) status.textContent = `Saved to this device only. Server save failed: ${error.message || 'Request failed'}`;
+    }
+}
+
+function initMarketDraftCache() {
+    restoreMarketDraftCache();
+    ['mTitle', 'mCategory', 'mExpiry', 'mSideA', 'mSideB', 'mDescription', 'mMediaUrl', 'mMediaType'].forEach(id => {
+        const field = document.getElementById(id);
+        field?.addEventListener('input', () => cacheMarketDraft());
+        field?.addEventListener('change', () => cacheMarketDraft());
+    });
+}
+
 async function publishMarket() {
     const title = document.getElementById('mTitle').value;
     const expiry = document.getElementById('mExpiry').value;
@@ -2707,7 +2821,7 @@ async function publishMarket() {
     }
 
     try {
-        await API.post('/admin/create-market', {
+        const result = await API.post('/admin/create-market', {
             title,
             category,
             startTime: expiry,
@@ -2715,10 +2829,11 @@ async function publishMarket() {
             media_type: mediaType,
             content,
             sideA,
-            sideB
+            sideB,
+            draftId: marketDraftId
         });
 
-        alert("🚀 Market LIVE");
+        alert(result?.message || 'Market created successfully.');
         clearMarketForm();
         loadAdminMarkets();
 
@@ -2823,6 +2938,108 @@ async function loadAdminMarkets() {
     loadPendingSettlements();
 }
 
+async function loadApprovedNewsMarkets() {
+    const container = document.getElementById('approvedNewsMarketList');
+    if (!container) return;
+    container.innerHTML = '<p style="text-align:center;color:#8b98a5;padding:24px;">Loading approved news markets...</p>';
+    try {
+        const res = await API.get('/admin/approved-news-markets');
+        if (!res?.success) throw new Error(res?.message || 'Could not load approved news markets.');
+        const markets = res.markets || [];
+        if (!markets.length) {
+            container.innerHTML = '<p style="text-align:center;color:#71767b;padding:24px;">No approved news markets found.</p>';
+            return;
+        }
+        container.innerHTML = markets.map(m => {
+            const id = String(m.id || '');
+            const deadline = m.event_end_time || m.startTime;
+            const deadlineDate = deadline ? new Date(deadline) : null;
+            const deadlineValue = deadlineDate && !Number.isNaN(deadlineDate.getTime())
+                ? new Date(deadlineDate.getTime() - deadlineDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+                : '';
+            const searchable = `${m.title || ''} ${m.description || ''} ${m.content || ''} ${m.category || ''} ${id}`.toLowerCase();
+            return `
+            <article data-approved-news-market data-status="${esc(String(m.status || '').toLowerCase())}" data-search="${esc(searchable)}" style="background:linear-gradient(145deg,#11151b,#080a0d);border:1px solid #27313a;border-radius:14px;padding:18px;margin-bottom:14px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;">
+                    <div style="min-width:0;"><div style="font-size:.68rem;color:#00e887;font-weight:800;text-transform:uppercase;">${esc(m.category || 'news')} · ${esc(m.status || 'unknown')}</div><div style="font-size:.72rem;color:#77818d;font-family:monospace;overflow-wrap:anywhere;">${esc(id)}</div></div>
+                    <button onclick="deleteApprovedNewsMarket('${esc(id)}')" style="background:#301819;color:#ff8585;border:1px solid #5b2b2c;border-radius:8px;padding:8px 10px;cursor:pointer;">Remove</button>
+                </div>
+                <label style="display:block;margin-bottom:12px;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Market title
+                    <input id="news-edit-title-${esc(id)}" value="${esc(m.title || '')}" style="width:100%;box-sizing:border-box;padding:12px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;font-weight:700;">
+                </label>
+                <label style="display:block;margin-bottom:12px;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Description / resolution criteria
+                    <textarea id="news-edit-content-${esc(id)}" style="width:100%;box-sizing:border-box;padding:12px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;min-height:86px;resize:vertical;">${esc(m.content || m.description || '')}</textarea>
+                </label>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:12px;">
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Category<input id="news-edit-category-${esc(id)}" value="${esc(m.category || 'news')}" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Deadline<input id="news-edit-deadline-${esc(id)}" type="datetime-local" value="${esc(deadlineValue)}" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Media URL<input id="news-edit-media-${esc(id)}" value="${esc(m.media_url || '')}" placeholder="Image or video URL" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Media type<select id="news-edit-media-type-${esc(id)}" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"><option value="auto" ${!m.media_type || m.media_type === 'auto' ? 'selected' : ''}>Auto</option><option value="image" ${m.media_type === 'image' ? 'selected' : ''}>Image</option><option value="video" ${m.media_type === 'video' ? 'selected' : ''}>Video</option><option value="youtube" ${m.media_type === 'youtube' ? 'selected' : ''}>YouTube</option></select></label>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:12px;">
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">YES / Side A<input id="news-edit-sideA-${esc(id)}" value="${esc(m.sideA || 'YES')}" style="width:100%;box-sizing:border-box;padding:10px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">NO / Side B<input id="news-edit-sideB-${esc(id)}" value="${esc(m.sideB || 'NO')}" style="width:100%;box-sizing:border-box;padding:10px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Third outcome<input id="news-edit-sideC-${esc(id)}" value="${esc(m.sideC || '')}" placeholder="Optional" style="width:100%;box-sizing:border-box;padding:10px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">YES odds<input id="news-edit-oddsA-${esc(id)}" type="number" step="0.01" min="1.01" value="${Number(m.oddsA || 1.9).toFixed(2)}" style="width:100%;box-sizing:border-box;padding:10px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">NO odds<input id="news-edit-oddsB-${esc(id)}" type="number" step="0.01" min="1.01" value="${Number(m.oddsB || 1.9).toFixed(2)}" style="width:100%;box-sizing:border-box;padding:10px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                    <label style="color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Third odds<input id="news-edit-oddsC-${esc(id)}" type="number" step="0.01" min="1.01" value="${m.oddsC ? Number(m.oddsC).toFixed(2) : ''}" placeholder="Optional" style="width:100%;box-sizing:border-box;padding:10px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;"></label>
+                </div>
+                <button onclick="saveApprovedNewsMarket('${esc(id)}', this)" class="btn-primary" style="width:100%;padding:12px;">Save approved market</button>
+                <label style="display:block;margin:14px 0 7px;color:#9ba6b2;font-size:.7rem;text-transform:uppercase;">Settle this market
+                    <input id="settle-result-${esc(id)}" placeholder="Winning outcome" style="width:100%;box-sizing:border-box;padding:11px;background:#090b0f;border:1px solid #2b323b;color:white;border-radius:8px;margin-top:6px;">
+                </label>
+                <button onclick="adminSettleMarket('${esc(id)}', this)" class="btn-approve" style="width:100%;padding:11px;">Settle approved market</button>
+            </article>`;
+        }).join('');
+        filterApprovedNewsMarkets();
+    } catch (err) {
+        console.error('Approved news markets load failed:', err);
+        container.innerHTML = `<p style="color:#ff7777;text-align:center;padding:20px;">Could not load approved markets: ${esc(err.message || 'Request failed')}</p>`;
+    }
+}
+
+function filterApprovedNewsMarkets() {
+    const container = document.getElementById('approvedNewsMarketList');
+    if (!container) return;
+    const status = document.getElementById('approvedNewsStatusFilter')?.value || 'all';
+    const query = (document.getElementById('approvedNewsSearch')?.value || '').trim().toLowerCase();
+    for (const card of container.querySelectorAll('[data-approved-news-market]')) {
+        card.style.display = (status === 'all' || card.dataset.status === status) && (!query || (card.dataset.search || '').includes(query)) ? '' : 'none';
+    }
+}
+
+async function saveApprovedNewsMarket(id, btn) {
+    const read = (field) => document.getElementById(`news-edit-${field}-${id}`)?.value ?? '';
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+        const deadline = read('deadline');
+        await API.post('/admin/update-market', {
+            id, title: read('title'), content: read('content'), category: read('category'),
+            event_end_time: deadline ? new Date(deadline).toISOString() : null,
+            media_url: read('media'), media_type: read('media-type'),
+            sideA: read('sideA'), sideB: read('sideB'), sideC: read('sideC'),
+            oddsA: read('oddsA'), oddsB: read('oddsB'), oddsC: read('oddsC')
+        });
+        btn.textContent = 'Saved';
+    } catch (error) {
+        btn.textContent = error.message || 'Save failed';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function deleteApprovedNewsMarket(id) {
+    if (!await window.showAppConfirm('Remove this approved market? Active bets will be refunded and the market kept in history.', { title: 'Remove approved market', danger: true, confirmLabel: 'Refund and remove' })) return;
+    try {
+        const result = await API.post('/admin/cancel-market', { marketId: id, reason: 'ADMIN_REMOVED' });
+        if (!result?.success) throw new Error(result?.message || 'Market could not be removed.');
+        await loadApprovedNewsMarkets();
+    } catch (error) {
+        await window.showAppDialog(error.message || 'Market could not be removed.', { title: 'Remove failed' });
+    }
+}
+
 function filterAdminSportsMarkets() {
     const container = document.getElementById('adminMarketList');
     if (!container) return;
@@ -2915,6 +3132,7 @@ async function loadPendingSettlements() {
         }
         container.innerHTML = markets.map(m => {
             const bets = Number(m.active_bets || 0);
+            const outcomes = [m.sideA || 'YES', m.sideB || 'NO', m.sideC].filter(Boolean);
             return `
             <div id="ps-card-${esc(m.id)}" style="background:#000;padding:12px;border-radius:10px;border-left:5px solid #ffa502;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -2922,15 +3140,11 @@ async function loadPendingSettlements() {
                         <div style="font-weight:700;">${esc(m.title || 'Untitled market')}</div>
                         <div style="font-size:0.7rem;color:#888;">ID: ${esc(m.id)} &bull; ${esc(m.status)} &bull; ${bets} active bet${bets !== 1 ? 's' : ''}</div>
                     </div>
-                    <div style="font-size:0.7rem;color:#666;white-space:nowrap;">${esc(m.startTime || '-')}</div>
+                    <div style="font-size:0.7rem;color:#666;white-space:nowrap;">${esc(m.event_end_time || m.startTime || '-')}</div>
                 </div>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
                     <select id="ps-result-${esc(m.id)}" style="padding:8px; background:#111; border:1px solid #333; color:white; border-radius:6px; font-size:0.85rem;">
-                        <option value="HOME">HOME</option>
-                        <option value="AWAY">AWAY</option>
-                        <option value="DRAW">DRAW</option>
-                        <option value="YES">YES</option>
-                        <option value="NO">NO</option>
+                        ${outcomes.map(outcome => `<option value="${esc(outcome)}">${esc(outcome)}</option>`).join('')}
                     </select>
                     <button onclick="adminSettleMarketPanel('${esc(m.id)}', this)" class="btn-approve" style="padding:8px 14px; font-size:0.85rem;">Settle</button>
                     <button onclick="adminVoidMarket('${esc(m.id)}', this)" style="padding:8px 14px; font-size:0.85rem; background:#7a1f1f; color:#fff; border:1px solid #5a1515; border-radius:6px; cursor:pointer;">Void (Refund 100%)</button>
@@ -3104,6 +3318,12 @@ function clearMarketForm() {
     document.getElementById('mDescription').value = '';
     document.getElementById('mSideA').value = 'YES';
     document.getElementById('mSideB').value = 'NO';
+    document.getElementById('mMediaUrl').value = '';
+    document.getElementById('mMediaType').value = 'auto';
+    marketDraftId = null;
+    localStorage.removeItem(MARKET_DRAFT_CACHE_KEY);
+    const status = document.getElementById('marketDraftCacheStatus');
+    if (status) status.textContent = '';
 }
 
 /* ================= AUTH ================= */

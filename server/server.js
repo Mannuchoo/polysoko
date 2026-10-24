@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
 import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './src/services/aiProvider.js';
 import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
+import { startSettlementWorker } from './src/services/settlementService.js';
 import { createBotRouter } from './src/routes/bot.js';
 import adminAuth from './src/middleware/adminAuth.js';
 import { fetchFootballOdds, oddsForFixture } from './src/services/footballOdds.js';
@@ -4123,6 +4124,7 @@ const settleMarketBets = async (marketId, market, winningSide) => {
 
         console.log(`✅ Market ${marketId} fully settled`);
 
+        console.log(`✅ Successfully settled Market #${marketId} as ${normalizeSettlementSide(winningSide)}`);
         emitMarkets();
 
         // Send notifications asynchronously after transaction commits successfully
@@ -5595,15 +5597,41 @@ app.post('/api/user/submit-market', authenticate, async (req, res) => {
     }
 });
 
+app.post('/api/admin/save-market-draft', authenticateAdmin, async (req, res) => {
+    const { draftId, title, category, sideA, sideB, startTime, content, media_url, media_type } = req.body || {};
+    try {
+        const id = draftId || `m_draft_${Date.now()}`;
+        const values = [String(title || '').trim(), String(content || ''), String(content || ''), category || 'misc', sideA || 'YES', sideB || 'NO', startTime || null, startTime || null, media_url || null, media_type || 'auto'];
+        if (draftId) {
+            const updated = await dbRun(
+                `UPDATE markets SET title=?, description=?, content=?, category=?, sideA=?, sideB=?, startTime=?, event_end_time=?, media_url=?, media_type=?, status='draft'
+                 WHERE id=? AND status='draft' AND COALESCE(admin_verified,0)=0`,
+                [...values, id]
+            );
+            if (!updated?.changes) return res.status(404).json({ success: false, message: 'This saved draft is no longer available to edit.' });
+        } else {
+            await dbRun(
+                `INSERT INTO markets (id,title,description,content,category,sideA,sideB,startTime,event_end_time,status,media_url,media_type,creator,ai_headline_generated,admin_verified)
+                 VALUES (?,?,?,?,?,?,?,?,?,'draft',?,?,?,0,0)`,
+                [id, ...values.slice(0, 8), values[8], values[9], req.user.phone]
+            );
+        }
+        return res.json({ success: true, draftId: id, message: 'Market draft saved.' });
+    } catch (error) {
+        console.error('[admin] market draft save failed:', error.message);
+        return res.status(500).json({ success: false, message: 'Market draft could not be saved.' });
+    }
+});
+
 app.post('/api/admin/create-market', authenticateAdmin, async (req, res) => {
-    const { title, category, sideA, sideB, startTime, description, media_url, media_type } = req.body;
+    const { draftId, title, category, sideA, sideB, startTime, description, content, media_url, media_type } = req.body || {};
     try {
         const marketTime = new Date(startTime);
         if (!startTime || !Number.isFinite(marketTime.getTime()) || marketTime <= new Date()) {
             return res.status(400).json({ success: false, message: 'Choose a valid future market close or event time.' });
         }
         let finalTitle = String(title || '').trim();
-        let finalDescription = description || '';
+        let finalDescription = description ?? content ?? '';
         let aiHeadlineGenerated = 0;
         if (!isSportsMarket({ category })) {
             const generated = await generateMarketFromNews({ title: finalTitle, body: finalDescription || finalTitle, requiredDeadline: marketTime.toISOString(), imageUrl: media_url, videoUrl: media_type === 'video' ? media_url : null });
@@ -5611,12 +5639,22 @@ app.post('/api/admin/create-market', authenticateAdmin, async (req, res) => {
             finalDescription = `${finalDescription}\nResolution criteria: ${generated.resolutionCriteria}`.trim();
             aiHeadlineGenerated = 1;
         }
-        const id = `m_${Date.now()}`;
-        await dbRun(
-            `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_end_time, status, media_url, media_type, creator, image_url, video_url, ai_headline_generated)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, finalTitle, finalDescription, finalDescription, category || 'misc', sideA || 'YES', sideB || 'NO', startTime, startTime, aiHeadlineGenerated ? 'draft' : 'open', media_url || null, media_type || 'auto', req.user.phone, media_type === 'image' ? media_url : null, media_type === 'video' ? media_url : null, aiHeadlineGenerated]
-        );
+        const id = draftId || `m_${Date.now()}`;
+        const values = [finalTitle, finalDescription, finalDescription, category || 'misc', sideA || 'YES', sideB || 'NO', startTime, startTime, aiHeadlineGenerated ? 'draft' : 'open', media_url || null, media_type || 'auto', media_type === 'image' ? media_url : null, media_type === 'video' ? media_url : null, aiHeadlineGenerated];
+        if (draftId) {
+            const updated = await dbRun(
+                `UPDATE markets SET title=?,description=?,content=?,category=?,sideA=?,sideB=?,startTime=?,event_end_time=?,status=?,media_url=?,media_type=?,image_url=?,video_url=?,ai_headline_generated=?,headline_version=CASE WHEN ?=1 THEN 2 ELSE headline_version END,admin_verified=0
+                 WHERE id=? AND status='draft' AND COALESCE(admin_verified,0)=0`,
+                [...values, aiHeadlineGenerated, id]
+            );
+            if (!updated?.changes) return res.status(404).json({ success: false, message: 'This saved draft is no longer available to publish.' });
+        } else {
+            await dbRun(
+                `INSERT INTO markets (id, title, description, content, category, sideA, sideB, startTime, event_end_time, status, media_url, media_type, creator, image_url, video_url, ai_headline_generated)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [id, ...values.slice(0, 11), req.user.phone, values[11], values[12], values[13]]
+            );
+        }
         emitMarkets();
         if (aiHeadlineGenerated) emitAdminEvent('newMarketPending', { id, title: finalTitle, creator: req.user.phone, ai_generated: true });
         res.json({ success: true, message: aiHeadlineGenerated ? 'Market generated and submitted for admin verification.' : 'Market created successfully' });
@@ -6338,7 +6376,7 @@ app.get('/api/my-bets', authenticate, (req, res) => {
 });
 // --- ADMIN ROUTES ---
 app.post('/api/admin/update-market', authenticateAdmin, async (req, res) => {
-    const { id, title, content, media_url, media_type, sideA, sideB, sideC, oddsA, oddsB, oddsC } = req.body || {};
+    const { id, title, content, media_url, media_type, category, event_end_time, sideA, sideB, sideC, oddsA, oddsB, oddsC } = req.body || {};
     if (!id || !String(title || '').trim()) {
         return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
     }
@@ -6373,6 +6411,8 @@ app.post('/api/admin/update-market', authenticateAdmin, async (req, res) => {
     pushText('sideA', sideA);
     pushText('sideB', sideB);
     pushText('sideC', sideC);
+    pushText('category', category);
+    pushText('event_end_time', event_end_time);
     pushNumber('oddsA', oddsA);
     pushNumber('oddsB', oddsB);
     pushNumber('oddsC', oddsC);
@@ -6554,6 +6594,19 @@ app.get('/api/admin/sports-markets', authenticateAdmin, async (_req, res) => {
         res.status(500).json({ success: false, message: 'Could not load sports markets.' });
     }
 });
+app.get('/api/admin/approved-news-markets', authenticateAdmin, async (_req, res) => {
+    try {
+        const markets = await dbAll(`
+            SELECT * FROM markets
+            WHERE COALESCE(admin_verified,0)=1 AND NOT ${SPORTS_MARKET_SQL}
+            ORDER BY timestamp DESC NULLS LAST, title ASC
+        `);
+        res.json({ success: true, markets: markets || [] });
+    } catch (err) {
+        console.error('[admin] approved news markets load failed:', err.message);
+        res.status(500).json({ success: false, message: 'Could not load approved news markets.' });
+    }
+});
 app.get('/api/admin/all-active-bets', authenticateAdmin, async (req, res) => {
     try {
        const bets = await dbAll(`
@@ -6561,7 +6614,7 @@ app.get('/api/admin/all-active-bets', authenticateAdmin, async (req, res) => {
                 b.id,
                 b.user_phone,
                 u.name AS userName,
-                b.event AS marketTitle,
+                COALESCE(NULLIF(m.title, ''), b.event) AS marketTitle,
                 b.market_id,
                 b.amount,
                 b.picked AS side,
@@ -7711,12 +7764,20 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
 app.get('/api/admin/suspended-markets', authenticateAdmin, async (req, res) => {
     try {
         const markets = await dbAll(`
-            SELECT m.*
+            SELECT m.*,
+                   (SELECT COUNT(*) FROM bets b WHERE b.market_id = m.id AND b.status = 'active') AS active_bets
             FROM markets m
-            WHERE m.status = 'suspended' AND m.settled = 0
-              AND (LOWER(COALESCE(m.category,'')) IN ('sports','football','soccer') OR LOWER(COALESCE(m.sport,'')) <> '' OR m.id LIKE 'sp_%' OR m.id LIKE 'fb_%' OR m.country='Football')
+            WHERE COALESCE(m.settled,0) = 0
               AND EXISTS (SELECT 1 FROM bets b WHERE b.market_id = m.id AND b.status = 'active')
-            ORDER BY m.startTime ASC NULLS LAST, m.id ASC
+              AND (
+                    m.status = 'suspended'
+                    OR (
+                        COALESCE(m.event_end_time, m.startTime) IS NOT NULL
+                        AND COALESCE(m.event_end_time, m.startTime) <= NOW()
+                        AND (m.result IS NULL OR TRIM(m.result) = '')
+                    )
+              )
+            ORDER BY COALESCE(m.event_end_time, m.startTime) ASC NULLS LAST, m.id ASC
         `);
         res.json({ success: true, markets });
     } catch (e) {
@@ -8587,7 +8648,7 @@ const startServer = async () => {
                 console.log(`[news] Processed ${articles.length} NewsAPI story candidates for draft review.`);
             });
             runSafely('refreshBoostedMarkets', refreshBoostedMarkets);
-            runSafely('runSettlementEngine', runSettlementEngine);
+            startSettlementWorker(runSettlementEngine, { intervalMs: 10 * 60 * 1000 });
             runSafely('runSuspendedMarketSettlement', runSuspendedMarketSettlement);
             runSafely('syncWeatherMarkets', syncWeatherMarkets);
             setInterval(syncAllMarkets, 3600000);
@@ -8604,9 +8665,6 @@ const startServer = async () => {
             setInterval(syncWeatherMarkets, 86400000);
             setInterval(cleanupOutdatedMarkets, 3600000);
             setInterval(sendDailyMarkets, 86400000);
-            setInterval(() => {
-                runSettlementEngine().catch(e => console.error("Settlement engine failed:", e.message));
-            }, 3600000);
             // Auto-expire sweep every 10 minutes (SQL-only, no external API calls).
             setInterval(closeExpiredMarkets, 600000);
             // Batch settlement worker over 'suspended' markets every 30 minutes.

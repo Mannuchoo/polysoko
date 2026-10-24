@@ -115,23 +115,28 @@ function jsArg(value) {
 // own labels.
 function renderOutcomeButtons(market, { compact = false } = {}) {
     const outcomes = getMarketOutcomes(market);
+    const probabilities = getMarketImpliedProbabilities(market);
     const id = jsArg(market?.id || '');
     const title = jsArg(market?.title || market?.betQuestion || 'Market');
 
     const buttons = outcomes.map(outcome => {
-        const accent = outcomeAccent(outcome.key);
+        const isNegative = outcome.key === 'NO' || outcome.key === 'AWAY';
+        const isDraw = outcome.key === 'DRAW';
         const label = escapeHtml(outcome.label);
         const odds = Number(outcome.odds);
-        const price = Number.isFinite(odds) && odds > 0 ? ` (${odds.toFixed(2)})` : '';
+        const oddsText = Number.isFinite(odds) && odds > 0 ? odds.toFixed(2) : '—';
+        const probability = Number(probabilities[outcome.key] || 0);
         return `
-        <button class="bet-btn" data-id="${escapeHtml(market?.id || '')}" data-choice="${escapeHtml(outcome.key)}" data-title="${escapeHtml(title)}"
+        <button class="bet-btn market-action-button ${isNegative ? 'market-action-button--negative' : ''} ${isDraw ? 'market-action-button--draw' : ''} ${compact ? 'market-action-button--compact' : ''}" data-id="${escapeHtml(market?.id || '')}" data-choice="${escapeHtml(outcome.key)}" data-market-outcome="${escapeHtml(outcome.key)}" data-odds="${oddsText === '—' ? '' : oddsText}" data-title="${escapeHtml(title)}"
                 onclick="event.stopPropagation(); openBetModal('${id}', '${title}', '${outcome.key}')"
-                style="flex:1; min-width:0; color:${accent}; border-color:${accent}33; background:${accent}14;">
-            ${label}${compact ? '' : price}
+                aria-label="${label}, payout ${oddsText} times stake, implied probability ${probability} percent">
+            <span class="market-action-heading"><span class="market-action-arrow" aria-hidden="true">${isNegative ? '↓' : isDraw ? '•' : '↑'}</span><strong>${label}</strong></span>
+            <span class="market-action-stats"><strong data-action-odds>${compact ? `${oddsText}×` : `${oddsText}× payout`}</strong><span data-action-probability>${probability}%</span></span>
         </button>`;
     }).join('');
 
-    return `<div class="betting-row" style="display:flex; gap:8px; margin-top:15px;">${buttons}</div>`;
+    const gridClass = outcomes.length === 3 ? 'market-actions-grid--three' : 'market-actions-grid--two';
+    return `<div class="market-actions-grid ${gridClass}" data-market-actions="${escapeHtml(market?.id || '')}">${buttons}</div>${renderCardProbability(market)}`;
 }
 
 function isInvalidSportsMarket(m) {
@@ -626,6 +631,65 @@ function coinLabelFor(m) {
     return COIN_LABELS[key] || String(key).replace(/-/g, ' ').toUpperCase();
 }
 
+function marketContractField(market, name) {
+    const key = name === 'Subject' ? 'subject' : name === 'Action/Event' ? 'actionEvent' : name === 'Condition' ? 'condition' : '';
+    if (market?.[key] || market?.[name]) return String(market[key] || market[name]).trim();
+    const source = String(market?.content || market?.description || '');
+    return source.match(new RegExp(`^\\s*${name}\\s*:\\s*(.+)$`, 'im'))?.[1]?.trim() || '';
+}
+
+function marketQuestion(market) {
+    const subject = marketContractField(market, 'Subject');
+    const action = marketContractField(market, 'Action/Event');
+    const condition = marketContractField(market, 'Condition');
+    const deadline = market.deadline || market.deadlineAt || market.event_end_time || market.startTime || marketContractField(market, 'Exact deadline');
+    if (subject && action && deadline) {
+        const bareAction = action.replace(/^Will\s+/i, '').replace(/[?.!]+$/, '');
+        const cleanCondition = condition ? ` ${condition.replace(/^[,.;: ]+/, '').replace(/[?.!]+$/, '')}` : '';
+        return `Will ${subject} ${bareAction}${cleanCondition} by ${deadline}?`;
+    }
+    return String(market.betQuestion || market.title || 'Market').trim();
+}
+
+function formatMarketCountdown(market) {
+    const end = Date.parse(market?.event_end_time || market?.eventEndTime || market?.expiryTime || market?.startTime || '');
+    if (!Number.isFinite(end)) return '';
+    const remaining = end - Date.now();
+    if (remaining <= 0) return 'Deadline passed';
+    const days = Math.floor(remaining / 86400000);
+    const hours = Math.floor((remaining % 86400000) / 3600000);
+    const minutes = Math.floor((remaining % 3600000) / 60000);
+    return days ? `Closes in ${days}d ${hours}h` : hours ? `Closes in ${hours}h ${minutes}m` : `Closes in ${Math.max(1, minutes)}m`;
+}
+
+function renderMarketContextMeta(market, { isSports, isCrypto, isNews }) {
+    const outcomes = getMarketOutcomes(market);
+    const probabilities = getMarketImpliedProbabilities(market);
+    const favorite = outcomes.reduce((best, outcome) => Number(probabilities[outcome.key] || 0) > best.percent
+        ? { outcome, percent: Number(probabilities[outcome.key] || 0) } : best, { outcome: outcomes[0], percent: 0 });
+    const confidence = favorite.percent >= 65 ? 'High' : favorite.percent >= 55 ? 'Moderate' : 'Low';
+    const forms = market.analytics || market.form || {};
+    const home = market.homeTeamForm || market.home_team_form || forms.homeTeamForm || forms.home;
+    const away = market.awayTeamForm || market.away_team_form || forms.awayTeamForm || forms.away;
+    const formText = [home, away].filter(Boolean).map(value => Array.isArray(value) ? value.join('-') : String(value).replace(/[ ,]+/g, '-')).join(' / ');
+    const volume = marketTotalVolume(market);
+    let details = '';
+    if (isSports) {
+        details = `<span class="market-meta-chip">${formText ? `Form: ${escapeHtml(formText)}` : 'Form: open match analytics'}</span><span class="market-meta-chip market-confidence" data-market-confidence="${escapeHtml(market.id)}">Odds confidence: ${confidence}${confidence === 'High' ? ' ★' : ''}</span>`;
+    } else if (isCrypto || isNews) {
+        details = `<span class="market-meta-chip market-sentiment-tag" data-market-confidence="${escapeHtml(market.id)}">${escapeHtml(favorite.outcome?.label || 'YES')} leaning · ${favorite.percent}%</span>`;
+        if (market.sentiment || market.sentiment_label) details += `<span class="market-meta-chip">${escapeHtml(market.sentiment_label || market.sentiment)}</span>`;
+    }
+    if (volume > 0) details += `<span class="market-meta-chip" data-market-volume="${escapeHtml(market.id)}">Volume sKES ${volume.toFixed(0)}</span>`;
+    return details ? `<div class="market-context-meta">${details}</div>` : '';
+}
+
+if (!window.marketCountdownInterval) {
+    window.marketCountdownInterval = setInterval(() => document.querySelectorAll('[data-market-countdown]').forEach(node => {
+        node.textContent = formatMarketCountdown({ event_end_time: node.dataset.marketCountdown });
+    }), 60000);
+}
+
 function createMarketCard(m) {
     const isFootball = isFootballFixtureMarket(m);
     const isSports = isSportsMarket(m);
@@ -634,10 +698,11 @@ function createMarketCard(m) {
     const isMovies = normalizeCategory(m.category) === 'movies';
     const sourceHeadline = isNews ? String(m.displayHeadline || m.rawHeadline || '').trim() : '';
     const titleFallback = m.sideA && m.sideB ? `${m.sideA} vs ${m.sideB}` : "";
-    const rawDisplayTitle = (isNews || isMovies)
-        ? (m.marketHeader || (isNews ? (m.betQuestion || m.title) : m.title))
-        : (m.title || titleFallback);
-    const safeTitle = (rawDisplayTitle || "").replace(/'/g, "\\'");
+    const rawDisplayTitle = isNews
+        ? marketQuestion(m)
+        : isMovies
+            ? (m.marketHeader || m.title)
+            : (m.title || titleFallback);
     const displayTitle = escapeHtml(rawDisplayTitle) || 'Market';
 
     // Determine badge and color — show actual location/league info
@@ -659,11 +724,9 @@ function createMarketCard(m) {
     let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : (isCrypto ? "#f0b90b" : (isMovies ? "#b8a3ff" : "#888")));
     const boostBadge = Number(m.is_boosted) === 1 ? `<span style="background: rgba(255, 214, 0, 0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); padding:4px 10px; border-radius:999px; font-size:0.68rem; font-weight:700;">BOOSTED +10%</span>` : '';
 
-    // For news items we show a compact card; full content only in modal
-    const textSnippet = escapeHtml((m.description || m.content || '').slice(0, 120));
-    const mediaPreview = '';
-    const miniProbBar = isNews ? renderMiniProbBar(m) : '';
-    const sparkline = isNews ? renderNewsSparkline(m.id) : '';
+    const contextMeta = renderMarketContextMeta(m, { isSports, isCrypto, isNews });
+    const statusLabel = String(m.status || (isNews || isCrypto ? 'open' : 'upcoming')).toUpperCase();
+    const closesAt = m.event_end_time || m.eventEndTime || m.expiryTime || m.startTime || '';
     // Crypto cards get their coin icon so assets like BNB are instantly recognisable.
     const cryptoLogo = (isCrypto && m.media_url)
         ? `<img src="${escapeHtml(m.media_url)}" alt="" loading="lazy" referrerpolicy="no-referrer"
@@ -681,8 +744,8 @@ function createMarketCard(m) {
         </section>` : '';
 
     return `
-<div class="market-card ${isNews ? 'news-style' : ''}" 
-     data-id="${m.id}" 
+<div class="market-card ${isNews ? 'news-style' : ''} ${isSports ? 'sports-style' : ''} ${isCrypto ? 'crypto-style' : ''}"
+     data-id="${m.id}" data-market-id="${escapeHtml(m.id)}"
      onclick="openMarket('${m.id}')"
      style="border-left: 3px solid ${isNews ? '#00ff88' : 'transparent'};">
      
@@ -691,24 +754,26 @@ function createMarketCard(m) {
             ${cryptoLogo}
             <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${badgeText}</span>
         </span>
-        <div style="display:flex; align-items:center; gap:10px; flex:0 0 auto;">
+        <div class="market-status-group">
+            ${Number(m.admin_verified) === 1 ? '<span class="market-verified-badge">✓ VERIFIED</span>' : ''}
             ${boostBadge}
-            <span class="live-dot" style="font-size:0.65rem; white-space:nowrap; color: ${m.status === 'live' ? '#ff4d4d' : '#555'}">
-                ● ${m.status === "live" ? "LIVE" : isNews ? "NEWS" : isCrypto ? "OPEN" : "UPCOMING"}
+            <span class="live-dot market-status-chip ${m.status === 'live' ? 'is-live' : ''}" style="font-size:0.65rem; white-space:nowrap;">
+                ${escapeHtml(statusLabel)}
             </span>
+            <span class="market-countdown" data-market-countdown="${escapeHtml(closesAt)}">${escapeHtml(formatMarketCountdown(m))}</span>
         </div>
     </div>
 
     ${isFootball || isSports 
         ? `
         <div style="display:flex; align-items:center; gap:12px; margin:10px 0;">
-            <div class="team-abbr">${(m.title.split(" vs ")[0] || "??").substring(0,3).toUpperCase()}</div>
-            <div style="flex:1; font-weight:700; font-size:0.95rem; color:white;">${displayTitle}</div>
+            <div class="team-abbr">${String(m.title || '').split(/\s+vs\s+/i)[0]?.substring(0,3).toUpperCase() || '??'}</div>
+            <h3 class="market-question-title">${displayTitle}</h3>
         </div>
         `
         : `
         <div style="margin:10px 0;">
-            <h3 style="font-size:0.95rem; color:white; line-height:1.3;">${displayTitle}</h3>
+            <h3 class="market-question-title">${displayTitle}</h3>
             ${isNews ? `<div style="color:#9ca3af; font-size:0.78rem; margin-top:6px; line-height:1.35;"><span style="color:#7c8796; font-size:0.65rem; text-transform:uppercase; letter-spacing:.04em;">Source headline</span><br>${sourceHeadline ? escapeHtml(sourceHeadline) : 'Open for story context'}</div>` : ''}
         </div>
         `
@@ -716,13 +781,9 @@ function createMarketCard(m) {
 
     ${sportsAnalytics}
 
-    <div style="display:flex; align-items:center; gap:12px; margin-top:8px;">
-        ${miniProbBar}
-        ${sparkline || ''}
-    </div>
+    ${contextMeta}
 
     ${renderOutcomeButtons(m)}
-    ${renderPolymarketBar(m)}
 </div>
 `;
 }
@@ -824,6 +885,62 @@ function renderOutcomeBar(market, { height = 10, radius = '999px' } = {}) {
         </div>
     `;
 }
+
+function renderCardProbability(market) {
+    const outcomes = getMarketOutcomes(market);
+    const probabilities = getMarketImpliedProbabilities(market);
+    const id = escapeHtml(market?.id || '');
+    const legend = outcomes.map(outcome => `<span data-prob-label="${escapeHtml(outcome.key)}">${escapeHtml(outcome.label)} ${Number(probabilities[outcome.key] || 0)}%</span>`).join('');
+    const segments = outcomes.map(outcome => `<span data-prob-segment="${escapeHtml(outcome.key)}" style="width:${Math.max(0, Number(probabilities[outcome.key] || 0))}%;--outcome-color:${outcomeAccent(outcome.key)}"></span>`).join('');
+    return `<div class="market-probability" data-market-probability="${id}"><div class="market-probability-labels">${legend}</div><div class="market-probability-track" role="img" aria-label="${escapeHtml(outcomes.map(o => `${o.label} ${probabilities[o.key] || 0}%`).join(', '))}">${segments}</div></div>`;
+}
+
+window.updateMarketCardRealtime = function updateMarketCardRealtime(market) {
+    const id = String(market?.id || '');
+    if (!id) return;
+    const outcomes = new Map(getMarketOutcomes(market).map(outcome => [outcome.key, outcome]));
+    const probabilities = getMarketImpliedProbabilities(market);
+    document.querySelectorAll('button.market-action-button[data-id]').forEach(button => {
+        if (String(button.dataset.id) !== id) return;
+        const outcome = outcomes.get(button.dataset.marketOutcome);
+        if (!outcome) return;
+        const odds = Number(outcome.odds);
+        const oddsText = Number.isFinite(odds) && odds > 0 ? odds.toFixed(2) : '—';
+        const probability = Number(probabilities[outcome.key] || 0);
+        button.dataset.odds = oddsText === '—' ? '' : oddsText;
+        button.setAttribute('aria-label', `${outcome.label}, payout ${oddsText} times stake, implied probability ${probability} percent`);
+        const oddsNode = button.querySelector('[data-action-odds]');
+        const probabilityNode = button.querySelector('[data-action-probability]');
+        if (oddsNode) oddsNode.textContent = button.classList.contains('market-action-button--compact') ? `${oddsText}×` : `${oddsText}× payout`;
+        if (probabilityNode) probabilityNode.textContent = `${probability}%`;
+    });
+    document.querySelectorAll('[data-market-probability]').forEach(node => {
+        if (node.dataset.marketProbability !== id) return;
+        for (const label of node.querySelectorAll('[data-prob-label]')) {
+            const outcome = outcomes.get(label.dataset.probLabel);
+            if (outcome) label.textContent = `${outcome.label} ${Number(probabilities[outcome.key] || 0)}%`;
+        }
+        for (const segment of node.querySelectorAll('[data-prob-segment]')) {
+            segment.style.width = `${Math.max(0, Number(probabilities[segment.dataset.probSegment] || 0))}%`;
+        }
+        const track = node.querySelector('.market-probability-track');
+        if (track) track.setAttribute('aria-label', [...outcomes.values()].map(outcome => `${outcome.label} ${probabilities[outcome.key] || 0}%`).join(', '));
+    });
+    const favorite = [...outcomes.values()].reduce((best, outcome) => Number(probabilities[outcome.key] || 0) > best.percent
+        ? { outcome, percent: Number(probabilities[outcome.key] || 0) } : best, { outcome: null, percent: 0 });
+    document.querySelectorAll('[data-market-confidence]').forEach(node => {
+        if (node.dataset.marketConfidence !== id) return;
+        if (node.classList.contains('market-sentiment-tag')) {
+            node.textContent = `${favorite.outcome?.label || 'YES'} leaning · ${favorite.percent}%`;
+        } else {
+            const confidence = favorite.percent >= 65 ? 'High' : favorite.percent >= 55 ? 'Moderate' : 'Low';
+            node.textContent = `Odds confidence: ${confidence}${confidence === 'High' ? ' ★' : ''}`;
+        }
+    });
+    document.querySelectorAll('[data-market-volume]').forEach(node => {
+        if (node.dataset.marketVolume === id) node.textContent = `Volume sKES ${marketTotalVolume(market).toFixed(0)}`;
+    });
+};
 
 function marketTotalVolume(market) {
     return Number(
