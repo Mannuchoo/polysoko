@@ -3,7 +3,7 @@ import path from 'path'; // Moved up
 import dotenv from 'dotenv';
 import { generateMarketFromNews, inspectMarketQuestionTitle, sanitizeMarketQuestionTitle } from './src/services/marketGenerator.js';
 import { resolveWeatherImpactMarket, syncWeatherCommodityDrafts, syncWeatherOperationalDrafts } from './src/services/weatherService.js';
-import { generateMovieMarketDraft, getTrendingMovies, resolveMovieBoxOffice } from './src/services/movieService.js';
+import { generateMovieMarketDraft, getTrendingMovies, isMovieDataConfigured, resolveMovieBoxOffice } from './src/services/movieService.js';
 import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './src/services/aiProvider.js';
 import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
 import { startSettlementWorker } from './src/services/settlementService.js';
@@ -350,6 +350,7 @@ app.get('/api/health', async (req, res) => {
         jwtSecretSource,
         newsApiConfigured: Boolean(process.env.NEWS_API_KEY),
         mailConfigured,
+        movieDataConfigured: isMovieDataConfigured(),
         publicSiteUrl: PUBLIC_SITE_URL,
         publicApiBase: PUBLIC_API_BASE,
         uptimeSeconds: Math.round(process.uptime()),
@@ -2002,14 +2003,16 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
 }
 
 async function syncTmdbMarkets() {
-    if (!process.env.TMDB_API_KEY && !process.env.TMDB_READ_ACCESS_TOKEN) {
-        console.warn('TMDB_API_KEY or TMDB_READ_ACCESS_TOKEN is not configured. Skipping TMDB market sync.');
+    const tmdbApiKey = String(process.env.MOVIE_API_KEY || process.env.TMDB_API_KEY || '').trim();
+    const tmdbReadToken = String(process.env.TMDB_READ_ACCESS_TOKEN || '').trim();
+    if (!tmdbApiKey && !tmdbReadToken) {
+        console.warn('MOVIE_API_KEY, TMDB_API_KEY, or TMDB_READ_ACCESS_TOKEN is not configured. Skipping TMDB market sync.');
         return;
     }
 
     const tmdbBase = 'https://api.themoviedb.org/3';
-    const authHeaders = process.env.TMDB_READ_ACCESS_TOKEN ? {
-        Authorization: `Bearer ${process.env.TMDB_READ_ACCESS_TOKEN}`
+    const authHeaders = tmdbReadToken ? {
+        Authorization: `Bearer ${tmdbReadToken}`
     } : undefined;
 
     const endpoints = [
@@ -2030,7 +2033,7 @@ async function syncTmdbMarkets() {
             const url = `${tmdbBase}${endpoint.path}`;
             const response = await axios.get(url, {
                 params: {
-                    api_key: process.env.TMDB_API_KEY,
+                    api_key: tmdbApiKey || undefined,
                     language: 'en-US',
                     page: 1,
                     ...(endpoint.params || {})
@@ -2987,7 +2990,7 @@ app.get('/api/movies/trending', async (_req, res) => {
         res.json({ success: true, movies, source: 'TMDB', hypeMethod: 'TMDB popularity and vote metrics; not trailer view counts' });
     } catch (error) {
         const notConfigured = /not configured/i.test(error.message || '');
-        res.status(notConfigured ? 503 : 502).json({ success: false, message: notConfigured ? 'Movie data is not configured on the backend.' : 'Trending movies are temporarily unavailable.' });
+        res.status(notConfigured ? 503 : 502).json({ success: false, message: notConfigured ? error.message : 'Trending movies are temporarily unavailable.' });
     }
 });
 

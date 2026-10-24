@@ -8,10 +8,14 @@ let trendingCache = null;
 let trendingCacheUntil = 0;
 let trendingRequest = null;
 
+export function isMovieDataConfigured() {
+  return Boolean(clean(process.env.MOVIE_API_KEY || process.env.TMDB_API_KEY || process.env.TMDB_READ_ACCESS_TOKEN));
+}
+
 function tmdbAuth() {
   const apiKey = clean(process.env.MOVIE_API_KEY || process.env.TMDB_API_KEY);
   const token = clean(process.env.TMDB_READ_ACCESS_TOKEN);
-  if (!apiKey && !token) throw new Error('MOVIE_API_KEY or TMDB_API_KEY is not configured.');
+  if (!apiKey && !token) throw new Error('TMDB credentials are not configured on the running backend. Set MOVIE_API_KEY, TMDB_API_KEY, or TMDB_READ_ACCESS_TOKEN, then redeploy.');
   return {
     params: apiKey ? { api_key: apiKey } : {},
     headers: token ? { Authorization: `Bearer ${token}` } : {},
