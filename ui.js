@@ -1694,7 +1694,6 @@ async function openMarket(id, openInNewTab = false) {
 
     // Every real sports event opens on the shareable full-screen match page.
     if (isSportsMarket(m)) {
-        localStorage.setItem("last_market_id", id);
         window.location.hash = `#match/${encodeURIComponent(id)}`;
         return;
     }
@@ -1702,8 +1701,6 @@ async function openMarket(id, openInNewTab = false) {
     const body = document.getElementById("modalBody");
     if (!body) return;
     
-    localStorage.setItem("last_market_id", id);
-
     // Open Modal with smooth animation
     const modal = document.getElementById("richModal");
     modal.style.display = "flex";

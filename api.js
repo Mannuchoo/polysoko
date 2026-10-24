@@ -291,7 +291,7 @@ async function fetchProfile() {
             if (adminArea) {
                 adminArea.innerHTML = `
                     <button onclick="location.href='admin.html'" class="pill active" style="width:100%; margin-top:10px; background:#da020e; color:white; font-weight:900; letter-spacing:1px; box-shadow: 0 4px 15px rgba(218, 2, 14, 0.3);">⚙️ ENTER MANAGEMENT CONSOLE</button>
-                    <button onclick="window.showUserManagement()" class="pill active" style="width:100%; margin-top:10px; background:#00ff88; color:black; font-weight:bold;">👥 MANAGE USER DIRECTORY</button>
+                    <button onclick="location.href='admin.html?section=usersSection'" class="pill active" style="width:100%; margin-top:10px; background:#00ff88; color:black; font-weight:bold;">👥 MANAGE USER DIRECTORY</button>
                     <button onclick="window.openMpesaDashboard('withdraw')" class="pill active" style="width:100%; margin-top:10px; background:#3b82f6; color:white; font-weight:bold;">💸 WITHDRAWAL REQUESTS</button>
                     <button onclick="window.openMpesaDashboard('deposit')" class="pill active" style="width:100%; margin-top:10px; background:#00ff88; color:black; font-weight:bold;">💰 DEPOSIT MPESA LOG</button>
                 `;
