@@ -119,7 +119,7 @@ async function loadModules() {
 
     for (const mod of modules) {
         try {
-            const modulePaths = [`./${mod.file}`, `./modules/${mod.file}`];
+            const modulePaths = [`./${mod.file}?v=2`, `./modules/${mod.file}?v=2`];
             let html = "";
             for (const path of modulePaths) {
                 const res = await fetch(path);
