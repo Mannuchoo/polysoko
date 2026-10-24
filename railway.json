@@ -2,7 +2,25 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "RAILPACK",
-    "buildCommand": "npm --prefix server install"
+    "buildCommand": "npm --prefix server install",
+    "watchPatterns": [
+      "/server/**",
+      "/index.html",
+      "/style.css",
+      "/app.js",
+      "/ui.js",
+      "/api.js",
+      "/dialogs.js",
+      "/stay.html",
+      "/stay.js",
+      "/sidebar.html",
+      "/profile.html",
+      "/history.html",
+      "/pwa.js",
+      "/sw.js",
+      "/site.webmanifest",
+      "/railway.json"
+    ]
   },
   "deploy": {
     "startCommand": "npm --prefix server start",
