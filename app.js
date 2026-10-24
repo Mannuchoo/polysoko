@@ -2,14 +2,6 @@
 let socket;
 let bettingLock = false;
 
-// Keep a refresh on the main site at the market list instead of reopening the
-// last football detail route from its persistent hash. Direct/shared match URLs
-// still work when opened as a new navigation.
-const initialNavigation = performance.getEntriesByType?.('navigation')?.[0];
-if (initialNavigation?.type === 'reload' && /^#match\//i.test(window.location.hash)) {
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
-}
-
 let cachedMarkets = JSON.parse(
     localStorage.getItem("cached_markets") || "[]"
 );   
