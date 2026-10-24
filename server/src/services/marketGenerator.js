@@ -5,6 +5,20 @@ const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b';
 
 const clean = value => typeof value === 'string' ? value.trim() : '';
 
+// Exact deadlines belong in event_end_time/deadlineAt. Keep ISO timestamps out
+// of the human-facing question even when an upstream generator appends one.
+export function sanitizeMarketQuestionTitle(value) {
+  return String(value || '')
+    .replace(/\s+by\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))\s*\??$/i, (_match, timestamp) => {
+      const contractDate = new Date(`${timestamp.slice(0, 10)}T00:00:00.000Z`);
+      if (!Number.isFinite(contractDate.getTime())) return '?';
+      const displayDate = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(contractDate);
+      return ` by ${displayDate}?`;
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function validHttpUrl(value) {
   if (!value) return null;
   try {
@@ -130,7 +144,7 @@ export async function generateMarketFromNews(rawArticleData) {
   const videoUrl = suppliedVideo || validHttpUrl(result.videoUrl);
 
   return {
-    title: formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt: deadline.timestamp }),
+    title: sanitizeMarketQuestionTitle(formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt: deadline.timestamp })),
     marketHeader,
     subject,
     actionEvent,
