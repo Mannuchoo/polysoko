@@ -9,12 +9,7 @@ const clean = value => typeof value === 'string' ? value.trim() : '';
 // of the human-facing question even when an upstream generator appends one.
 export function sanitizeMarketQuestionTitle(value) {
   return String(value || '')
-    .replace(/\s+by\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))\s*\??$/i, (_match, timestamp) => {
-      const contractDate = new Date(`${timestamp.slice(0, 10)}T00:00:00.000Z`);
-      if (!Number.isFinite(contractDate.getTime())) return '?';
-      const displayDate = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(contractDate);
-      return ` by ${displayDate}?`;
-    })
+    .replace(/\s+by\s+(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})|(?:\d{4}-\d{2}-\d{2}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})(?:\s+at\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?\s*(?:UTC|GMT|Z)?)?)\s*\??$/i, '?')
     .replace(/\s+/g, ' ')
     .trim();
 }

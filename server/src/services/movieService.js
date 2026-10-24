@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { generateMarketFromNews } from './marketGenerator.js';
+import { generateMarketFromNews, sanitizeMarketQuestionTitle } from './marketGenerator.js';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const DEFAULT_MILESTONE = 1_000_000_000;
@@ -156,7 +156,7 @@ export async function generateMovieMarketDraft(movieId, { dbGet, dbRun, creator 
     imageUrl: movie.posterUrl,
     videoUrl: movie.trailerUrl
   });
-  const question = `Will ${movie.title} gross over $1B by ${dateLabel}?`;
+  const question = sanitizeMarketQuestionTitle(`Will ${movie.title} gross over $1B worldwide by ${dateLabel}?`);
   const id = `movie_${movie.id}_${dateLabel.replace(/-/g, '')}`;
   const resolutionCriteria = `YES if TMDB reports cumulative worldwide movie revenue above USD ${threshold} after ${deadlineAt}; otherwise NO. Check the TMDB movie details revenue field for movie ${movie.id}.`;
   const content = JSON.stringify({

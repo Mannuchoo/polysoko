@@ -774,36 +774,18 @@ function marketContractField(market, name) {
     return source.match(new RegExp(`^\\s*${name}\\s*:\\s*(.+)$`, 'im'))?.[1]?.trim() || '';
 }
 
-function formatMarketDeadline(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    const parsed = new Date(raw);
-    if (!Number.isFinite(parsed.getTime())) return raw;
-    const dateLabel = new Intl.DateTimeFormat('en-GB', {
-        day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'
-    }).format(parsed);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return dateLabel;
-    const timeLabel = new Intl.DateTimeFormat('en-GB', {
-        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC'
-    }).format(parsed);
-    const milliseconds = parsed.getUTCMilliseconds();
-    return `${dateLabel} at ${timeLabel}${milliseconds ? `.${String(milliseconds).padStart(3, '0')}` : ''} UTC`;
-}
-
 function readableMarketTitle(value) {
-    return String(value || '').replace(/\s+by\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2}))\s*\??$/i,
-        (_match, deadline) => ` by ${formatMarketDeadline(deadline)}?`);
+    return String(value || '').replace(/\s+by\s+(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})|(?:\d{4}-\d{2}-\d{2}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})(?:\s+at\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?\s*(?:UTC|GMT|Z)?)?)\s*\??$/i, '?');
 }
 
 function marketQuestion(market) {
     const subject = marketContractField(market, 'Subject');
     const action = marketContractField(market, 'Action/Event');
     const condition = marketContractField(market, 'Condition');
-    const deadline = market.deadline || market.deadlineAt || market.event_end_time || market.startTime || marketContractField(market, 'Exact deadline');
-    if (subject && action && deadline) {
+    if (subject && action) {
         const bareAction = action.replace(/^Will\s+/i, '').replace(/[?.!]+$/, '');
         const cleanCondition = condition ? ` ${condition.replace(/^[,.;: ]+/, '').replace(/[?.!]+$/, '')}` : '';
-        return `Will ${subject} ${bareAction}${cleanCondition} by ${formatMarketDeadline(deadline)}?`;
+        return readableMarketTitle(`Will ${subject} ${bareAction}${cleanCondition}?`);
     }
     return readableMarketTitle(String(market.betQuestion || market.title || 'Market').trim());
 }
