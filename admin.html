@@ -109,17 +109,20 @@ body {
 
 .admin-sidebar {
     position: fixed;
-    top: 0;
+    top: 70px;
     left: 0;
-    height: 100vh;
-    width: var(--sidebar-width);
-    background: var(--mu-dark-grey);
-    border-right: 1px solid var(--border);
+    height: calc(100vh - 70px);
+    height: calc(100dvh - 70px);
+    width: min(320px, 88vw);
+    background: rgba(10, 15, 20, .98);
+    border-right: 1px solid rgba(255,255,255,.09);
+    box-shadow: 18px 0 48px rgba(0,0,0,.35);
     transform: translateX(-100%);
-    opacity: 0;
     pointer-events: none;
     z-index: 5000;
-    transition: transform 0.3s ease, opacity 0.3s ease;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    transition: transform 0.25s ease;
 }
 
 .sidebar-overlay {
@@ -140,7 +143,6 @@ body {
 
 .admin-sidebar.open {
     transform: translateX(0);
-    opacity: 1;
     pointer-events: auto;
 }
 
@@ -156,17 +158,17 @@ body {
     justify-content: center;
     align-items: center;
     gap: 4px;
-    background: var(--mu-dark-grey);
-    border: 1px solid var(--mu-red);
-    border-radius: 50%;
+    background: rgba(10, 15, 20, .98);
+    border: 1px solid rgba(16,185,129,.35);
+    border-radius: 12px;
     cursor: pointer;
     z-index: 6000;
     transition: 0.3s;
 }
 
 .menu-trigger:hover {
-    transform: scale(1.1);
-    background: var(--mu-red);
+    transform: translateY(-1px);
+    background: #10251f;
 }
 
 .admin-profile-trigger {
@@ -206,10 +208,10 @@ body {
 }
 
 .menu-trigger span {
-    width: 4px;
-    height: 4px;
-    background: white;
-    border-radius: 50%;
+    width: 16px;
+    height: 2px;
+    background: #d9e4ee;
+    border-radius: 2px;
 }
 
 .admin-main {
@@ -237,111 +239,220 @@ button {
 /* ================= NAV ================= */
 .nav-item {
     width: 100%;
-    padding: 14px 16px;
+    min-height: 44px;
+    padding: 0 12px;
     background: transparent;
-    border: none;
-    color: var(--text);
+    border: 1px solid transparent;
+    color: #b7c2cc;
     display: flex;
     align-items: center;
     gap: 12px;
     text-align: left;
-    font-size: 0.95rem;
-    border-radius: 12px;
+    font: inherit;
+    font-size: .88rem;
+    font-weight: 620;
+    border-radius: 11px;
     cursor: pointer;
-    margin-bottom: 8px;
-    transition: 0.2s ease;
+    transition: color .16s ease, background .16s ease, border-color .16s ease, transform .16s ease;
 }
 
 .nav-item.active {
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: linear-gradient(90deg, rgba(16,185,129,.16), rgba(16,185,129,.055));
+    color: #d1fae5;
     font-weight: 700;
-    box-shadow: inset 4px 0 0 var(--accent);
+    border-color: rgba(16,185,129,.17);
+    box-shadow: inset 3px 0 #10b981;
 }
 
 .nav-item:hover {
-    background: rgba(255,255,255,0.08);
+    color: #f3f7f9;
+    background: rgba(255,255,255,.055);
+    border-color: rgba(255,255,255,.055);
+}
+
+.nav-item:active { transform: scale(.985); }
+
+.nav-item:hover .nav-icon,
+.nav-item.active .nav-icon { color: #6ee7b7; }
+
+.admin-sidebar .sidebar-content {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+    padding: 18px 14px 20px;
+    color: #e8edf1;
 }
 
 .admin-sidebar .sidebar-brand {
-    padding: 22px 20px 15px;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
+    padding: 2px 8px 16px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 12px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
 }
 
 .admin-sidebar .sidebar-brand h2 {
     margin: 0;
-    color: white;
-    font-size: 1.1rem;
+    color: #f3f7f9;
+    font-size: 1.08rem;
+    letter-spacing: -.02em;
+}
+
+.admin-sidebar .brand-mark {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.admin-sidebar .brand-mark img {
+    width: 34px;
+    height: 34px;
+    object-fit: cover;
+    border-radius: 10px;
+    background: #fff;
+}
+
+.admin-sidebar .brand-tag {
+    display: inline-flex;
+    margin-left: 7px;
+    padding: 3px 6px;
+    border: 1px solid rgba(16,185,129,.25);
+    border-radius: 6px;
+    color: #6ee7b7;
+    font-size: .58rem;
+    font-weight: 800;
+    letter-spacing: .09em;
+    vertical-align: middle;
 }
 
 .admin-sidebar .close-btn {
     background: transparent;
-    border: 1px solid rgba(255,255,255,0.12);
-    color: white;
+    border: 1px solid rgba(255,255,255,.12);
+    color: #b7c2cc;
     width: 34px;
     height: 34px;
-    border-radius: 50%;
-    cursor: pointer;
-}
-
-.admin-sidebar .admin-nav-grid {
-    display: grid;
-    gap: 8px;
-    padding: 18px 16px 0;
-}
-
-.nav-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: 12px;
-    background: rgba(255,255,255,0.05);
-    font-size: 1rem;
-}
-
-.nav-label {
-    flex: 1;
-}
-
-.admin-sidebar .sidebar-footer {
-    padding: 16px;
-    display: grid;
-    gap: 10px;
-    border-top: 1px solid rgba(255,255,255,0.06);
-}
-
-.admin-sidebar .sidebar-footer .btn-text {
-    width: 100%;
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 12px;
-    padding: 12px 14px;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    transition: 0.2s ease;
-    text-align: left;
-}
-
-.admin-sidebar .sidebar-footer button:not(.btn-text) {
-    width: auto;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    padding: 10px 12px;
     border-radius: 10px;
     cursor: pointer;
 }
 
-.admin-sidebar .sidebar-footer .btn-text:hover,
-.admin-sidebar .sidebar-footer button:not(.btn-text):hover {
-    background: rgba(255,255,255,0.08);
+.admin-sidebar .close-btn:hover { color: white; background: rgba(255,255,255,.08); }
+
+.admin-sidebar .admin-nav-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 16px 0 0;
 }
+
+.nav-icon {
+    display: block;
+    flex: 0 0 20px;
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    color: #8595a2;
+}
+
+.admin-sidebar .sidebar-section-label {
+    margin: 16px 8px 9px;
+    color: #81909d;
+    font-size: .66rem;
+    font-weight: 800;
+    letter-spacing: .12em;
+    line-height: 1.3;
+    text-transform: uppercase;
+}
+
+.admin-sidebar .sidebar-divider {
+    flex: 0 0 1px;
+    height: 1px;
+    margin: 13px 8px 0;
+    background: rgba(255,255,255,.08);
+}
+
+.admin-sidebar .nav-label {
+    flex: 1;
+}
+
+.admin-sidebar .sidebar-footer {
+    margin-top: auto;
+    padding: 16px 0 0;
+    display: grid;
+    gap: 4px;
+    border-top: 1px solid rgba(255,255,255,.08);
+}
+
+.admin-sidebar .sidebar-footer .btn-text {
+    width: 100%;
+    min-height: 42px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    background: transparent;
+    color: #b7c2cc;
+    font: inherit;
+    font-size: .86rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.admin-sidebar .sidebar-footer .btn-text:hover {
+    color: #f3f7f9;
+    background: rgba(255,255,255,.055);
+}
+
+.admin-sidebar .sidebar-footer .btn-text.danger { color: #d4a1a4; }
+.admin-sidebar .sidebar-footer .btn-text.danger:hover { color: #fecaca; background: rgba(239,68,68,.09); }
+
+.admin-sidebar .theme-switcher {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 8px 0;
+}
+
+.admin-sidebar .theme-switcher button {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.admin-sidebar .theme-switcher button[aria-label="Home theme"] { background: #da020e; }
+.admin-sidebar .theme-switcher button[aria-label="Away theme"] { background: #d9dee5; }
+.admin-sidebar .theme-switcher button[aria-label="Third theme"] { background: #087fc0; }
+
+@media (max-width: 640px) {
+    .admin-sidebar { top: 64px; height: calc(100vh - 64px); height: calc(100dvh - 64px); }
+    .admin-sidebar .sidebar-content { padding: 16px 12px 18px; }
+}
+
+/* Older badge and footer components retained for the admin profile area. */
+.admin-sidebar .sidebar-info { padding: 0 8px; }
+.admin-sidebar .sidebar-info .sidebar-section-label { margin: 16px 0 0; }
+.admin-sidebar .sidebar-footer button:not(.btn-text) {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 50%;
+    font-size: 0;
+    cursor: pointer;
+}
+.admin-sidebar .sidebar-footer button:nth-of-type(4) { background: #da020e; }
+.admin-sidebar .sidebar-footer button:nth-of-type(5) { background: #d9dee5; }
+.admin-sidebar .sidebar-footer button:nth-of-type(6) { background: #087fc0; }
+.admin-sidebar .sidebar-footer button:not(.btn-text):hover { transform: scale(1.08); }
 
 .btn-text.danger {
     border-color: rgba(255,23,68,0.25);
@@ -849,14 +960,30 @@ button, input, select {
 <!-- SIDEBAR -->
 <div class="admin-sidebar">
     <div class="sidebar-brand">
-        <h2>PolySoko</h2>
+        <h2 style="display:flex;align-items:center;gap:10px;"><img src="logo-mark.png" alt="" style="width:32px;height:32px;object-fit:cover;border-radius:9px;background:#fff;">PolySoko <span style="padding:3px 6px;border:1px solid rgba(16,185,129,.25);border-radius:6px;color:#6ee7b7;font-size:.58rem;letter-spacing:.09em;">ADMIN</span></h2>
         <button class="close-btn" onclick="toggleAdminSidebar()">×</button>
     </div>
     <div class="sidebar-info">
-        <div class="sidebar-section-label">ADMIN DASHBOARD</div>
-        <p>All action buttons are available on the SuperAdmin account panel.</p>
-        <p>Use the buttons below to navigate between admin tools and review balances.</p>
+        <div class="sidebar-section-label">Workspace</div>
     </div>
+    <nav class="admin-nav-grid" aria-label="Admin workspace">
+        <button class="nav-item" data-admin-section="adminAccountSection" onclick="showSection('adminAccountSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg><span class="nav-label">Overview</span></button>
+        <button class="nav-item" data-admin-section="createSection" onclick="showSection('createSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8m0-12.8L5.6 18.4"/></svg><span class="nav-label">Launch market</span></button>
+        <button class="nav-item" data-admin-section="marketsSection" onclick="showSection('marketsSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg><span class="nav-label">Manage markets</span></button>
+        <button class="nav-item" data-admin-section="marketApprovalsSection" onclick="showSection('marketApprovalsSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7.5 12 3 3 6-6"/></svg><span class="nav-label">Approvals</span></button>
+        <button class="nav-item" data-admin-section="aiMarketReviewSection" onclick="showSection('aiMarketReviewSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6z"/><path d="m8.5 12 2.2 2.2 4.8-4.8"/></svg><span class="nav-label">Market verification</span></button>
+    </nav>
+    <div class="sidebar-divider"></div>
+    <div class="sidebar-section-label">Operations</div>
+    <nav class="admin-nav-grid" aria-label="Admin operations" style="padding-top:0;">
+        <button class="nav-item" data-admin-section="betsSection" onclick="showSection('betsSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5m0 14h16M7 15l4-4 3 2 5-6"/><path d="M16 7h3v3"/></svg><span class="nav-label">Bets &amp; history</span></button>
+        <button class="nav-item" data-admin-section="usersSection" onclick="showSection('usersSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0m1-14a3.5 3.5 0 0 1 0 6.8M18 14a5.5 5.5 0 0 1 3.5 5"/></svg><span class="nav-label">Users</span></button>
+        <button class="nav-item" data-admin-section="transactionsSection" onclick="showSection('transactionsSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18m-5 5h3"/></svg><span class="nav-label">Transactions</span></button>
+        <button class="nav-item" data-admin-section="treasurySection" onclick="showSection('treasurySection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h18v11H3zM2 9l10-6 10 6"/><path d="M7 12v5m5-5v5m5-5v5"/></svg><span class="nav-label">Treasury</span></button>
+        <button class="nav-item" data-admin-section="activityLogsSection" onclick="showSection('activityLogsSection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 10h16M4 15h10M4 20h10"/><circle cx="19" cy="18" r="3"/></svg><span class="nav-label">Activity logs</span></button>
+        <button class="nav-item" data-admin-section="staySection" onclick="showSection('staySection', this)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7M5 9v12h14V9m-8 12v-6h4v6"/></svg><span class="nav-label">Stay &amp; Roam</span></button>
+    </nav>
+    <div class="sidebar-divider"></div>
     <div class="sidebar-footer">
         <button class="btn-text" onclick="location.href='index.html'">🏠 Back to Site</button>
         <button class="btn-text" onclick="openChangePinModal()">🔑 Change PIN</button>
@@ -956,10 +1083,15 @@ button, input, select {
         <div class="stat-card">
             <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:14px; margin-bottom:20px;">
                 <div>
-                    <h3 style="margin:0;">Sports Management</h3>
-                    <p class="sub" style="margin:5px 0 0;">Manage sports markets, edit details, and settle results.</p>
+                    <h3 id="marketManagementTitle" style="margin:0;">Manage Markets · Sports</h3>
+                    <p id="marketManagementDescription" class="sub" style="margin:5px 0 0;">Manage sports markets, edit details, and settle results.</p>
                 </div>
                 <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                    <div role="tablist" aria-label="Market type" style="display:flex;gap:6px;padding:4px;border:1px solid #34404c;border-radius:10px;background:#0b0e12;">
+                        <button id="sportsMarketsTab" type="button" role="tab" aria-selected="true" onclick="setMarketManagementView('sports')" style="padding:8px 12px;background:#123229;color:#8ef0c2;border:1px solid #1b684e;border-radius:7px;cursor:pointer;">Sports</button>
+                        <button id="approvedNewsMarketsTab" type="button" role="tab" aria-selected="false" onclick="setMarketManagementView('approved-news')" style="padding:8px 12px;background:transparent;color:#d9e4ee;border:1px solid transparent;border-radius:7px;cursor:pointer;">Approved News</button>
+                    </div>
+                    <div id="sportsMarketControls" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
                     <input id="adminSportsSearch" type="search" placeholder="Search sports markets" oninput="filterAdminSportsMarkets()"
                         style="min-width:190px; padding:10px; background:#000; color:white; border:1px solid var(--border); border-radius:8px;">
                     <select id="adminSportFilter" onchange="filterAdminSportsMarkets()"
@@ -994,13 +1126,21 @@ button, input, select {
                         <option value="cancelled">Cancelled</option>
                     </select>
                     <button onclick="loadAdminMarkets()" class="btn-primary" style="padding:10px 14px;">Refresh</button>
-                    <button onclick="showSection('approvedNewsMarketsSection')" style="padding:10px 14px;background:#17212c;color:#d9e4ee;border:1px solid #34404c;border-radius:8px;cursor:pointer;">Approved News</button>
+                    </div>
+                    <div id="approvedNewsMarketControls" hidden style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                        <input id="approvedNewsSearch" type="search" placeholder="Search approved markets" oninput="filterApprovedNewsMarkets()" style="min-width:190px;padding:10px;background:#000;color:white;border:1px solid var(--border);border-radius:8px;">
+                        <select id="approvedNewsStatusFilter" onchange="filterApprovedNewsMarkets()" style="padding:10px;background:#000;color:white;border:1px solid var(--border);border-radius:8px;">
+                            <option value="all">All Statuses</option><option value="draft">Draft</option><option value="pending">Pending</option><option value="open">Open</option><option value="upcoming">Upcoming</option><option value="live">Live</option><option value="suspended">Suspended</option><option value="closed">Closed</option><option value="settled">Settled</option><option value="cancelled">Cancelled</option>
+                        </select>
+                        <button onclick="loadApprovedNewsMarkets()" class="btn-primary" style="padding:10px 14px;">Refresh</button>
+                    </div>
                 </div>
             </div>
-            <div id="adminMarketList"></div>
+            <div id="adminMarketList" data-market-management-panel="sports"></div>
+            <div id="approvedNewsMarketList" data-market-management-panel="approved-news" hidden></div>
 
             <!-- ⚖️ PENDING SETTLEMENTS -->
-            <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
+            <div id="pendingSettlementManagementPanel" style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
                 <h3 style="margin:0 0 10px 0; font-size:0.9rem; display:flex; gap:8px; align-items:center;">
                     ⚖️ Pending Settlements
                     <button onclick="loadPendingSettlements()" style="margin-left:auto; padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:#111; color:var(--text); cursor:pointer; font-size:0.8rem;">↻ Refresh</button>
@@ -1010,26 +1150,6 @@ button, input, select {
             </div>
         </div>
     </div>
-
-<div id="approvedNewsMarketsSection" class="admin-section">
-    <div class="stat-card">
-        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px;margin-bottom:20px;">
-            <div>
-                <h3 style="margin:0;">Approved News Markets</h3>
-                <p class="sub" style="margin:5px 0 0;">Edit or remove approved news and other non-sports markets.</p>
-            </div>
-            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                <input id="approvedNewsSearch" type="search" placeholder="Search approved markets" oninput="filterApprovedNewsMarkets()" style="min-width:190px;padding:10px;background:#000;color:white;border:1px solid var(--border);border-radius:8px;">
-                <select id="approvedNewsStatusFilter" onchange="filterApprovedNewsMarkets()" style="padding:10px;background:#000;color:white;border:1px solid var(--border);border-radius:8px;">
-                    <option value="all">All Statuses</option><option value="draft">Draft</option><option value="pending">Pending</option><option value="open">Open</option><option value="upcoming">Upcoming</option><option value="live">Live</option><option value="suspended">Suspended</option><option value="closed">Closed</option><option value="settled">Settled</option><option value="cancelled">Cancelled</option>
-                </select>
-                <button onclick="loadApprovedNewsMarkets()" class="btn-primary" style="padding:10px 14px;">Refresh</button>
-                <button onclick="showSection('marketsSection')" style="padding:10px 14px;background:#17212c;color:#d9e4ee;border:1px solid #34404c;border-radius:8px;cursor:pointer;">Sports Markets</button>
-            </div>
-        </div>
-        <div id="approvedNewsMarketList"></div>
-    </div>
-</div>
 
 <div id="betsSection" class="admin-section">
     <div class="stat-card">
@@ -1137,7 +1257,7 @@ button, input, select {
 
     <!-- 👑 MY ACCOUNT CENTER -->
 <div id="aiMarketReviewSection" class="admin-section">
-    <div class="stat-card">
+    <div id="aiMarketReviewListPage" class="stat-card">
         <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px;">
             <div>
                 <h2 class="mu-text">Market Verification</h2>
@@ -1149,6 +1269,7 @@ button, input, select {
             <div style="text-align:center;padding:30px;color:#666;">Loading markets awaiting verification...</div>
         </div>
     </div>
+    <section id="aiMarketReviewEditorPage" class="stat-card" hidden></section>
 </div>
 
 <div id="adminAccountSection" class="admin-section active">
@@ -1172,10 +1293,6 @@ button, input, select {
                 <div style="font-size:1.8rem;">🛠️</div>
                 <span>Manage Markets</span>
             </button>
-            <button onclick="showSection('approvedNewsMarketsSection')">
-                <div style="font-size:1.8rem;">&#128240;</div>
-                <span>Approved News Markets</span>
-            </button>
             <button onclick="showSection('betsSection')">
                 <div style="font-size:1.8rem;">📈</div>
                 <span>All Bets History</span>
@@ -1192,7 +1309,7 @@ button, input, select {
                 <div style="font-size:1.8rem;">⭐</div>
                 <span>Approvals</span>
             </button>
-            <button onclick="showSection('aiMarketReviewSection')" style="border-color:#9b7cff;">
+            <button onclick="window.location.href='admin.html?section=aiMarketReviewSection'" style="border-color:#9b7cff;">
                 <div style="font-size:1.8rem;">🛡️</div>
                 <span>Market Verification</span>
             </button>
@@ -1721,13 +1838,50 @@ window.toggleAdminSidebar = function(forceClose = false) {
     }
 };
 
+window.setMarketManagementView = function(view, options = {}) {
+    const selected = view === 'approved-news' ? 'approved-news' : 'sports';
+    const isNews = selected === 'approved-news';
+    const sportsTab = document.getElementById('sportsMarketsTab');
+    const newsTab = document.getElementById('approvedNewsMarketsTab');
+    if (!sportsTab || !newsTab) return;
+    sportsTab.setAttribute('aria-selected', String(!isNews));
+    newsTab.setAttribute('aria-selected', String(isNews));
+    sportsTab.style.background = isNews ? 'transparent' : '#123229';
+    sportsTab.style.color = isNews ? '#d9e4ee' : '#8ef0c2';
+    sportsTab.style.borderColor = isNews ? 'transparent' : '#1b684e';
+    newsTab.style.background = isNews ? '#123229' : 'transparent';
+    newsTab.style.color = isNews ? '#8ef0c2' : '#d9e4ee';
+    newsTab.style.borderColor = isNews ? '#1b684e' : 'transparent';
+    document.getElementById('marketManagementTitle').textContent = isNews ? 'Manage Markets · Approved News' : 'Manage Markets · Sports';
+    document.getElementById('marketManagementDescription').textContent = isNews
+        ? 'Edit, settle, or remove approved news and other non-sports markets.'
+        : 'Manage sports markets, edit details, and settle results.';
+    document.getElementById('sportsMarketControls').hidden = isNews;
+    document.getElementById('approvedNewsMarketControls').hidden = !isNews;
+    document.getElementById('adminMarketList').hidden = isNews;
+    document.getElementById('approvedNewsMarketList').hidden = !isNews;
+    document.getElementById('pendingSettlementManagementPanel').hidden = isNews;
+    localStorage.setItem('admin_market_view', selected);
+    const url = new URL(window.location.href);
+    url.searchParams.set('section', 'marketsSection');
+    if (isNews) url.searchParams.set('marketView', selected);
+    else url.searchParams.delete('marketView');
+    window.history.replaceState({ adminSection: 'marketsSection', marketView: selected }, '', url);
+    if (options.load !== false) {
+        if (isNews) loadApprovedNewsMarkets();
+        else loadAdminMarkets();
+    }
+};
+
 window.showSection = function(id, btn, options = {}) {
+    const legacyApprovedNewsLink = id === 'approvedNewsMarketsSection';
+    if (legacyApprovedNewsLink) id = 'marketsSection';
     const shouldLoad = options.load !== false;
     document.querySelectorAll('.admin-section').forEach(s => s.classList.remove('active'));
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     const section = document.getElementById(id);
     if (section) section.classList.add('active');
-    if (btn) btn.classList.add('active');
+    (btn || document.querySelector(`[data-admin-section="${id}"]`))?.classList.add('active');
     
     window.scrollTo(0, 0);
 
@@ -1737,6 +1891,10 @@ window.showSection = function(id, btn, options = {}) {
         sectionUrl.searchParams.set('section', id);
         window.history.pushState({ adminSection: id }, '', sectionUrl);
     }
+    const requestedMarketView = legacyApprovedNewsLink
+        ? 'approved-news'
+        : sectionUrl.searchParams.get('marketView') || localStorage.getItem('admin_market_view') || 'sports';
+    if (id === 'marketsSection') window.setMarketManagementView(requestedMarketView, { load: false });
 
     // Persistence: Save current view
     localStorage.setItem('admin_last_view', id);
@@ -1753,8 +1911,11 @@ window.showSection = function(id, btn, options = {}) {
         if (id === 'transactionsSection') loadTransactions();
         if (id === 'marketApprovalsSection') loadPendingMarkets();
         if (id === 'aiMarketReviewSection') loadAiGeneratedMarkets();
-        if (id === 'marketsSection') loadAdminMarkets();
-        if (id === 'approvedNewsMarketsSection') loadApprovedNewsMarkets();
+        if (id === 'treasurySection') loadAdminTreasury();
+        if (id === 'marketsSection') {
+            if (requestedMarketView === 'approved-news') loadApprovedNewsMarkets();
+            else loadAdminMarkets();
+        }
         if (id === 'activityLogsSection') loadActivityLogs();
         if (id === 'staySection' && typeof loadStayAdmin === 'function') loadStayAdmin();
     }
@@ -1763,7 +1924,7 @@ window.showSection = function(id, btn, options = {}) {
 
 window.addEventListener('popstate', () => {
     const section = new URLSearchParams(window.location.search).get('section') || 'adminAccountSection';
-    if (document.getElementById(section)?.classList.contains('admin-section')) {
+    if (section === 'approvedNewsMarketsSection' || document.getElementById(section)?.classList.contains('admin-section')) {
         window.showSection(section);
     }
 });
@@ -2112,8 +2273,10 @@ async function initAdminAfterLogin() {
     await loadSuperAdminProfile();
     const startupLoads = [loadAdminTreasury(), loadGlobalActiveBets(), loadTransactions(), loadPendingSettlements()];
     if (lastView === 'usersSection') startupLoads.push(loadAdminUsers());
-    if (lastView === 'marketsSection') startupLoads.push(loadAdminMarkets());
-    if (lastView === 'approvedNewsMarketsSection') startupLoads.push(loadApprovedNewsMarkets());
+    if (lastView === 'marketsSection' || lastView === 'approvedNewsMarketsSection') {
+        const marketView = new URLSearchParams(window.location.search).get('marketView') || localStorage.getItem('admin_market_view') || (lastView === 'approvedNewsMarketsSection' ? 'approved-news' : 'sports');
+        startupLoads.push(marketView === 'approved-news' ? loadApprovedNewsMarkets() : loadAdminMarkets());
+    }
     if (lastView === 'marketApprovalsSection') startupLoads.push(loadPendingMarkets());
     if (lastView === 'aiMarketReviewSection') startupLoads.push(loadAiGeneratedMarkets());
     if (lastView === 'activityLogsSection') startupLoads.push(loadActivityLogs());
@@ -2369,14 +2532,22 @@ async function loadAiGeneratedMarkets() {
 
 async function editUnverifiedMarket(marketId) {
     const card = document.getElementById(`review-market-${marketId}`);
-    if (!card || card.querySelector('[data-market-edit]')) return;
+    const listPage = document.getElementById('aiMarketReviewListPage');
+    const editorPage = document.getElementById('aiMarketReviewEditorPage');
+    if (!card || !listPage || !editorPage || !editorPage.hidden) return;
     const data = await API.get(`/admin/market/${encodeURIComponent(marketId)}`);
     if (!data?.success) return alert(data?.message || 'Could not load market details.');
     const m = data.market;
     const sourceContext = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || {});
+    editorPage.replaceChildren();
+    editorPage.dataset.marketId = String(marketId);
+    const pageHeader = document.createElement('div');
+    pageHeader.style.cssText = 'display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #292d34;';
+    pageHeader.innerHTML = `<button type="button" onclick="closeUnverifiedMarketEditor()" class="btn-text" style="padding:10px 14px;border:1px solid #39414c;border-radius:8px;">← Back to verification</button><div><h2 style="margin:0;color:#e2d8ff;">Edit market before verification</h2><p class="sub" style="margin:5px 0 0;">${esc(m.title || '(untitled market)')}</p></div>`;
+    editorPage.appendChild(pageHeader);
     const form = document.createElement('div');
     form.dataset.marketEdit = 'true';
-    form.style.cssText = 'display:grid;gap:8px;margin-top:12px;padding:12px;background:#08090b;border-radius:8px;';
+    form.style.cssText = 'display:grid;gap:12px;margin-top:12px;';
     const field = (label, value, key, type='text') => {
         const safeValue = esc(value || '');
         const control = type === 'textarea'
@@ -2393,8 +2564,11 @@ async function editUnverifiedMarket(marketId) {
         suggestButton.textContent = 'Groq suggestions locked';
         suggestButton.title = 'A superadmin has already saved this market; its wording is protected.';
     }
-    card.appendChild(form);
-    form.querySelector('[data-cancel]').onclick = () => form.remove();
+    editorPage.appendChild(form);
+    listPage.hidden = true;
+    editorPage.hidden = false;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    form.querySelector('[data-cancel]').onclick = () => closeUnverifiedMarketEditor();
     form.querySelector('[data-suggest]').onclick = async () => {
         const suggestButton = form.querySelector('[data-suggest]');
         const saveButton = form.querySelector('[data-save]');
@@ -2489,6 +2663,18 @@ async function editUnverifiedMarket(marketId) {
         }
     };
 }
+
+window.closeUnverifiedMarketEditor = function() {
+    const listPage = document.getElementById('aiMarketReviewListPage');
+    const editorPage = document.getElementById('aiMarketReviewEditorPage');
+    if (editorPage) {
+        editorPage.hidden = true;
+        editorPage.replaceChildren();
+        delete editorPage.dataset.marketId;
+    }
+    if (listPage) listPage.hidden = false;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+};
 
 function removeReviewMarketCard(marketId) {
     const card = document.getElementById(`pending-market-${marketId}`) || document.getElementById(`review-market-${marketId}`);
