@@ -53,7 +53,7 @@ window.onload = async () => {
                 if (mainSidebar) {
                     // Remove Markets section buttons
                     const labels = mainSidebar.querySelectorAll('.section-label');
-                    labels.forEach(l => { if (l.innerText.trim().toLowerCase() === 'markets') l.remove(); });
+                    labels.forEach(l => { if (l.innerText.trim().toLowerCase().includes('markets')) l.remove(); });
                     const btnGroups = mainSidebar.querySelectorAll('.sidebar-buttons');
                     btnGroups.forEach((g, idx) => {
                         // Keep the second group (Account) but remove the first (markets)
@@ -69,7 +69,7 @@ window.onload = async () => {
 
                     const adminEntry = document.createElement('div');
                     adminEntry.className = 'sidebar-buttons';
-                    adminEntry.innerHTML = `<button class="sidebar-btn" id="openAdminConsole">👑 Admin Console</button>`;
+                    adminEntry.innerHTML = `<button class="sidebar-btn" id="openAdminConsole"><span class="sidebar-icon sidebar-icon-emoji" aria-hidden="true">♛</span><span>Admin console</span></button>`;
                     mainSidebar.insertBefore(adminEntry, adminBtn.nextSibling);
 
                     document.getElementById('openAdminConsole')?.addEventListener('click', () => {
@@ -119,7 +119,7 @@ async function loadModules() {
 
     for (const mod of modules) {
         try {
-            const modulePaths = [`./${mod.file}?v=2`, `./modules/${mod.file}?v=2`];
+            const modulePaths = [`./${mod.file}?v=3`, `./modules/${mod.file}?v=3`];
             let html = "";
             for (const path of modulePaths) {
                 const res = await fetch(path);
@@ -515,7 +515,10 @@ window.openAppChat = function() {
 window.router = function router() {
     window.updateMobileBottomNav?.();
     const match = window.location.hash.match(/^#match\/(.+)$/);
+    const sportsRoute = window.location.hash.match(/^#sports(?:\/([^/]+))?$/);
+    const sportRoute = window.location.hash.match(/^#sport\/([^/]+)$/);
     const view = document.getElementById('matchView');
+    const sportView = document.getElementById('sportView');
     const dashboard = document.querySelector('.dashboard-main');
     const utilityView = document.getElementById('utilityView');
     const utilityRoute = window.location.hash.match(/^#(chat|history|notifications|profile|funds)$/)?.[1];
@@ -523,14 +526,26 @@ window.router = function router() {
     if (match) {
         if (dashboard) dashboard.hidden = true;
         if (utilityView) utilityView.hidden = true;
+        if (sportView) sportView.hidden = true;
         if (view) view.hidden = false;
         document.body.classList.remove('utility-route-open');
         window.renderMatchView?.(decodeURIComponent(match[1]));
         return;
     }
     if (view) { view.hidden = true; view.innerHTML = ''; }
+    if (sportsRoute || sportRoute) {
+        if (dashboard) dashboard.hidden = true;
+        if (utilityView) utilityView.hidden = true;
+        if (view) view.hidden = true;
+        if (sportView) sportView.hidden = false;
+        document.body.classList.remove('utility-route-open', 'match-view-open');
+        window.renderSportsRoute?.(sportsRoute ? '' : decodeURIComponent(sportRoute[1]));
+        return;
+    }
+    if (sportView) { sportView.hidden = true; sportView.innerHTML = ''; }
     if (utilityRoute) {
         if (dashboard) dashboard.hidden = true;
+        if (sportView) sportView.hidden = true;
         if (utilityView) utilityView.hidden = false;
         document.body.classList.add('utility-route-open');
         renderUtilityPage(utilityRoute);

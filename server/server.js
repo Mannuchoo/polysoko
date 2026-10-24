@@ -4389,13 +4389,10 @@ const refreshBoostedMarkets = async () => {
             SELECT id, home_volume, away_volume, draw_volume, status
             FROM markets
             WHERE status IN ('open','upcoming','live') AND settled = 0
+              AND (${SPORTS_MARKET_SQL})
         `, []);
 
-        if (!candidates || candidates.length === 0) {
-            return;
-        }
-
-        const selectedIds = candidates
+        const selectedIds = (candidates || [])
             .map(m => ({
                 id: m.id,
                 volume: Number(m.home_volume || 0) + Number(m.away_volume || 0) + Number(m.draw_volume || 0)

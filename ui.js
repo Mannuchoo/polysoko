@@ -92,6 +92,22 @@ function getMarketOutcomes(market) {
     ];
 }
 
+function isActiveEliteUser() {
+    try {
+        const user = JSON.parse(localStorage.getItem('user_data') || '{}');
+        const expiry = Date.parse(user.upgrade_expiry || '');
+        return Number(user.is_upgraded) === 1 && Number.isFinite(expiry) && expiry > Date.now();
+    } catch (_) { return false; }
+}
+
+function displayedOdds(market, baseOdds) {
+    const odds = Number(baseOdds);
+    if (!Number.isFinite(odds) || odds <= 0) return odds;
+    return isActiveEliteUser() && Number(market?.is_boosted) === 1
+        ? Number((odds * 1.10).toFixed(2))
+        : odds;
+}
+
 // The colour a side is drawn in. Home is green, the draw is amber and away is
 // red, so a three-way bar reads the same way as the two-way one.
 function outcomeAccent(key) {
@@ -123,12 +139,12 @@ function renderOutcomeButtons(market, { compact = false } = {}) {
         const isNegative = outcome.key === 'NO' || outcome.key === 'AWAY';
         const isDraw = outcome.key === 'DRAW';
         const label = escapeHtml(outcome.label);
-        const odds = Number(outcome.odds);
+        const odds = displayedOdds(market, outcome.odds);
         const oddsText = Number.isFinite(odds) && odds > 0 ? odds.toFixed(2) : '—';
         const probability = Number(probabilities[outcome.key] || 0);
         return `
         <button class="bet-btn market-action-button ${isNegative ? 'market-action-button--negative' : ''} ${isDraw ? 'market-action-button--draw' : ''} ${compact ? 'market-action-button--compact' : ''}" data-id="${escapeHtml(market?.id || '')}" data-choice="${escapeHtml(outcome.key)}" data-market-outcome="${escapeHtml(outcome.key)}" data-odds="${oddsText === '—' ? '' : oddsText}" data-title="${escapeHtml(title)}"
-                onclick="event.stopPropagation(); openBetModal('${id}', '${title}', '${outcome.key}')"
+                onclick="event.stopPropagation(); openBetModal('${id}', '${title}', '${outcome.key}', ${Number.isFinite(odds) ? odds : 'null'})"
                 aria-label="${label}, payout ${oddsText} times stake, implied probability ${probability} percent">
             <span class="market-action-heading"><span class="market-action-arrow" aria-hidden="true">${isNegative ? '↓' : isDraw ? '•' : '↑'}</span><strong>${label}</strong></span>
             <span class="market-action-stats"><strong data-action-odds>${compact ? `${oddsText}×` : `${oddsText}× payout`}</strong><span data-action-probability>${probability}%</span></span>
@@ -228,6 +244,13 @@ function isSportsMarket(m) {
         /^sp_/i.test(m?.id || "") || /^fb_/i.test(m?.id || "") || isFootballFixtureMarket(m);
 }
 
+function sportRouteKeyForMarket(market) {
+    const idSport = String(market?.id || '').match(/^sp_([a-z0-9-]+)_/i)?.[1];
+    const raw = market?.sport || idSport || (isFootballFixtureMarket(market) ? 'football' : market?.category);
+    const key = normalizeCategory(normalizeSportLabel(raw));
+    return key === 'sports' || key === 'unknown' ? '' : key;
+}
+
 window.setCategory = function (category) {
     if (!window.state) {
         console.warn("state not ready yet");
@@ -249,6 +272,10 @@ window.setCategory = function (category) {
         }
     });
 
+    if (active === 'sports') {
+        window.location.hash = requested === 'football' ? '#sport/football' : '#sports';
+        return;
+    }
     applyStateAndRender();
 };
 
@@ -265,7 +292,9 @@ window.setSportsType = function (sport) {
         const pillCat = normalizeCategory(pill.dataset.cat || pill.innerText);
         pill.classList.toggle('active', pillCat === "sports");
     });
-    applyStateAndRender();
+    window.location.hash = window.state.sportsType
+        ? `#sport/${encodeURIComponent(window.state.sportsType)}`
+        : '#sports';
 };
 
 function applyStateAndRender() {
@@ -311,6 +340,10 @@ function applyStateAndRender() {
     if (document.getElementById("marketsList") || document.getElementById("ongoing")) {
         renderFilteredMarkets();
         renderTrending(); // Now independent of filtered data
+        const route = window.location.hash.match(/^#sports(?:\/([^/]+))?$/) || window.location.hash.match(/^#sport\/([^/]+)$/);
+        if (route && document.getElementById('sportView') && !document.getElementById('sportView').hidden) {
+            window.renderSportsRoute?.(route[1] ? decodeURIComponent(route[1]) : '');
+        }
     }
 }
 
@@ -348,51 +381,31 @@ function renderBalanceCard(balance) {
 function renderTrending() {
     const container = document.getElementById('ongoing');
     if (!container) return;
+    container.innerHTML = renderTrendingCards();
+}
 
-    // Keep CHECK OUT populated across category changes with current news markets
-    // and European football fixtures. News cards use the same market card links
-    // and bet modal as the main list.
-    const source = (state.allMarkets || []).filter(m => {
-        const cat = getMarketDisplayCategory(m);
-        if (isGamingMarket(m)) return false;
-        if (isNewsLikeMarket(m)) return true;
-        if (isSportsMarket(m) && !isFootballFixtureMarket(m)) return false;
-        
-        // European Football logic: Check league/country meta for European identifiers
-        if (cat === 'football' || m.id?.startsWith('fb_')) {
-            const text = `${m.league || ''} ${m.country || ''}`.toLowerCase();
-            const euroKeywords = [
-                'england', 'spain', 'germany', 'italy', 'france', 'portugal', 'netherlands', 'belgium', 'europe',
-                'premier league', 'la liga', 'bundesliga', 'serie a', 'ligue 1', 'champions league', 'europa league', 'euro',
-                'gb', 'es', 'de', 'it', 'fr', 'pt', 'nl', 'be'
-            ];
-            return euroKeywords.some(key => text.includes(key));
-        }
-        return false;
-    });
+function renderTrendingCards() {
+    // CHECK OUT remains sports-only and independent from the selected category.
+    const source = (state.allMarkets || []).filter(m => isSportsMarket(m) && !isInvalidSportsMarket(m));
     
     const top = source
         .filter(m => m?.id)
         .sort((a, b) => {
-            // Rank live, high volume, and current tech/news markets first.
+            // Rank live, soon-starting and active sports markets first.
             const score = (m) => {
                 const vol = marketTotalVolume(m);
-                const maxOdds = Math.max(Number(m.oddsA || 0), Number(m.oddsB || 0));
-                const category = getMarketDisplayCategory(m);
-                const isTopical = ['news', 'politics', 'tech'].includes(category) ? 30000 : 0;
-                const isLive = m.status === 'live' ? 100000 : 0;
-                const publishedAt = Date.parse(m.timestamp || m.publishedAt || m.event_start_time || '');
-                const ageHours = Number.isFinite(publishedAt) ? Math.max(0, (Date.now() - publishedAt) / 3600000) : 24;
-                const recency = ['news', 'politics', 'tech'].includes(category) ? Math.max(0, 24 - ageHours) * 300 : 0;
-                
-                return isLive + isTopical + recency + vol + (maxOdds * 500);
+                const start = Date.parse(m.startTime || m.event_start_time || '');
+                const minutesToStart = Number.isFinite(start) ? Math.abs(start - Date.now()) / 60000 : 30000;
+                const soon = Math.max(0, 30000 - Math.min(minutesToStart, 30000));
+                return (m.status === 'live' ? 100000 : 0) + soon + vol;
             };
             return score(b) - score(a);
-        }); // Removed .slice() to make it "endless"
+        })
+        .slice(0, 12);
 
-    container.innerHTML = top.map(m => {
+    return top.map(m => {
         return `
-        <div class="ongoing-card" data-id="${m.id}" onclick="openTrendingMarket('${m.id}')">
+            <div class="ongoing-card" data-id="${escapeHtml(m.id)}" onclick="openTrendingMarket('${jsArg(m.id)}')">
             <div class="category-tag">🔥 HOT</div>
             <div class="ongoing-title">${escapeHtml(m.title || m.betQuestion || 'Market')}</div>
 
@@ -407,7 +420,13 @@ function openTrendingMarket(id) {
 
     const marketCategory = getMarketDisplayCategory(market);
     const category = isSportsMarket(market) ? 'sports' : isGamingMarket(market) ? 'gaming' : marketCategory;
-    if (category && category !== 'unknown') setCategory(category);
+    if (isSportsMarket(market)) {
+        const returnSport = sportRouteKeyForMarket(market);
+        if (returnSport) localStorage.setItem('last_sports_type', returnSport);
+        else localStorage.removeItem('last_sports_type');
+    } else if (category && category !== 'unknown') {
+        setCategory(category);
+    }
 
     openMarket(id);
 }
@@ -512,7 +531,7 @@ function renderFilteredMarkets() {
     mainGrid.innerHTML = html || `<div style="padding:20px;">No markets found. Searching for elite aura...</div>`;
 }
 
-function renderSportsPage(container, sportsMarkets) {
+function renderSportsPage(container, sportsMarkets, routeMode = false) {
     const sportsCatalog = ["Football", "NBA", "NFL", "Basketball", "Baseball", "Hockey", "Volleyball", "Rugby", "Handball", "Tennis", "MMA", "F1", "Cricket", "Golf", "AFL"];
     const source = (sportsMarkets || [])
         .filter(m => isSportsMarket(m))
@@ -581,8 +600,12 @@ function renderSportsPage(container, sportsMarkets) {
 
     let html = `
         <div class="sports-page">
+            <section class="sports-checkout" aria-label="Sports checkout markets">
+                <div class="section-row"><span class="section-title">CHECK OUT ðŸ“ˆ</span></div>
+                <div class="trending-horizontal-scroll">${renderTrendingCards() || '<div class="empty-state">Sports markets will appear here when available.</div>'}</div>
+            </section>
             <div class="sports-page-header">
-                <button class="pill" onclick="window.setCategory('all')" style="background:#333;color:white;border:none;">← Back to All Markets</button>
+                <button class="pill" onclick="${routeMode ? (selected ? "window.location.hash='#sports'" : "window.location.hash=''") : "window.setCategory('all')"}" style="background:#333;color:white;border:none;">← ${routeMode ? (selected ? 'All sports' : 'Home') : 'Back to All Markets'}</button>
                 ${selected ? `<button class="pill active" onclick="window.setSportsType('')">All Sports</button>` : ''}
             </div>
     `;
@@ -602,7 +625,7 @@ function renderSportsPage(container, sportsMarkets) {
         .sort((a, b) => `${a.league || ""} ${a.title || ""}`.localeCompare(`${b.league || ""} ${b.title || ""}`));
 
     html += `
-        ${renderSportsCategoryGrid()}
+        ${routeMode ? '' : renderSportsCategoryGrid()}
         <div class="main-category-label" style="color:#00ff88;font-weight:800;padding:18px 0 10px 0;">${escapeHtml(label).toUpperCase()} MATCHES</div>
     `;
 
@@ -621,6 +644,19 @@ function renderSportsPage(container, sportsMarkets) {
 
 container.innerHTML = `${html}</div>`;
 }
+
+window.renderSportsRoute = function renderSportsRoute(sport = '') {
+    const root = document.getElementById('sportView');
+    if (!root) return;
+    const requested = normalizeCategory(sport || '');
+    window.state.category = 'sports';
+    window.state.sportsType = requested;
+    localStorage.setItem('last_category', 'sports');
+    if (requested) localStorage.setItem('last_sports_type', requested);
+    else localStorage.removeItem('last_sports_type');
+    const sportsMarkets = (state.allMarkets || []).filter(m => isSportsMarket(m) && !isInvalidSportsMarket(m));
+    renderSportsPage(root, sportsMarkets, true);
+};
 
 // Derive a short coin label (e.g. "BNB") for crypto cards. Market ids look like
 // "crypto_<coingecko-id>_<date>", e.g. "crypto_binancecoin_2026-10-05".
@@ -732,7 +768,9 @@ function createMarketCard(m) {
         badgeText = (m.league || m.source || "GLOBAL").toUpperCase();
     }
     let badgeColor = isNews ? "#00ff88" : (isSports ? "#00d1ff" : (isCrypto ? "#f0b90b" : (isMovies ? "#b8a3ff" : "#888")));
-    const boostBadge = Number(m.is_boosted) === 1 ? `<span style="background: rgba(255, 214, 0, 0.12); color:#ffd60a; border:1px solid rgba(255,214,0,0.2); padding:4px 10px; border-radius:999px; font-size:0.68rem; font-weight:700;">BOOSTED +10%</span>` : '';
+    const boostBadge = Number(m.is_boosted) === 1
+        ? `<span class="elite-odds-badge">${isActiveEliteUser() ? 'ELITE ODDS +10%' : 'ELITE +10% ODDS'}</span>`
+        : '';
 
     const contextMeta = renderMarketContextMeta(m, { isSports, isCrypto, isNews });
     const statusLabel = String(m.status || (isNews || isCrypto ? 'open' : 'upcoming')).toUpperCase();
@@ -1654,9 +1692,8 @@ async function openMarket(id, openInNewTab = false) {
     const m = window.marketMap?.[id];
     if (!m) return;
 
-    // Sports fixtures have a shareable, full-screen route. News and other
-    // markets retain their existing detail modal.
-    if (isSportsMarket(m) && (isFootballFixtureMarket(m) || /^fb_/i.test(id))) {
+    // Every real sports event opens on the shareable full-screen match page.
+    if (isSportsMarket(m)) {
         localStorage.setItem("last_market_id", id);
         window.location.hash = `#match/${encodeURIComponent(id)}`;
         return;
@@ -1753,6 +1790,9 @@ window.renderMatchView = async function renderMatchView(marketId) {
         return;
     }
     if (activeMatchDetailsId !== marketId) { activeMatchDetails = null; activeMatchDetailsId = marketId; }
+    const isFootball = isFootballFixtureMarket(market) || /^fb_/i.test(String(market.id || ''));
+    const returnSport = sportRouteKeyForMarket(market) || localStorage.getItem('last_sports_type') || '';
+    const returnRoute = returnSport ? `#sport/${encodeURIComponent(returnSport)}` : '#sports';
     const home = market.sideA || String(market.title || '').split(/\s+vs\s+/i)[0] || 'Home';
     const away = market.sideB || String(market.title || '').split(/\s+vs\s+/i)[1] || 'Away';
     const kickoff = market.startTime || market.event_start_time || market.eventStartTime;
@@ -1762,10 +1802,10 @@ window.renderMatchView = async function renderMatchView(marketId) {
     const title = escapeHtml(market.betQuestion || market.title || `${home} vs ${away}`);
     root.innerHTML = `
       <div class="match-view-shell">
-        <header class="match-view-header"><button class="match-back" onclick="window.location.hash=''">← Sports</button><span>${category}</span><span class="match-view-status">${escapeHtml(String(market.status || 'upcoming').toUpperCase())}</span></header>
+        <header class="match-view-header"><button class="match-back" onclick="window.location.hash='${returnRoute}'">← ${escapeHtml(marketMetaText(market.sport, isFootball ? 'Football' : 'Sports'))}</button><span>${category}</span><span class="match-view-status">${escapeHtml(String(market.status || 'upcoming').toUpperCase())}</span></header>
         <section class="match-hero"><div class="match-meta">${category}</div><h1>${escapeHtml(home)} <span>vs</span> ${escapeHtml(away)}</h1><p>${kickoffLabel}</p><strong id="matchCountdown">${market.status === 'live' ? 'LIVE NOW' : 'Kickoff countdown loading…'}</strong></section>
         <section class="match-center-banner"><div class="pitch-art" aria-hidden="true"><span>⚽</span></div><div class="match-center-info"><small>MATCH CENTER</small><b>${escapeHtml(home)} vs ${escapeHtml(away)}</b><span id="matchBannerCountdown">${kickoffLabel}</span></div></section>
-        <nav class="match-info-tabs" aria-label="Match information"><button class="active" data-match-tab="match">Match</button><button data-match-tab="head-to-head">Head to Head</button><button data-match-tab="standings">Standings</button><button data-match-tab="lineups">Lineups</button></nav>
+        ${isFootball ? '<nav class="match-info-tabs" aria-label="Match information"><button class="active" data-match-tab="match">Match</button><button data-match-tab="head-to-head">Head to Head</button><button data-match-tab="standings">Standings</button><button data-match-tab="lineups">Lineups</button></nav>' : '<nav class="match-info-tabs" aria-label="Event information"><button class="active" data-match-tab="match">Event details</button></nav>'}
         <section id="matchInfoContent" class="match-content-panel"><p class="match-loading">Loading match details…</p></section>
         <section class="match-markets"><h2>Match markets</h2><div class="match-market-grid" id="matchMarketGrid"></div></section>
         <section class="match-interaction"><nav><button class="active" data-interaction-tab="markets">Markets</button><button data-interaction-tab="builder">Bet Builder</button><button data-interaction-tab="chat">Chat</button></nav><div id="matchInteractionContent"></div></section>
@@ -1799,7 +1839,12 @@ window.renderMatchView = async function renderMatchView(marketId) {
     const updateCountdown = () => {
         const el = document.getElementById('matchCountdown');
         const banner = document.getElementById('matchBannerCountdown');
-        if (!el || !kickoffDate || Number.isNaN(kickoffDate.getTime())) return;
+        if (!el) {
+            clearInterval(matchCountdownTimer);
+            matchCountdownTimer = null;
+            return;
+        }
+        if (!kickoffDate || Number.isNaN(kickoffDate.getTime())) return;
         const remaining = kickoffDate.getTime() - Date.now();
         if (remaining <= 0) { el.textContent = market.status === 'live' ? 'LIVE NOW' : 'Kickoff time reached'; return; }
         const days = Math.floor(remaining / 86400000), hours = Math.floor(remaining % 86400000 / 3600000), minutes = Math.floor(remaining % 3600000 / 60000), seconds = Math.floor(remaining % 60000 / 1000);
@@ -1807,6 +1852,10 @@ window.renderMatchView = async function renderMatchView(marketId) {
         el.textContent = value; if (banner) banner.textContent = value;
     };
     updateCountdown(); matchCountdownTimer = setInterval(updateCountdown, 1000);
+    if (!isFootball) {
+        renderMatchInfoTab('match', market, null);
+        return;
+    }
     try {
         const data = await fetchMatchDetails(marketId);
         if (window.location.hash !== `#match/${encodeURIComponent(marketId)}`) return;
@@ -1819,7 +1868,15 @@ window.renderMatchView = async function renderMatchView(marketId) {
 
 function renderMatchInfoTab(tab, market, data) {
     const panel = document.getElementById('matchInfoContent'); if (!panel) return;
-    if (!data) { panel.innerHTML = `<p class="match-loading">Match information is temporarily unavailable.</p>`; return; }
+    if (!data) {
+        if (!isFootballFixtureMarket(market) && !/^fb_/i.test(String(market?.id || ''))) {
+            const eventText = market.description || market.content || 'Event details and available outcomes are shown below.';
+            panel.innerHTML = `<h2>Event details</h2><p>${escapeHtml(String(eventText).replace(/<[^>]*>/g, ' ').trim())}</p><div class="match-data-row"><span>Sport</span><b>${escapeHtml(marketMetaText(market.sport, market.category || 'Sports'))}</b></div><div class="match-data-row"><span>League</span><b>${escapeHtml(marketMetaText(market.league, 'Not specified'))}</b></div>`;
+            return;
+        }
+        panel.innerHTML = `<p class="match-loading">Match information is temporarily unavailable.</p>`;
+        return;
+    }
     if (tab === 'lineups') {
         const rows = data.lineups;
         const teams = Array.isArray(rows) ? rows : [];
@@ -1844,7 +1901,7 @@ function renderMatchInfoTab(tab, market, data) {
 
 function renderMatchMarketGrid(market, providerOdds = []) {
     const grid = document.getElementById('matchMarketGrid'); if (!grid) return;
-    const platformMarket = `<article class="match-contract-card"><h3>PolySoko · Match Result</h3><div class="match-contract-outcomes">${getMarketOutcomes(market).map(outcome => `<button class="bet-btn" data-id="${escapeHtml(market.id)}" data-choice="${escapeHtml(outcome.key)}" data-odds="${Number(outcome.odds)}" data-title="${escapeHtml(market.betQuestion || market.title)}"><span>${escapeHtml(outcome.label)}</span><b>${Number(outcome.odds).toFixed(2)}</b></button>`).join('')}</div></article>`;
+    const platformMarket = `<article class="match-contract-card"><h3>PolySoko · Match Result ${Number(market.is_boosted) === 1 ? '<span class="elite-odds-badge">ELITE +10% ODDS</span>' : ''}</h3><div class="match-contract-outcomes">${getMarketOutcomes(market).map(outcome => { const odds = displayedOdds(market, outcome.odds); return `<button class="bet-btn" data-id="${escapeHtml(market.id)}" data-choice="${escapeHtml(outcome.key)}" data-odds="${Number(odds)}" data-title="${escapeHtml(market.betQuestion || market.title)}"><span>${escapeHtml(outcome.label)}</span><b>${Number(odds).toFixed(2)}</b></button>`; }).join('')}</div></article>`;
     const offers = Array.isArray(providerOdds) ? providerOdds : [];
     const providerCards = offers.map(offer => {
         const type = providerContractType(offer.market);
