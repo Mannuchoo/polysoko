@@ -271,6 +271,13 @@ window.setSportsType = function (sport) {
 function applyStateAndRender() {
     let filtered = (state.allMarkets || []).filter(m => !isInvalidSportsMarket(m));
     const active = state.category || "all";
+    const marketHeading = document.getElementById('marketSectionTitle');
+    const categoryTitles = {
+        all: 'All Markets', sports: 'Sports Markets', football: 'Football Markets',
+        crypto: 'Crypto Prices', movies: 'Movies & Films', news: 'Latest News',
+        politics: 'Politics', tech: 'Technology', weather: 'Weather Markets', gaming: 'Gaming Markets'
+    };
+    if (marketHeading) marketHeading.textContent = categoryTitles[active] || `${titleCase(active)} Markets`;
     
     if (active === "all") {
         // "all" intentionally includes sports — see Sports pill for clickable subcategories
@@ -499,6 +506,9 @@ function renderFilteredMarkets() {
         const emptyLabel = state.category === 'movies' ? 'movies and films' : `${escapeHtml(state.category)} headlines`;
         html += `<div class="empty-state" style="padding:24px;">No ${emptyLabel} are available right now.</div>`;
     }
+    if (state.category === 'crypto') html = html.replace(/<div class="main-category-label" style="color:#f0b90b[^>]*>[\s\S]*?<\/div>/, '');
+    if (state.category === 'movies') html = html.replace(/<div class="main-category-label" style="color:#b8a3ff[^>]*>[\s\S]*?<\/div>/, '');
+    if (['news', 'politics', 'tech'].includes(state.category)) html = html.replace(/<div class="main-category-label" style="color: #00ff88[^>]*>[\s\S]*?<\/div>/, '');
     mainGrid.innerHTML = html || `<div style="padding:20px;">No markets found. Searching for elite aura...</div>`;
 }
 

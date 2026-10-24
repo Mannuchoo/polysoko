@@ -469,8 +469,51 @@ window.closeUtilityPage = function() {
     if (window.location.hash) window.location.hash = '';
 };
 
+window.updateMobileBottomNav = function() {
+    const route = window.location.hash.match(/^#(chat|profile)$/)?.[1] || 'home';
+    document.querySelectorAll('[data-mobile-nav]').forEach(button => {
+        const active = button.dataset.mobileNav === route;
+        button.classList.toggle('active', active);
+        if (active) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+    });
+};
+
+window.goToAppHome = function() {
+    window.setCategory?.('all');
+    if (window.location.hash) window.location.hash = '';
+    window.updateMobileBottomNav?.();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+};
+
+window.openMarketSearch = function() {
+    const wrap = document.querySelector('.header-search-wrap');
+    const toggle = document.getElementById('searchToggle');
+    const input = document.getElementById('headerSearch');
+    if (wrap && !wrap.classList.contains('active')) toggle?.click();
+    input?.focus();
+    document.querySelector('[data-mobile-nav="search"]')?.classList.add('active');
+};
+
+window.openAppProfile = function() {
+    if (!localStorage.getItem('token')) {
+        window.location.href = './login.html';
+        return;
+    }
+    window.location.hash = '#profile';
+};
+
+window.openAppChat = function() {
+    if (!localStorage.getItem('token')) {
+        window.location.href = './login.html';
+        return;
+    }
+    window.location.hash = '#chat';
+};
+
 // Lightweight hash router for dedicated detail and account pages.
 window.router = function router() {
+    window.updateMobileBottomNav?.();
     const match = window.location.hash.match(/^#match\/(.+)$/);
     const view = document.getElementById('matchView');
     const dashboard = document.querySelector('.dashboard-main');
