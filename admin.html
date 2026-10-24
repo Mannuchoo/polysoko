@@ -2513,6 +2513,11 @@ async function loadAiGeneratedMarkets() {
             const imageUrl = m.image_url || (m.media_type !== 'video' ? m.media_url : '');
             const videoUrl = m.video_url || (m.media_type === 'video' ? m.media_url : '');
             const sourceType = Number(m.ai_generated) === 1 ? 'AI GENERATED' : (m.creator ? 'CREATOR SUBMISSION' : 'API / SYSTEM FEED');
+            const proposalDetails = source.boxOfficeOracle
+                ? `Movie oracle · TMDB ID ${esc(source.tmdbMovieId || 'unknown')} · USD ${Number(source.boxOfficeOracle.threshold || 0).toLocaleString()} milestone · Hype ${Number(source.movie?.hypeScore || 0)}/100`
+                : source.weatherOracle
+                    ? `${esc(source.weatherOracle.activity || 'Agriculture weather proposal')} · ${esc(source.weatherOracle.location || '')}, ${esc(source.weatherOracle.country || '')} · ${esc(source.weatherOracle.impact || `${source.weatherOracle.crop || 'crop'} production weather risk`)} · ${esc(source.weatherOracle.provider || 'weather oracle')} archive`
+                    : '';
             return `
                 <article id="review-market-${esc(m.id)}" style="background:#101216;border:1px solid #55428a;border-radius:12px;padding:16px;">
                     <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
@@ -2529,6 +2534,7 @@ async function loadAiGeneratedMarkets() {
                         <div data-review-description style="margin-top:8px;color:#ddd;">${esc(m.description || 'No description provided')}</div>
                         <div data-review-sides style="margin-top:7px;"><b style="color:#aaa;">Sides:</b> ${esc(m.sideA || 'YES')} / ${esc(m.sideB || 'NO')} &nbsp; <b style="color:#aaa;">Odds:</b> ${Number(m.oddsA || 1.9).toFixed(2)} / ${Number(m.oddsB || 1.9).toFixed(2)}</div>
                         <div data-review-meta style="margin-top:6px;"><b style="color:#aaa;">Category:</b> ${esc(m.category || 'general')} &nbsp; <b style="color:#aaa;">Closes:</b> ${esc(deadlineLabel)}</div>
+                        ${proposalDetails ? `<div style="margin-top:6px;color:#c6b5ff;font-size:.78rem;">${proposalDetails}</div>` : ''}
                         ${source.sourceTitle ? `<div style="margin-top:6px;"><b style="color:#aaa;">Source article:</b> ${esc(source.sourceTitle)}</div>` : ''}
                         ${source.sourceUrl ? `<a href="${esc(source.sourceUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:6px;color:#91caff;">Open source</a>` : ''}
                     </div>

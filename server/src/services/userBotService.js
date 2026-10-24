@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './aiProvider.js';
+import { getRegionalWeatherContext } from './weatherService.js';
 
 // Groq retired the previous Llama default for developer-tier projects in
 // August 2026. Keep this on a currently supported model unless overridden.
@@ -90,7 +91,13 @@ export async function processUserBotMessage({ message, history = [], dbAll }) {
     content: String(item?.text || item?.content || '').slice(0, 1000)
   })).filter(item => item.content) : [];
   if (safeHistory.at(-1)?.role === 'user' && safeHistory.at(-1)?.content === String(message).slice(0, 1000)) safeHistory.pop();
-  const messages = [{ role: 'system', content: systemPrompt }, ...safeHistory, { role: 'user', content: String(message).slice(0, 2000) }];
+  const userMessage = String(message).slice(0, 2000);
+  const weatherRelevant = /\b(weather|rain|drought|flood|heat|storm|road|transport|logistic|supply chain|harvest|crop|coffee|tea|maize|economic|economy|local condition|event outlook|event|outlook|outdoor|travel condition)\b/i.test(userMessage);
+  const weatherContext = weatherRelevant ? await getRegionalWeatherContext(userMessage) : '';
+  const contextPrompt = weatherContext
+    ? `${systemPrompt}\n\nUse this real-time regional weather context only when it helps answer the user's question. Distinguish observations from forecasts, state the location and dates, and do not infer commodity prices or logistics disruptions that the data does not establish.\n${weatherContext}`
+    : systemPrompt;
+  const messages = [{ role: 'system', content: contextPrompt }, ...safeHistory, { role: 'user', content: userMessage }];
   const toolHandlers = { getHighRiskMarkets: () => getHighRiskMarkets(dbAll), getTrendingMarkets: () => getTrendingMarkets(dbAll) };
 
   const runProvider = async ({ client, model, provider }) => {

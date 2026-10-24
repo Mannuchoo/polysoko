@@ -2,6 +2,8 @@ import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
 import { generateMarketFromNews } from './src/services/marketGenerator.js';
+import { resolveWeatherImpactMarket, syncWeatherCommodityDrafts, syncWeatherOperationalDrafts } from './src/services/weatherService.js';
+import { generateMovieMarketDraft, getTrendingMovies, resolveMovieBoxOffice } from './src/services/movieService.js';
 import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './src/services/aiProvider.js';
 import { deleteSettledMarketsOlderThan } from './src/services/marketRetention.js';
 import { startSettlementWorker } from './src/services/settlementService.js';
@@ -2976,6 +2978,33 @@ app.post('/api/markets/generate-from-news', authenticateAdmin, async (req, res) 
     }
 });
 
+app.get('/api/movies/trending', async (_req, res) => {
+    try {
+        const movies = await getTrendingMovies({ limit: 12 });
+        res.set('Cache-Control', 'public, max-age=900');
+        res.json({ success: true, movies, source: 'TMDB', hypeMethod: 'TMDB popularity and vote metrics; not trailer view counts' });
+    } catch (error) {
+        const notConfigured = /not configured/i.test(error.message || '');
+        res.status(notConfigured ? 503 : 502).json({ success: false, message: notConfigured ? 'Movie data is not configured on the backend.' : 'Trending movies are temporarily unavailable.' });
+    }
+});
+
+app.post('/api/markets/generate-from-movie', authenticate, async (req, res) => {
+    try {
+        const movieId = req.body?.movieId ?? req.body?.id;
+        const result = await generateMovieMarketDraft(movieId, { dbGet, dbRun, creator: req.user.phone });
+        if (result.created) {
+            emitAdminEvent('newMarketPending', { id: result.market.id, title: result.market.title, creator: req.user.phone, status: 'draft', ai_generated: true, category: 'movies' });
+        }
+        res.status(result.created ? 201 : 200).json({ success: true, ...result });
+    } catch (error) {
+        console.error('[movie-market-generator] failed:', error.message);
+        const status = /not configured/i.test(error.message) ? 503
+            : /required|valid movie|already passed|deadline|future date|Yes\/No|missing|definitive/i.test(error.message) ? 400 : 502;
+        res.status(status).json({ success: false, message: error.message || 'Could not create a movie market draft.' });
+    }
+});
+
 app.get('/api/notifications', authenticate, async (req, res) => {
     try {
         const notes = await dbAll(
@@ -3593,7 +3622,7 @@ const syncSportsMarkets = async () => {
 
     // Sync weather markets once every 24 hours using the official Weather API
     // Expanded Environmental & Weather Sync
-    const syncWeatherMarkets = async () => {
+    const syncLegacyWeatherMarkets = async () => {
         const towns = [
             // Kenya hub
             { name: 'Mombasa', lat: -4.0435, lon: 39.6682 },
@@ -3738,6 +3767,16 @@ const syncSportsMarkets = async () => {
         emitMarkets();
         return { success: true };
     };
+const syncWeatherMarkets = async () => syncWeatherCommodityDrafts({
+    dbGet,
+    dbRun
+}).then(async cropSummary => {
+    const operationsSummary = await syncWeatherOperationalDrafts({ dbGet, dbRun });
+    const proposals = cropSummary.proposals + operationsSummary.proposals;
+    console.log(`[weather] Created ${proposals} crop and regional operations drafts; operational coverage visited ${operationsSummary.regions} areas.`);
+    if (proposals) emitMarkets();
+    return { cropSummary, operationsSummary };
+});
 const normalizeStatus = (status) => {
     if (!status) return "upcoming";
 
@@ -4321,8 +4360,8 @@ const settleBetById = async (betId, winningSide) => {
 const settleWeatherMarkets = async () => {
     const markets = await dbAll(`
         SELECT * FROM markets 
-        WHERE category='weather' 
-        AND settled=0
+        WHERE category='weather' AND id LIKE 'env_%'
+        AND COALESCE(admin_verified,0)=1 AND status IN ('closed','suspended') AND settled=0
         AND startTime IS NOT NULL
     `);
 
@@ -4358,6 +4397,38 @@ const settleWeatherMarkets = async () => {
 
         } catch (e) {
             console.error("🌧️ Weather settlement error:", e.message);
+        }
+    }
+};
+const settleWeatherCommodityMarkets = async () => {
+    const markets = await dbAll(`SELECT * FROM markets
+        WHERE category='weather' AND (id LIKE 'weather_crop_%' OR id LIKE 'weather_impact_%') AND COALESCE(admin_verified,0)=1
+          AND status IN ('closed','suspended') AND settled=0
+          AND COALESCE(event_end_time,startTime) IS NOT NULL
+          AND COALESCE(event_end_time,startTime) <= NOW()
+        ORDER BY COALESCE(event_end_time,startTime) ASC LIMIT 25`);
+    for (const market of markets || []) {
+        try {
+            const result = await resolveWeatherImpactMarket(market);
+            if (result) await settleMarket(market.id, result);
+        } catch (error) {
+            console.warn(`[weather settlement] Could not resolve ${market.id}:`, error.message);
+        }
+    }
+};
+const settleMovieMarkets = async () => {
+    const markets = await dbAll(`SELECT * FROM markets
+        WHERE category='movies' AND COALESCE(admin_verified,0)=1 AND status IN ('closed','suspended')
+          AND settled=0 AND content LIKE '%boxOfficeOracle%'
+          AND COALESCE(event_end_time,startTime) IS NOT NULL
+          AND COALESCE(event_end_time,startTime) <= NOW()
+        ORDER BY COALESCE(event_end_time,startTime) ASC LIMIT 25`);
+    for (const market of markets || []) {
+        try {
+            const result = await resolveMovieBoxOffice(market);
+            if (result) await settleMarket(market.id, result);
+        } catch (error) {
+            console.warn(`[movie settlement] Could not resolve ${market.id}:`, error.message);
         }
     }
 };
@@ -7434,6 +7505,8 @@ async function runSettlementEngine() {
     await closeExpiredMarkets();
     await settleResolvedMarkets();
     await settleWeatherMarkets();
+    await settleWeatherCommodityMarkets();
+    await settleMovieMarkets();
     return settleFootballBacklog();
 }
 

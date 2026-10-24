@@ -24,6 +24,8 @@ window.state = window.state || {
 };
 
 const state = window.state;
+let trendingMoviesCache = null;
+let trendingMoviesRequest = null;
 
 function syncMarketMap(markets) {
     window.marketMap = {};
@@ -495,6 +497,14 @@ function renderFilteredMarkets() {
         movies.forEach(m => html += createMarketCard(m));
     }
 
+    if (['all', 'movies'].includes(state.category)) {
+        html += `<section id="trendingMoviesSection" aria-label="Trending entertainment" style="margin:18px 0;padding:16px;border:1px solid #493c68;border-radius:14px;background:linear-gradient(135deg,#15111f,#0a0b10);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+                <div><div style="color:#c8b4ff;font-weight:800;letter-spacing:.04em;">TRENDING ENTERTAINMENT</div><div style="color:#89909a;font-size:.75rem;margin-top:3px;">TMDB popularity and audience metrics</div></div>
+            </div><div data-trending-movies-content style="display:flex;gap:12px;overflow-x:auto;padding-bottom:6px;color:#87909a;">Loading trending movies...</div>
+        </section>`;
+    }
+
     // 3. Render News Feed (compact cards only; expanded feed loads on demand)
     if (news.length > 0) {
         const newsHeading = ['news', 'tech', 'politics'].includes(state.category)
@@ -541,7 +551,75 @@ function renderFilteredMarkets() {
     if (state.category === 'movies') html = html.replace(/<div class="main-category-label" style="color:#b8a3ff[^>]*>[\s\S]*?<\/div>/, '');
     if (['news', 'politics', 'tech'].includes(state.category)) html = html.replace(/<div class="main-category-label" style="color: #00ff88[^>]*>[\s\S]*?<\/div>/, '');
     mainGrid.innerHTML = html || `<div style="padding:20px;">No markets found. Searching for elite aura...</div>`;
+    if (['all', 'movies'].includes(state.category)) loadTrendingMoviesIntoBoard();
 }
+
+async function loadTrendingMoviesIntoBoard() {
+    const section = document.getElementById('trendingMoviesSection');
+    const content = section?.querySelector('[data-trending-movies-content]');
+    if (!content) return;
+    try {
+        if (!trendingMoviesCache) {
+            trendingMoviesRequest ||= fetch(window.apiUrl('/api/movies/trending')).then(async response => {
+                const data = await response.json();
+                if (!response.ok || !data?.success) throw new Error(data?.message || 'Trending movies are unavailable.');
+                return data.movies || [];
+            }).finally(() => { trendingMoviesRequest = null; });
+            trendingMoviesCache = await trendingMoviesRequest;
+        }
+        if (!document.getElementById('trendingMoviesSection')) return;
+        if (!trendingMoviesCache.length) {
+            content.innerHTML = '<span>No trending movies are available right now.</span>';
+            return;
+        }
+        content.innerHTML = trendingMoviesCache.map(movie => `
+            <article style="flex:0 0 190px;min-width:170px;overflow:hidden;border:1px solid #292536;border-radius:10px;background:#0d0d12;">
+                ${movie.posterUrl ? `<img src="${escapeHtml(movie.posterUrl)}" alt="${escapeHtml(movie.title)} poster" loading="lazy" referrerpolicy="no-referrer" style="display:block;width:100%;height:210px;object-fit:cover;" onerror="this.style.display='none';">` : ''}
+                <div style="padding:10px;">
+                    <div style="font-weight:750;color:#eee;line-height:1.3;min-height:2.4em;">${escapeHtml(movie.title)}</div>
+                    <div style="display:flex;justify-content:space-between;gap:6px;align-items:center;margin:8px 0;color:#bbabec;font-size:.72rem;">
+                        <span style="padding:3px 6px;border:1px solid #584779;border-radius:999px;">Hype Meter ${Number(movie.hypeScore)}/100 · ${escapeHtml(movie.hypeLabel)}</span>
+                        <span title="TMDB popularity score">TMDB ${Number(movie.popularity).toFixed(1)}</span>
+                    </div>
+                    ${movie.videos?.length ? `<details style="margin:8px 0;color:#d5caff;font-size:.72rem;"><summary style="cursor:pointer;">Trailers &amp; videos (${movie.videos.length})</summary><div style="margin-top:7px;">${movie.videos[0].embedUrl ? `<iframe src="${escapeHtml(movie.videos[0].embedUrl)}" title="${escapeHtml(movie.title)} ${escapeHtml(movie.videos[0].name)}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen style="width:100%;aspect-ratio:16/9;border:0;border-radius:6px;background:#000;"></iframe>` : ''}<div style="display:grid;gap:4px;margin-top:5px;">${movie.videos.map(video => `<a href="${escapeHtml(video.watchUrl)}" target="_blank" rel="noopener noreferrer" style="color:#c7b7ff;">${escapeHtml(video.type)} · ${escapeHtml(video.name)}</a>`).join('')}</div></div></details>` : '<div style="color:#82818c;font-size:.68rem;margin:8px 0;">No trailers or clips listed by TMDB.</div>'}
+                    <button type="button" data-movie-id="${Number(movie.id)}" onclick="window.convertMovieToMarket(event, this)" style="width:100%;border:1px solid #a88af3;background:#a88af322;color:#d8c9ff;border-radius:7px;padding:8px 7px;cursor:pointer;font-size:.72rem;">Convert to Prediction Market</button>
+                    <div data-movie-result style="min-height:1em;margin-top:5px;font-size:.68rem;color:#9c9c9c;"></div>
+                </div>
+            </article>`).join('');
+    } catch (error) {
+        content.innerHTML = `<span style="color:#c98e8e;">${escapeHtml(error.message || 'Trending movies are temporarily unavailable.')}</span>`;
+    }
+}
+
+window.convertMovieToMarket = async function(event, button) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const movieId = Number(button?.dataset.movieId);
+    const result = button?.parentElement?.querySelector('[data-movie-result]');
+    const token = localStorage.getItem('token');
+    if (!token) {
+        if (result) result.textContent = 'Sign in to submit a draft for admin review.';
+        return;
+    }
+    button.disabled = true;
+    button.textContent = 'Preparing draft...';
+    if (result) result.textContent = '';
+    try {
+        const response = await fetch(window.apiUrl('/api/markets/generate-from-movie'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ movieId })
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.success) throw new Error(data?.message || 'Could not create movie draft.');
+        button.textContent = data.created ? 'Sent to Admin Drafts' : 'Draft Already Submitted';
+        if (result) result.textContent = data.message || 'Awaiting admin review before publication.';
+    } catch (error) {
+        button.disabled = false;
+        button.textContent = 'Convert to Prediction Market';
+        if (result) result.textContent = error.message || 'Could not create movie draft.';
+    }
+};
 
 function renderSportsPage(container, sportsMarkets, routeMode = false) {
     const sportsCatalog = ["Football", "NBA", "NFL", "Basketball", "Baseball", "Hockey", "Volleyball", "Rugby", "Handball", "Tennis", "MMA", "F1", "Cricket", "Golf", "AFL"];
