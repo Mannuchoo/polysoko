@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path'; // Moved up
 import dotenv from 'dotenv';
-import { generateMarketFromNews, sanitizeMarketQuestionTitle } from './src/services/marketGenerator.js';
+import { generateMarketFromNews, inspectMarketQuestionTitle, sanitizeMarketQuestionTitle } from './src/services/marketGenerator.js';
 import { resolveWeatherImpactMarket, syncWeatherCommodityDrafts, syncWeatherOperationalDrafts } from './src/services/weatherService.js';
 import { generateMovieMarketDraft, getTrendingMovies, resolveMovieBoxOffice } from './src/services/movieService.js';
 import { getGeminiApiKey, getGeminiModel, isGroqRateLimitError } from './src/services/aiProvider.js';
@@ -5647,6 +5647,8 @@ app.post('/api/user/submit-market', authenticate, async (req, res) => {
             finalDescription = `${finalDescription}\nResolution criteria: ${generated.resolutionCriteria}`.trim();
             aiHeadlineGenerated = 1;
         }
+        const titleCheck = inspectMarketQuestionTitle(finalTitle);
+        if (!titleCheck.valid) return res.status(400).json({ success: false, message: titleCheck.reason });
 
         const id = `user_${Date.now()}`;
         const isAutoOpen = (user.role === 'admin');
@@ -5679,7 +5681,10 @@ app.post('/api/admin/save-market-draft', authenticateAdmin, async (req, res) => 
     const { draftId, title, category, sideA, sideB, startTime, content, media_url, media_type } = req.body || {};
     try {
         const id = draftId || `m_draft_${Date.now()}`;
-        const values = [sanitizeMarketQuestionTitle(title), String(content || ''), String(content || ''), category || 'misc', sideA || 'YES', sideB || 'NO', startTime || null, startTime || null, media_url || null, media_type || 'auto'];
+        const cleanTitle = sanitizeMarketQuestionTitle(title);
+        const titleCheck = inspectMarketQuestionTitle(cleanTitle);
+        if (!titleCheck.valid) return res.status(400).json({ success: false, message: titleCheck.reason });
+        const values = [cleanTitle, String(content || ''), String(content || ''), category || 'misc', sideA || 'YES', sideB || 'NO', startTime || null, startTime || null, media_url || null, media_type || 'auto'];
         if (draftId) {
             const updated = await dbRun(
                 `UPDATE markets SET title=?, description=?, content=?, category=?, sideA=?, sideB=?, startTime=?, event_end_time=?, media_url=?, media_type=?, status='draft'
@@ -5717,6 +5722,8 @@ app.post('/api/admin/create-market', authenticateAdmin, async (req, res) => {
             finalDescription = `${finalDescription}\nResolution criteria: ${generated.resolutionCriteria}`.trim();
             aiHeadlineGenerated = 1;
         }
+        const titleCheck = inspectMarketQuestionTitle(finalTitle);
+        if (!titleCheck.valid) return res.status(400).json({ success: false, message: titleCheck.reason });
         const id = draftId || `m_${Date.now()}`;
         const values = [finalTitle, finalDescription, finalDescription, category || 'misc', sideA || 'YES', sideB || 'NO', startTime, startTime, aiHeadlineGenerated ? 'draft' : 'open', media_url || null, media_type || 'auto', media_type === 'image' ? media_url : null, media_type === 'video' ? media_url : null, aiHeadlineGenerated];
         if (draftId) {
@@ -6458,12 +6465,15 @@ app.post('/api/admin/update-market', authenticateAdmin, async (req, res) => {
     if (!id || !String(title || '').trim()) {
         return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
     }
+    const cleanTitle = sanitizeMarketQuestionTitle(title);
+    const titleCheck = inspectMarketQuestionTitle(cleanTitle);
+    if (!titleCheck.valid) return res.status(400).json({ success: false, message: titleCheck.reason });
 
     // The outcome labels and prices are only written when the admin supplied
     // them, so an older admin client that only sends the copy fields does not
     // wipe a market's sides.
     const sets = ['title = ?', 'content = ?'];
-    const params = [sanitizeMarketQuestionTitle(title), content ?? ''];
+    const params = [cleanTitle, content ?? ''];
     if (media_url !== undefined) {
         sets.push('media_url = ?');
         params.push(media_url || null);
@@ -7816,6 +7826,8 @@ app.post('/api/admin/edit-unverified-market', authenticateAdmin, async (req, res
     const { marketId, title, description, category, deadline, imageUrl, videoUrl, sideA, sideB } = req.body || {};
     const savedTitle = sanitizeMarketQuestionTitle(title);
     if (!marketId || !savedTitle) return res.status(400).json({ success: false, message: 'Market ID and title are required.' });
+    const titleCheck = inspectMarketQuestionTitle(savedTitle);
+    if (!titleCheck.valid) return res.status(400).json({ success: false, message: titleCheck.reason });
     try {
         const market = await dbGet(`SELECT * FROM markets WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [marketId]);
         if (!market) return res.status(404).json({ success: false, message: 'Unverified market not found.' });

@@ -19,6 +19,33 @@ export function sanitizeMarketQuestionTitle(value) {
     .trim();
 }
 
+// Reject common transitive verbs when the question supplies only a location
+// or other preposition after the verb (for example, "restore in Ukraine").
+// That construction has no observable object or outcome to settle.
+const TRANSITIVE_ACTIONS_REQUIRING_OBJECT = new Set([
+  'restore', 'rebuild', 'reconstruct', 'repair', 'fix', 'fund', 'finance',
+  'provide', 'supply', 'deliver', 'bring', 'send', 'give', 'take', 'raise',
+  'announce', 'confirm', 'cancel', 'approve', 'reject', 'release', 'deploy',
+  'acquire', 'buy', 'sell', 'create', 'produce', 'make', 'sign', 'impose'
+]);
+
+export function inspectMarketQuestionTitle(value) {
+  const title = sanitizeMarketQuestionTitle(value);
+  const body = title.replace(/\?$/, '').trim();
+  const actionPattern = new RegExp(`\\b(${[...TRANSITIVE_ACTIONS_REQUIRING_OBJECT].join('|')})\\s+(in|at|on|by|for|to|from|with|during|across|within)\\b`, 'i');
+  const incomplete = body.match(actionPattern);
+  if (incomplete) {
+    return { valid: false, reason: `"${incomplete[1]}" needs a specific object or outcome before "${incomplete[2]}".` };
+  }
+  return { valid: true, reason: '' };
+}
+
+export function assertMarketQuestionTitle(value) {
+  const inspection = inspectMarketQuestionTitle(value);
+  if (!inspection.valid) throw new Error(`Market question is incomplete: ${inspection.reason}`);
+  return sanitizeMarketQuestionTitle(value);
+}
+
 function validHttpUrl(value) {
   if (!value) return null;
   try {
@@ -143,8 +170,9 @@ export async function generateMarketFromNews(rawArticleData) {
   const imageUrl = suppliedImage || validHttpUrl(result.imageUrl);
   const videoUrl = suppliedVideo || validHttpUrl(result.videoUrl);
 
+  const questionTitle = assertMarketQuestionTitle(formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt: deadline.timestamp }));
   return {
-    title: sanitizeMarketQuestionTitle(formatStrictMarketTitle({ actionEvent, subject, condition, deadlineAt: deadline.timestamp })),
+    title: questionTitle,
     marketHeader,
     subject,
     actionEvent,
