@@ -601,7 +601,7 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
     let html = `
         <div class="sports-page">
             <section class="sports-checkout" aria-label="Sports checkout markets">
-                <div class="section-row"><span class="section-title">CHECK OUT ðŸ“ˆ</span></div>
+                <div class="section-row"><span class="section-title">CHECK OUT &#x1F4C8;</span></div>
                 <div class="trending-horizontal-scroll">${renderTrendingCards() || '<div class="empty-state">Sports markets will appear here when available.</div>'}</div>
             </section>
             <div class="sports-page-header">
@@ -625,7 +625,7 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
         .sort((a, b) => `${a.league || ""} ${a.title || ""}`.localeCompare(`${b.league || ""} ${b.title || ""}`));
 
     html += `
-        ${routeMode ? '' : renderSportsCategoryGrid()}
+        ${renderSportsCategoryGrid()}
         <div class="main-category-label" style="color:#00ff88;font-weight:800;padding:18px 0 10px 0;">${escapeHtml(label).toUpperCase()} MATCHES</div>
     `;
 
