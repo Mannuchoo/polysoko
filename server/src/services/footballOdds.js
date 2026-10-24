@@ -103,7 +103,7 @@ export async function fetchFootballOdds(apiKey, date, { force = false } = {}) {
     // The odds request shares the process-wide budget with the match-details
     // calls, so it never spends more than the provider allows.
     const outcome = await footballRequest(apiKey, ODDS_BASE, {
-        params: { date, timezone: 'Africa/Nairobi' },
+        params: { date },
         timeout: 15000
     });
 

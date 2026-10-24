@@ -349,6 +349,7 @@ app.get('/api/health', async (req, res) => {
         jwtConfigured: getJwtSecrets().length > 0,
         jwtSecretSource,
         newsApiConfigured: Boolean(process.env.NEWS_API_KEY),
+        footballProviderConfigured: Boolean(API_SPORTS_KEY),
         mailConfigured,
         movieDataConfigured: isMovieDataConfigured(),
         publicSiteUrl: PUBLIC_SITE_URL,
@@ -3063,7 +3064,9 @@ const syncFootballMarkets = async () => {
         const responses = [];
         for (const date of dates) {
             const outcome = await footballRequest(API_SPORTS_KEY, 'https://v3.football.api-sports.io/fixtures', {
-                params: { date, timezone: 'Africa/Nairobi' },
+                // API-Football date queries use the provider's timezone defaults;
+                // timezone is not accepted on all account plans.
+                params: { date },
                 timeout: 15000
             });
             if (outcome.error) {

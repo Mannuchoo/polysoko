@@ -146,7 +146,15 @@ export async function footballRequest(apiKey, url, { params, timeout = 12000 } =
 
         const payload = await response.json();
         if (payload?.errors && Object.keys(payload.errors).length) {
-            return { data: null, error: 'Sports data is unavailable from the provider.', budgetExhausted: false };
+            const details = Object.entries(payload.errors)
+                .map(([name, value]) => `${name}: ${String(value)}`)
+                .join('; ')
+                .slice(0, 240);
+            return {
+                data: null,
+                error: details || 'Sports data is unavailable from the provider.',
+                budgetExhausted: false
+            };
         }
         return { data: payload?.response ?? [], error: null, budgetExhausted: false };
     } catch (error) {
