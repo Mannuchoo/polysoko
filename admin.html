@@ -3497,6 +3497,20 @@ async function adminVoidMarket(marketId, btn) {
 }
 
 /* ================= BETS ================= */
+function activeBetMarketLabel(bet) {
+    const textValue = (value) => {
+        if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+        if (!value || typeof value !== 'object') return '';
+        return String(value.title ?? value.market_title ?? value.marketTitle ?? value.name ?? value.label ?? value.text ?? '').trim();
+    };
+    const placeholders = new Set(['unknown', 'unknown market', 'unknown vs unknown', 'home vs away']);
+    for (const candidate of [bet.marketTitle, bet.markettitle, bet.event]) {
+        const label = textValue(candidate);
+        if (label && !placeholders.has(label.toLowerCase())) return label;
+    }
+    return bet.market_id ? `Market ${textValue(bet.market_id)}` : `Market #${textValue(bet.id) || '?'}`;
+}
+
 async function loadGlobalActiveBets() {
     const table = document.getElementById('globalBetsTable');
     table.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
@@ -3512,7 +3526,7 @@ async function loadGlobalActiveBets() {
                     <td>#${esc(b.id)}</td>
                     <td>${esc(b.userName || b.user_phone)}</td>
                     <td>
-                        <div style="font-weight:700;">${esc(b.marketTitle || 'Unknown market')}</div>
+                        <div style="font-weight:700;">${esc(activeBetMarketLabel(b))}</div>
                         <small style="color:#888;">${esc(b.market_id)}</small>
                     </td>
                     <td>${Number(b.amount).toFixed(2)} sKES</td>

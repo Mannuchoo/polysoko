@@ -33,7 +33,8 @@ export const THREE_WAY_COLUMNS = [
     ['sideC', 'TEXT'],
     ['oddsC', 'DOUBLE PRECISION'],
     ['draw_volume', 'DOUBLE PRECISION DEFAULT 0'],
-    ['odds_anchor', 'TEXT']
+    ['odds_anchor', 'TEXT'],
+    ['odds_source', 'TEXT']
 ];
 
 // The markets that can settle on a draw.

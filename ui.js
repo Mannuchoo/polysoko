@@ -1,15 +1,8 @@
-const savedCategory = localStorage.getItem("last_category") || "all";
-const initialNavigation = performance.getEntriesByType?.('navigation')?.[0];
-const sportsHashRoute = /^#(?:sports(?:\/|$)|sport\/|match\/)/i.test(window.location.hash);
-if (initialNavigation?.type === 'reload' &&
-    (sportsHashRoute || ['sports', 'football'].includes(savedCategory.toLowerCase()))) {
-    if (sportsHashRoute) window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
-    localStorage.setItem('last_category', 'all');
-    localStorage.removeItem('last_sports_type');
-}
-// Always start a fresh page load at the main market board. Category
-// preferences apply while navigating this page, but must not strand users in
-// the Sports view when they return to the site later.
+const MARKET_RENDER_PAGE_SIZE = 60;
+let upcomingMarketsVisible = MARKET_RENDER_PAGE_SIZE;
+let sportsMarketsVisible = MARKET_RENDER_PAGE_SIZE;
+let liveMarketsVisible = MARKET_RENDER_PAGE_SIZE;
+let newsMarketsVisible = MARKET_RENDER_PAGE_SIZE;
 const initialCategory = 'all';
 window.state = window.state || {
     allMarkets: [],
@@ -272,6 +265,10 @@ window.setCategory = function (category) {
     }
 
     const requested = normalizeCategory(category || "all");
+    upcomingMarketsVisible = MARKET_RENDER_PAGE_SIZE;
+    sportsMarketsVisible = MARKET_RENDER_PAGE_SIZE;
+    liveMarketsVisible = MARKET_RENDER_PAGE_SIZE;
+    newsMarketsVisible = MARKET_RENDER_PAGE_SIZE;
     const active = requested === "football" ? "sports" : requested;
     window.state.category = active;
     window.state.sportsType = requested === "football" ? "football" : "";
@@ -294,6 +291,7 @@ window.setCategory = function (category) {
 };
 
 window.setSportsType = function (sport) {
+    sportsMarketsVisible = MARKET_RENDER_PAGE_SIZE;
     window.state.category = "sports";
     window.state.sportsType = normalizeCategory(sport || "");
     localStorage.setItem("last_category", "sports");
@@ -309,6 +307,28 @@ window.setSportsType = function (sport) {
     window.location.hash = window.state.sportsType
         ? `#sport/${encodeURIComponent(window.state.sportsType)}`
         : '#sports';
+};
+
+window.loadMoreUpcomingMarkets = function () {
+    upcomingMarketsVisible += MARKET_RENDER_PAGE_SIZE;
+    applyStateAndRender();
+};
+
+window.loadMoreLiveMarkets = function () {
+    liveMarketsVisible += MARKET_RENDER_PAGE_SIZE;
+    applyStateAndRender();
+};
+
+window.loadMoreNewsMarkets = function () {
+    newsMarketsVisible += MARKET_RENDER_PAGE_SIZE;
+    applyStateAndRender();
+};
+
+window.loadMoreSportsMarkets = function () {
+    sportsMarketsVisible += MARKET_RENDER_PAGE_SIZE;
+    const route = window.location.hash.match(/^#sport\/([^/]+)$/);
+    if (route) window.renderSportsRoute?.(decodeURIComponent(route[1]));
+    else renderFilteredMarkets();
 };
 
 function applyStateAndRender() {
@@ -480,7 +500,10 @@ function renderFilteredMarkets() {
     // 2. Render Live Football Section
     if (live.length > 0) {
         html += `<div class="main-category-label" style="color: #ff4d4d; font-weight: 800; padding: 10px 0;">🔴 LIVE NOW</div>`;
-        live.forEach(m => html += createMarketCard(m));
+        live.slice(0, liveMarketsVisible).forEach(m => html += createMarketCard(m));
+        if (live.length > liveMarketsVisible) {
+            html += `<button class="pill" style="margin:14px 0;" onclick="window.loadMoreLiveMarkets()">Load 60 more live markets (${liveMarketsVisible} of ${live.length})</button>`;
+        }
     }
 
     // 2b. Render Crypto Section (surfaced early so BNB & co. are easy to find)
@@ -511,7 +534,7 @@ function renderFilteredMarkets() {
             ? `${state.category.toUpperCase()} HEADLINES`
             : 'LATEST NEWS';
         html += `<div class="main-category-label" style="color: #00ff88; font-weight: 800; padding: 20px 0 10px 0;">📰 ${newsHeading}</div>`;
-        news.forEach(m => html += createMarketCard(m));
+        news.slice(0, newsMarketsVisible).forEach(m => html += createMarketCard(m));
         // Collapsible news feed (hidden by default to avoid showing extra content)
         html += `
             <div id="newsFeedContainer" style="margin-top:12px; display:none;">
@@ -529,11 +552,15 @@ function renderFilteredMarkets() {
         `;
     }
 
+    if (news.length > newsMarketsVisible) {
+        html += `<button class="pill" style="margin:14px 0;" onclick="window.loadMoreNewsMarkets()">Load 60 more news markets (${newsMarketsVisible} of ${news.length})</button>`;
+    }
+
     // 4. Render Upcoming Football Section
     if (upcoming.length > 0) {
         html += `<div class="main-category-label" style="color: #aaa; font-weight: 800; padding: 20px 0 10px 0;">📅 UPCOMING MATCHES</div>`;
         let lastCountry = "";
-        upcoming.forEach(m => {
+        upcoming.slice(0, upcomingMarketsVisible).forEach(m => {
             const country = m.country || "GLOBAL";
             if (country !== lastCountry) {
                 html += `<div class="section-label" style="font-size:0.7rem; color:#666; margin-top:10px;">— ${country.toUpperCase()} —</div>`;
@@ -541,6 +568,9 @@ function renderFilteredMarkets() {
             }
             html += createMarketCard(m);
         });
+        if (upcoming.length > upcomingMarketsVisible) {
+            html += `<button class="pill" style="margin:14px 0;" onclick="window.loadMoreUpcomingMarkets()">Load 60 more matches (${upcomingMarketsVisible} of ${upcoming.length})</button>`;
+        }
     }
 
     if (!allMarkets.length && ['news', 'politics', 'tech', 'movies'].includes(state.category)) {
@@ -719,11 +749,12 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
         <div class="main-category-label" style="color:#00ff88;font-weight:800;padding:18px 0 10px 0;">${escapeHtml(label).toUpperCase()} MATCHES</div>
     `;
 
+    const visibleMatches = matches.slice(0, sportsMarketsVisible);
     let lastLeague = "";
     if (!matches.length) {
         html += `<div class="empty-state" style="padding:24px;">${escapeHtml(label)} matches will appear here once synced.</div>`;
     }
-    matches.forEach(m => {
+    visibleMatches.forEach(m => {
         const league = marketMetaText(m.league, "General");
         if (league !== lastLeague) {
             html += `<div class="section-label" style="font-size:0.7rem;color:#777;margin-top:12px;">${escapeHtml(league.toUpperCase())}</div>`;
@@ -731,6 +762,10 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
         }
         html += createMarketCard(m);
     });
+
+    if (matches.length > sportsMarketsVisible) {
+        html += `<button class="pill" style="margin:14px 0;" onclick="window.loadMoreSportsMarkets()">Load 60 more matches (${sportsMarketsVisible} of ${matches.length})</button>`;
+    }
 
 container.innerHTML = `${html}</div>`;
 }

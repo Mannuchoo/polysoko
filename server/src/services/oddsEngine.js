@@ -5,11 +5,10 @@
 //   * a binary market prices two outcomes (YES/NO),
 //   * a three-way sports market prices three (HOME/DRAW/AWAY).
 //
-// The pool's money tilts a prior. A binary market starts from even money; a
-// sports market starts from the bookmaker's 1X2 price, so a real market price
-// is not thrown away every time a bet lands. The prior is kept in the
-// `odds_anchor` column and written by the sports sync, which is the only
-// place that talks to the bookmaker.
+// The pool's money tilts a prior only when there is no provider quote. A
+// binary market starts from even money; an unpriced sports market can start
+// from its last provider anchor. Provider sourced odds are held outside this
+// engine and must not be replaced by pool movement.
 //
 // The house edge lives in the payout, not in the probability. A fair 50/50
 // market is quoted at 1.90 rather than 2.00, which means the platform pays

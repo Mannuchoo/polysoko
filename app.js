@@ -1,6 +1,16 @@
 
 let socket;
 let bettingLock = false;
+let pendingMarketsSnapshot = null;
+let marketsUpdateFrame = 0;
+const SOCKET_MARKET_SHAPE_KEYS = [
+    'id', 'title', 'category', 'sport', 'status', 'startTime', 'starttime',
+    'event_start_time', 'event_end_time', 'sideA', 'sideB', 'sideC', 'league',
+    'country', 'result', 'image_url', 'media_url', 'video_url', 'media_type', 'is_boosted'
+];
+const socketMarketShape = market => SOCKET_MARKET_SHAPE_KEYS
+    .map(key => String(market?.[key] ?? ''))
+    .join('\u001f');
 
 let cachedMarkets = JSON.parse(
     localStorage.getItem("cached_markets") || "[]"
@@ -242,6 +252,13 @@ function initSocket() {
 
     socket.on("marketsUpdated", (payload) => {
         if (!payload?.markets) return;
+        pendingMarketsSnapshot = payload;
+        if (marketsUpdateFrame) return;
+        marketsUpdateFrame = requestAnimationFrame(() => {
+        marketsUpdateFrame = 0;
+        payload = pendingMarketsSnapshot;
+        pendingMarketsSnapshot = null;
+        if (!payload?.markets) return;
 
         const marketsById = new Map();
         for (const market of payload.markets) {
@@ -270,18 +287,10 @@ function initSocket() {
         // Odds and volume snapshots are frequent. Keep the existing cards in
         // the DOM for those updates and patch their live values in place.
         const previous = window.state?.allMarkets || [];
-        const dynamicKeys = new Set([
-            'oddsA', 'oddsB', 'oddsC', 'odds_a', 'odds_b', 'odds_c', 'oddsa', 'oddsb', 'oddsc',
-            'home_volume', 'draw_volume', 'away_volume', 'volume', 'total_volume',
-            'yes_probability', 'no_probability', 'probability_yes', 'probability_no'
-        ]);
-        const stableShape = market => JSON.stringify(Object.fromEntries(
-            Object.entries(market || {}).filter(([key]) => !dynamicKeys.has(key)).sort(([a], [b]) => a.localeCompare(b))
-        ));
         const previousById = new Map(previous.map(market => [String(market?.id || ''), market]));
         const canPatchLiveValues = previous.length === processed.length && processed.every(market => {
             const old = previousById.get(String(market?.id || ''));
-            return old && stableShape(old) === stableShape(market);
+            return old && socketMarketShape(old) === socketMarketShape(market);
         });
 
         window.state.allMarkets = processed;
@@ -303,6 +312,7 @@ function initSocket() {
         } else if (!canPatchLiveValues) {
             applyStateAndRender();
         }
+        });
     });
 
     socket.on("match_update", (update) => {
