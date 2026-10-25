@@ -1838,49 +1838,26 @@ async function openMarket(id, openInNewTab = false) {
         return;
     }
 
+    if (!/^#market\//.test(window.location.hash)) {
+        sessionStorage.setItem('market_detail_return_route', window.location.hash || '');
+    }
+    window.location.hash = `#market/${encodeURIComponent(id)}`;
+}
+
+window.renderMarketPage = async function renderMarketPage(id) {
+    const m = window.marketMap?.[id] || state.allMarkets?.find(item => String(item.id) === String(id));
     const body = document.getElementById("modalBody");
     if (!body) return;
-    
-    // Open Modal with smooth animation
-    const modal = document.getElementById("richModal");
-    modal.style.display = "flex";
-    modal.classList.add("active");
-    document.body.classList.add("modal-open");
-    document.body.style.overflow = "hidden";
+    if (!m || isSportsMarket(m)) {
+        body.innerHTML = '<p class="market-detail-loading">This market is unavailable. Return to all markets and choose another listing.</p>';
+        return;
+    }
+    body.innerHTML = '<p class="market-detail-loading">Loading market…</p>';
     
     // 1. Initial Render: UI structure + Betting Buttons
     body.innerHTML = isNewsLikeMarket(m)
         ? renderNewsModal(m, renderMarketMedia(m))
         : renderDefaultModal(m, m.content || m.description, renderMarketMedia(m));
-
-    // Add "Open in New Page" button for news
-    if (isNewsLikeMarket(m)) {
-        const newsHeader = body.querySelector('.story-mode');
-        if (newsHeader) {
-            const newPageBtn = document.createElement('button');
-            newPageBtn.className = 'btn-open-new-page';
-            newPageBtn.style.cssText = `
-                display: inline-block;
-                margin-top: 12px;
-                padding: 8px 12px;
-                background: rgba(0, 255, 136, 0.15);
-                border: 1px solid rgba(0, 255, 136, 0.3);
-                border-radius: 6px;
-                color: #00ff88;
-                font-size: 0.75rem;
-                font-weight: 600;
-                cursor: pointer;
-                transition: all 0.2s ease;
-            `;
-            newPageBtn.innerText = '🔗 Open Full Page';
-            newPageBtn.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                window.location.href = "index.html";
-            };
-            newsHeader.parentElement.insertBefore(newPageBtn, newsHeader.nextSibling);
-        }
-    }
 
     let centerContainer = document.getElementById("match-center-container");
     
@@ -1913,7 +1890,7 @@ async function openMarket(id, openInNewTab = false) {
     }
 
     loadOrderBook(id).catch((err) => console.warn("Order book failed:", err.message));
-}
+};
 
 let activeMatchDetails = null;
 let activeMatchDetailsId = null;
@@ -2214,19 +2191,11 @@ window.updateMatchMarket = function(id) {
     renderMatchInteractionTab(document.querySelector('[data-interaction-tab].active')?.dataset.interactionTab || 'markets', market);
 };
 function closeMarket() {
-    const modal = document.getElementById("richModal");
-    const body = document.getElementById("modalBody");
-
-    localStorage.removeItem("last_market_id");
-    
-    if (modal) {
-        modal.classList.remove("active");
-        modal.style.display = "none";
+    const previousRoute = sessionStorage.getItem('market_detail_return_route') || '';
+    sessionStorage.removeItem('market_detail_return_route');
+    if (window.location.hash.startsWith('#market/')) {
+        window.location.hash = previousRoute;
     }
-    if (body) body.innerHTML = "";
-
-    document.body.classList.remove("modal-open");
-    document.body.style.overflow = "auto";
 }
 // Modal content is replaced dynamically, so delegate YES/NO clicks from the body.
 document.getElementById("modalBody")?.addEventListener("click", (e) => {

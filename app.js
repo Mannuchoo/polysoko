@@ -524,14 +524,29 @@ window.openAppChat = function() {
 window.router = function router() {
     window.updateMobileBottomNav?.();
     const match = window.location.hash.match(/^#match\/(.+)$/);
+    const marketRoute = window.location.hash.match(/^#market\/(.+)$/);
     const sportsRoute = window.location.hash.match(/^#sports(?:\/([^/]+))?$/);
     const sportRoute = window.location.hash.match(/^#sport\/([^/]+)$/);
     const view = document.getElementById('matchView');
     const sportView = document.getElementById('sportView');
     const dashboard = document.querySelector('.dashboard-main');
     const utilityView = document.getElementById('utilityView');
+    const marketView = document.getElementById('marketDetailView');
     const utilityRoute = window.location.hash.match(/^#(chat|history|notifications|profile|funds)$/)?.[1];
     restoreUtilityElements();
+    if (marketRoute) {
+        if (dashboard) dashboard.hidden = true;
+        if (utilityView) utilityView.hidden = true;
+        if (sportView) sportView.hidden = true;
+        if (view) view.hidden = true;
+        if (marketView) marketView.hidden = false;
+        document.body.classList.add('market-detail-open');
+        document.body.classList.remove('utility-route-open', 'match-view-open');
+        window.renderMarketPage?.(decodeURIComponent(marketRoute[1]));
+        return;
+    }
+    if (marketView) { marketView.hidden = true; document.getElementById('modalBody')?.replaceChildren(); }
+    document.body.classList.remove('market-detail-open');
     if (match) {
         if (dashboard) dashboard.hidden = true;
         if (utilityView) utilityView.hidden = true;

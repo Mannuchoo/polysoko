@@ -48,8 +48,8 @@
     
     <script src="./dialogs.js?v=1" defer></script>
     <script src="./api.js?v=15" defer></script>
-    <script src="./ui.js?v=31" defer></script>
-    <script src="./app.js?v=25" defer></script>
+    <script src="./ui.js?v=32" defer></script>
+    <script src="./app.js?v=26" defer></script>
     <script src="./pwa.js?v=14" defer></script>
 
 </head>
@@ -77,16 +77,6 @@
 <div id="profile-placeholder"></div>
 <div id="history-placeholder"></div>
 
-<!-- ENHANCED MARKET MODAL -->
-<div id="richModal" class="modal-overlay modal-rich" style="display:none;" onclick="if(event.target.id === 'richModal') closeMarket()">
-    <div class="modal-container">
-        <div class="modal-header-bar">
-            <div class="modal-header-title">📊 Market Details</div>
-            <button class="modal-close-btn" onclick="closeMarket()" title="Close">✕</button>
-        </div>
-        <div id="modalBody" class="modal-body-content"></div>
-    </div>
-</div>
 <!-- MAIN APP -->
  <main class="dashboard-main">
 
@@ -183,6 +173,15 @@
 </main>
 <main id="matchView" class="match-detail-view" hidden aria-live="polite"></main>
 <main id="sportView" class="sport-detail-view" hidden aria-live="polite"></main>
+<main id="marketDetailView" class="market-detail-view" hidden aria-live="polite">
+    <div class="market-detail-shell">
+        <header class="market-detail-header">
+            <button class="market-detail-back" type="button" onclick="closeMarket()">← All markets</button>
+            <div class="market-detail-heading">Market details</div>
+        </header>
+        <div id="modalBody" class="market-detail-content"></div>
+    </div>
+</main>
 <nav class="mobile-bottom-nav" aria-label="Main navigation">
     <button type="button" class="active" data-mobile-nav="home" aria-current="page" onclick="window.goToAppHome?.()" aria-label="Home">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg><span>Home</span>
