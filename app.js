@@ -329,6 +329,7 @@ function initSocket() {
         if (data?.balance !== undefined) {
             const user = JSON.parse(localStorage.getItem("user_data") || "{}");
             user.balance = data.balance;
+            if (data.welcomeBonusBalance !== undefined) user.welcome_bonus_balance = data.welcomeBonusBalance;
             localStorage.setItem("user_data", JSON.stringify(user));
             renderBalanceDisplay();
         }

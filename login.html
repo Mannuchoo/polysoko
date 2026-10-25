@@ -88,7 +88,7 @@
                 <h1>SOKO NI SOKO! KARIBU POLYSOKO!</h1>
             </div>
 
-            <section class="live-market-window">
+            <section class="live-market-window guest-markets-page">
                 <div class="live-market-header">
                     <h2>Live Markets</h2>
                     <button class="pill active" onclick="scrollToAuth('register')">Join</button>
@@ -98,7 +98,7 @@
                 </div>
             </section>
 
-            <div id="loginBox" class="auth-card auth-card-hidden">
+            <div id="loginBox" class="auth-card auth-route-page" hidden>
                 <h2>Login</h2>
 
                 <input id="phone" type="tel" placeholder="Phone (e.g. 07...)">
@@ -115,10 +115,12 @@
                 <div class="link-text" onclick="toggleAuth()">
                     No account? <span>Register</span>
                 </div>
+                <div class="link-text" onclick="closeAuthPages()">Back to guest markets</div>
             </div>
 
-            <div id="registerBox" class="auth-card auth-card-hidden">
+            <div id="registerBox" class="auth-card auth-route-page register-page" hidden>
                 <h2>Register</h2>
+                <p class="welcome-bonus-banner">New accounts receive a sKES 50 welcome free bet. Use it once on a single hot market. It cannot be withdrawn.</p>
                 <input id="regName" type="text" placeholder="Full Name" autocomplete="name" required>
                 <input id="regEmail" type="email" placeholder="Email" autocomplete="email" required>
                 <input id="regPhone" type="tel" placeholder="Phone Number" autocomplete="tel" required>
@@ -130,6 +132,7 @@
                 <div class="link-text" onclick="toggleAuth()">
                     Already have an account? <span>Login</span>
                 </div>
+                <div class="link-text" onclick="closeAuthPages()">Back to guest markets</div>
             </div>
         </section>
     </main>
@@ -184,16 +187,12 @@
     <script>
         let currentVerifyPhone = '';
 
-        function scrollToAuth(mode = 'login') {
-            const loginBox = document.getElementById("loginBox");
-            const registerBox = document.getElementById("registerBox");
+        function scrollToAuth(mode = 'login', updateHistory = true) {
             const showRegister = mode === 'register';
-            loginBox.classList.toggle("auth-card-hidden", showRegister);
-            registerBox.classList.toggle("auth-card-hidden", !showRegister);
-            const target = showRegister ? registerBox : loginBox;
-            target.scrollIntoView({ behavior: "smooth", block: "center" });
-            target.classList.add("shake-highlight");
-            setTimeout(() => target.classList.remove("shake-highlight"), 900);
+            const target = document.getElementById(showRegister ? 'registerBox' : 'loginBox');
+            hideAuthPage(showRegister ? 'loginBox' : 'registerBox');
+            showAuthPage(target.id);
+            if (updateHistory) history.pushState({ authPage: mode }, '', `#${mode}`);
         }
 
         function showTermsPage() {
@@ -229,15 +228,23 @@
         window.addEventListener('popstate', () => {
             if (location.hash !== '#terms') hideAuthPage('termsPage');
             if (location.hash !== '#forgot-password') hideAuthPage('forgotPasswordModal');
+            if (location.hash !== '#login' && location.hash !== '#register') {
+                hideAuthPage('loginBox');
+                hideAuthPage('registerBox');
+            } else {
+                scrollToAuth(location.hash.slice(1), false);
+            }
         });
 
         function toggleAuth() {
-            const loginBox = document.getElementById("loginBox");
-            const registerBox = document.getElementById("registerBox");
-            const showingLogin = !loginBox.classList.contains("auth-card-hidden");
+            const showingRegister = !document.getElementById('registerBox').hidden;
+            scrollToAuth(showingRegister ? 'login' : 'register');
+        }
 
-            loginBox.classList.toggle("auth-card-hidden", showingLogin);
-            registerBox.classList.toggle("auth-card-hidden", !showingLogin);
+        function closeAuthPages() {
+            hideAuthPage('loginBox');
+            hideAuthPage('registerBox');
+            if (location.hash === '#login' || location.hash === '#register') history.back();
         }
 
         // Check if redirected from verify.html with ?verified=1
@@ -254,6 +261,7 @@
             checkVerifiedRedirect();
             if (location.hash === '#terms') showAuthPage('termsPage');
             if (location.hash === '#forgot-password') showAuthPage('forgotPasswordModal');
+            if (location.hash === '#login' || location.hash === '#register') scrollToAuth(location.hash.slice(1), false);
             if (new URLSearchParams(window.location.search).get('mode') === 'register') scrollToAuth('register');
             if(window.showWelcomeHeader) window.showWelcomeHeader(); 
             console.log("Login module initialized.");

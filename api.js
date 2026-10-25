@@ -444,6 +444,7 @@ window.placeBet = async function(input, side, amount) {
         ? input
         : { marketId: input, outcome: side, amount };
     const stake = Number(order.amount);
+    const useWelcomeBonus = order.fundingSource === 'welcome_bonus';
     if (!order.marketId || !order.outcome || !Number.isFinite(stake) || stake <= 0) {
         alert('Enter a valid selection and stake.');
         return false;
@@ -458,7 +459,12 @@ window.placeBet = async function(input, side, amount) {
         alert('Unable to verify your balance. Refresh your account and try again.');
         return false;
     }
-    if (Number.isFinite(balance) && stake > balance) {
+    const welcomeBalance = Number(user.welcome_bonus_balance || 0);
+    if (useWelcomeBonus && (stake !== 50 || welcomeBalance < 50)) {
+        alert('Your welcome free bet is a single sKES 50 stake and is not available on this account.');
+        return false;
+    }
+    if (!useWelcomeBonus && Number.isFinite(balance) && stake > balance) {
         alert('Insufficient balance for this stake.');
         return false;
     }
@@ -471,12 +477,16 @@ window.placeBet = async function(input, side, amount) {
                 side: order.outcome,
                 amount: stake,
                 price: order.price,
-                contract: order.contract || undefined
+                contract: order.contract || undefined,
+                fundingSource: useWelcomeBonus ? 'welcome_bonus' : 'cash'
             }
         });
 
         if (data.success) {
-            if (Number.isFinite(balance)) {
+            if (useWelcomeBonus) {
+                user.welcome_bonus_balance = Math.max(0, welcomeBalance - stake);
+                localStorage.setItem("user_data", JSON.stringify(user));
+            } else if (Number.isFinite(balance)) {
                 user.balance = Math.max(0, balance - stake);
                 localStorage.setItem("user_data", JSON.stringify(user));
             }
@@ -497,7 +507,7 @@ window.placeBet = async function(input, side, amount) {
 
     } catch (err) {
         console.error("❌ error:", err);
-        alert("Connection error. Please try again.");
+        alert(err?.message || "Connection error. Please try again.");
         return false;
     }
 };

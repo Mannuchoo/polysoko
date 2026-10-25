@@ -38,27 +38,26 @@
 ========================= */
 
 .auth-page {
-    background: radial-gradient(circle at center, #0d1117 0%, #070b10 100%) !important;
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    background: radial-gradient(circle at 15% 0%, #111b21 0%, #070b10 48rem) !important;
+    display: block;
     min-height: 100vh;
     margin: 0;
     font-family: 'Inter', sans-serif;
 }
 
 .login-experience {
-    width: min(980px, 100%);
+    width: min(1280px, 100%);
     min-height: 100vh;
     display: block;
-    padding: 24px;
+    margin: 0 auto;
+    padding: 34px 28px 60px;
 }
 
 .login-panel {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    align-items: center;
+    align-items: stretch;
 }
 
 .login-brand {
@@ -117,19 +116,31 @@
 
 .live-market-window {
     min-width: 0;
-    width: min(100%, 760px);
-    /* Keep the guest preview a fixed, scrollable window so the login form
-       below it stays reachable instead of being pushed down the page. */
-    max-height: 62vh;
-    overflow-y: auto;
-    overflow-x: hidden;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
-    border: 1px solid rgba(0, 255, 136, 0.18);
-    border-radius: 8px;
-    background: rgba(8, 13, 18, 0.88);
-    padding: 18px;
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 12px 0 28px;
+}
+
+.guest-markets-page #marketsList {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+    align-items: stretch;
+    gap: 16px;
+    overflow: visible;
+}
+
+.guest-markets-page .live-market-header {
+    padding: 12px 0;
+    border-bottom: 1px solid rgba(255,255,255,.1);
+    margin-bottom: 18px;
+}
+
+.guest-markets-page .market-card {
+    min-width: 0;
 }
 
 .live-market-window::-webkit-scrollbar {
@@ -178,18 +189,48 @@
 }
 
 @media (max-width: 860px) {
-    .auth-page {
-        align-items: flex-start;
-    }
-
     .login-experience {
-        padding: 72px 16px 16px;
+        padding: 72px 16px 32px;
     }
+}
 
-    .live-market-window {
-        /* Keep it scrollable on phones too, just a little shorter. */
-        max-height: 52vh;
-    }
+.auth-route-page.auth-card {
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    min-height: 100vh;
+    justify-content: center;
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+    background: #070b10;
+    margin: 0;
+    padding: 48px max(24px, calc((100vw - 560px) / 2));
+}
+
+.auth-route-page.auth-card h2,
+.auth-route-page.auth-card input,
+.auth-route-page.auth-card button,
+.auth-route-page.auth-card .link-text,
+.auth-route-page.auth-card .welcome-bonus-banner {
+    width: 100%;
+    max-width: 560px;
+    align-self: center;
+}
+
+.auth-route-page.auth-card .link-text {
+    text-align: center;
+}
+
+.register-page .welcome-bonus-banner {
+    color: #bcebd4;
+    background: rgba(0,255,136,.08);
+    border: 1px solid rgba(0,255,136,.24);
+    border-radius: 12px;
+    padding: 13px 15px;
+    line-height: 1.5;
+    margin: -8px 0 18px;
+    text-align: center;
 }
 
 .auth-card {

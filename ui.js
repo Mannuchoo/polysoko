@@ -2508,9 +2508,59 @@ window.openBetModal = function (marketId, title, pick, price = null, contract = 
 
     const input = document.getElementById('bet-amount-input');
     if (input) input.value = 10;
+    const promoToggle = document.getElementById('use-welcome-free-bet');
+    const promoOption = document.getElementById('welcome-free-bet-option');
+    const hotChoice = document.getElementById('welcome-hot-market-choice');
+    const account = JSON.parse(localStorage.getItem('user_data') || '{}');
+    if (promoToggle) promoToggle.checked = false;
+    if (promoOption) promoOption.style.display = Number(account.welcome_bonus_balance || 0) >= 50 ? 'block' : 'none';
+    if (hotChoice) { hotChoice.hidden = true; hotChoice.innerHTML = ''; }
+    if (input) input.disabled = false;
 
     const modal = document.getElementById('bet-modal');
     if (modal) modal.style.display = 'flex';
+};
+window.toggleWelcomeFreeBet = async function(toggle) {
+    const input = document.getElementById('bet-amount-input');
+    const choice = document.getElementById('welcome-hot-market-choice');
+    if (!input) return;
+    input.disabled = !!toggle?.checked;
+    input.value = toggle?.checked ? '50' : '10';
+    if (!choice) return;
+    choice.hidden = !toggle?.checked;
+    if (!toggle?.checked) return;
+    choice.innerHTML = '<option value="">Loading hot markets…</option>';
+    try {
+        const response = await apiFetch('free-bet/hot-markets');
+        choice.innerHTML = '<option value="">Choose a market and outcome</option>';
+        for (const market of response?.markets || []) {
+            for (const outcome of market.outcomes || []) {
+                const option = document.createElement('option');
+                option.value = JSON.stringify({ marketId: market.id, title: market.title, key: outcome.key, label: outcome.label, odds: outcome.odds });
+                option.textContent = `${market.title} · ${outcome.label} @ ${Number(outcome.odds).toFixed(2)}`;
+                choice.appendChild(option);
+            }
+        }
+        if (choice.options.length <= 1) choice.innerHTML = '<option value="">No eligible hot markets right now</option>';
+    } catch (error) {
+        choice.innerHTML = '<option value="">Could not load hot markets. Try again.</option>';
+        alert(error?.message || 'Hot markets could not be loaded.');
+    }
+};
+window.selectWelcomeHotMarket = function(select) {
+    if (!select?.value || !pendingBet) return;
+    try {
+        const picked = JSON.parse(select.value);
+        pendingBet.marketId = picked.marketId;
+        pendingBet.title = picked.title;
+        pendingBet.pick = picked.key;
+        pendingBet.price = Number(picked.odds);
+        pendingBet.contract = null;
+        const title = document.getElementById('modal-market-title');
+        const pick = document.getElementById('modal-pick-display');
+        if (title) title.textContent = pendingBet.title;
+        if (pick) pick.textContent = `Your Pick: ${picked.label} · Odds @${pendingBet.price.toFixed(2)}`;
+    } catch { /* Ignore a malformed selection. The server validates the final bet. */ }
 };
 function closeBetModal() {
     const modal = document.getElementById("bet-modal");
@@ -2525,10 +2575,26 @@ async function processConfirmedBet() {
 
     const amountInput = document.getElementById('bet-amount-input');
     const amount = parseFloat(amountInput.value);
+    const useWelcomeBonus = !!document.getElementById('use-welcome-free-bet')?.checked;
 
     if (!amount || amount <= 0) {
         alert("Please enter a valid amount");
         return;
+    }
+    if (useWelcomeBonus) {
+        if (amount !== 50) { alert('The welcome free bet must be used as a single sKES 50 stake.'); return; }
+        try {
+            const result = await apiFetch('free-bet/hot-markets');
+            const market = (result?.markets || []).find(item => String(item.id) === String(pendingBet.marketId));
+            const quote = Number(pendingBet.contract?.price ?? pendingBet.price ?? market?.outcomes?.find(item => item.key === pendingBet.pick)?.odds);
+            if (!market || !Number.isFinite(quote) || quote < 1.5 || quote > 5) {
+                alert('Choose a current hot market with eligible odds to use your welcome free bet.');
+                return;
+            }
+        } catch (error) {
+            alert(error?.message || 'Hot markets could not be checked. Please try again.');
+            return;
+        }
     }
 
     const btn = document.getElementById('confirm-proceed-btn');
@@ -2541,7 +2607,8 @@ async function processConfirmedBet() {
             outcome: pendingBet.pick,
             amount,
             price: pendingBet.price,
-            contract: pendingBet.contract
+            contract: pendingBet.contract,
+            fundingSource: useWelcomeBonus ? 'welcome_bonus' : 'cash'
         });
 
         if (succeeded) {
