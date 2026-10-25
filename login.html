@@ -33,6 +33,10 @@
         .referral-reward-note { display:block; color:#94a0ab; font-size:.76rem; line-height:1.5; margin:-7px 0 8px; }
         .terms-page[hidden] { display:none !important; }
         .terms-page { display:block; min-height:100vh; width:100%; padding:clamp(20px,4vw,52px) clamp(16px,5vw,72px); background:#070b10; color:#e6edf3; }
+        body.terms-page-open .login-experience,
+        body.terms-page-open .auth-launcher,
+        body.terms-page-open > a[href="./stay.html"] { display:none !important; }
+        body.terms-page-open #termsPage { min-height:100vh; }
         .terms-shell { width:min(1000px,100%); margin:0 auto; }
         .terms-page-header { padding-bottom:20px; border-bottom:1px solid rgba(255,255,255,.12); }
         .terms-page-header h1 { margin:22px 0 8px; color:#00ff88; font-size:clamp(1.5rem,4vw,2.2rem); }
@@ -238,9 +242,16 @@
             if (!isValidEmail(email)) return alert("Enter a valid email address.");
             if (pass !== confirm) return alert("Passwords do not match.");
             if (pass.length < 8) return alert("Password must be at least 8 characters long.");
+            showTermsDocument(true);
+        }
+
+        function showTermsDocument(updateHistory = false) {
+            hideAuthPage('loginBox');
             hideAuthPage('registerBox');
+            document.body.classList.add('terms-page-open');
             document.getElementById('termsPage').hidden = false;
-            history.pushState({ authPage: 'terms' }, '', '#terms');
+            document.title = 'PolySoko | Terms and Conditions';
+            if (updateHistory) history.pushState({ authPage: 'terms' }, '', '#terms');
         }
 
         function togglePasswordVisibility(inputId, button) {
@@ -255,7 +266,10 @@
 
         function closeTermsPage() {
             document.getElementById('termsPage').hidden = true;
+            document.body.classList.remove('terms-page-open');
+            document.title = 'PolySoko | Login';
             if (location.hash === '#terms') history.back();
+            else scrollToAuth('register', false);
         }
 
         function isValidEmail(value) { return /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(String(value || '').trim()); }
@@ -270,7 +284,12 @@
         }
 
         window.addEventListener('popstate', () => {
-            if (location.hash !== '#terms') hideAuthPage('termsPage');
+            if (location.hash === '#terms') showTermsDocument(false);
+            else {
+                hideAuthPage('termsPage');
+                document.body.classList.remove('terms-page-open');
+                document.title = 'PolySoko | Login';
+            }
             if (location.hash !== '#forgot-password') hideAuthPage('forgotPasswordModal');
             if (location.hash !== '#login' && location.hash !== '#register') {
                 hideAuthPage('loginBox');
@@ -303,7 +322,7 @@
 
         document.addEventListener("DOMContentLoaded", async () => { 
             checkVerifiedRedirect();
-            if (location.hash === '#terms') showAuthPage('termsPage');
+            if (location.hash === '#terms') showTermsDocument(false);
             if (location.hash === '#forgot-password') showAuthPage('forgotPasswordModal');
             if (location.hash === '#login' || location.hash === '#register') scrollToAuth(location.hash.slice(1), false);
             if (new URLSearchParams(window.location.search).get('mode') === 'register') scrollToAuth('register');
@@ -474,6 +493,9 @@
                         : "Account created! Please check your email to verify your account. A verification link has been sent to " + payload.email);
                     currentVerifyPhone = payload.phone;
                     hideAuthPage('termsPage');
+                    document.body.classList.remove('terms-page-open');
+                    document.title = 'PolySoko | Login';
+                    if (location.hash === '#terms') history.replaceState({ authPage: 'register' }, '', '#register');
                     showAuthPage('verifyModal');
                     toggleAuth();
                     return;
