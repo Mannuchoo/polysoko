@@ -2204,6 +2204,16 @@ function normalizeEmailAddress(value) {
     return email || null;
 }
 
+function isValidEmailAddress(value) {
+    const email = String(value || '').trim();
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email)) return false;
+    const [local, domain] = email.split('@');
+    if (!local || local.length > 64 || domain.length > 253 || domain.startsWith('.') || domain.endsWith('.')) return false;
+    return domain.split('.').every((label) => label.length > 0 && label.length <= 63
+        && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))
+        && domain.includes('.') && /[a-z]{2,}$/i.test(domain);
+}
+
 function htmlToEmailText(html) {
     return String(html || '')
         .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -5483,12 +5493,18 @@ app.get('/api/user/context', async (req, res) => {
     }
 });
 app.post('/api/register', authLimiter, async (req, res) => {
-    const { name, phone, password, email, referralCode } = req.body;
+    const { name, phone, password, email, referralCode, termsAccepted } = req.body;
     const normalized = normalizePhone(phone);
     const normalizedEmail = normalizeEmailAddress(email)?.toLowerCase();
     try {
-        if (!name || !normalizedEmail || !normalized) {
+        if (!String(name || '').trim() || !normalizedEmail || !normalized) {
             return res.status(400).json({ success: false, message: "Name, email, and phone are required." });
+        }
+        if (!isValidEmailAddress(normalizedEmail)) {
+            return res.status(400).json({ success: false, message: "Enter a valid email address." });
+        }
+        if (Number(termsAccepted) !== 1) {
+            return res.status(400).json({ success: false, message: "You must agree to the Terms and Conditions to proceed." });
         }
         if (!password || password.length < 8) {
             return res.status(400).json({ success: false, message: "Password must be at least 8 characters long." });
@@ -5498,7 +5514,7 @@ app.post('/api/register', authLimiter, async (req, res) => {
         }
 
         const existing = await dbGet(
-            `SELECT phone, email FROM users WHERE phone = ? OR LOWER(email) = LOWER(?) LIMIT 1`,
+            `SELECT phone, email FROM users WHERE COALESCE(status, 'verified') <> 'deleted' AND (phone = ? OR LOWER(email) = LOWER(?)) LIMIT 1`,
             [normalized, normalizedEmail]
         );
         if (existing) {
@@ -5516,8 +5532,8 @@ app.post('/api/register', authLimiter, async (req, res) => {
         const myReferralCode = crypto.randomBytes(3).toString('hex').toUpperCase();
         const verificationToken = crypto.randomBytes(32).toString('hex');
 
-        db.run(`INSERT INTO users (name, phone, password, email, referral_code, referred_by, verification_token, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified')`,
-            [name, normalized, hashedPassword, normalizedEmail, myReferralCode, referralCode || null, verificationToken], async function(err) {
+        db.run(`INSERT INTO users (name, phone, password, email, referral_code, referred_by, verification_token, status, terms_accepted) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified', 1)`,
+            [String(name).trim(), normalized, hashedPassword, normalizedEmail, myReferralCode, referralCode || null, verificationToken], async function(err) {
                 if (err) {
                     console.error("Registration insert failed:", err.message || err);
                     const isUniqueFailure = err.code === '23505' || /unique|constraint|duplicate/i.test(err.message || '');
@@ -5536,9 +5552,10 @@ app.post('/api/register', authLimiter, async (req, res) => {
                      <p><a href="${verifyLink}" style="display:inline-block;padding:12px 18px;background:#00ff88;color:#020405;text-decoration:none;border-radius:8px;font-weight:bold;">Verify Account</a></p>
                      <p>If the button does not open, paste this link into your browser:<br><span style="word-break:break-all;">${verifyLink}</span></p>`);
                 if (!mailResult.success) {
-                    return res.status(503).json({
-                        success: false,
+                    return res.status(200).json({
+                        success: true,
                         accountCreated: true,
+                        verificationEmailSent: false,
                         message: mailFailureMessage(mailResult, "Account created, but the verification email could not be sent. Please try resending it shortly.")
                     });
                 }
@@ -5555,7 +5572,7 @@ app.post('/api/register', authLimiter, async (req, res) => {
                         }
                     });
                 }
-                res.json({ success: true });
+                res.json({ success: true, accountCreated: true, verificationEmailSent: true });
             }
         );
     } catch (e) { res.status(500).json({ success: false }); }

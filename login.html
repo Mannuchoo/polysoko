@@ -17,12 +17,16 @@
     <style>
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
-        .modal-overlay .auth-card { animation: fadeIn 0.3s ease; }
+        .auth-route-page { position: fixed; inset: 0; z-index: 11000; display: flex; overflow-y: auto; justify-content: center; align-items: flex-start; padding: 24px 14px; background: #070b10; }
+        .auth-route-page[hidden] { display: none !important; }
+        .auth-route-page .auth-card { animation: fadeIn 0.3s ease; width: min(750px, 100%); max-height: none; margin: auto; }
+        .auth-route-page .auth-card input:not([type=checkbox]) { width: 100%; }
+        .terms-content { background:#000; padding:25px; border-radius:12px; border:1px solid #333; font-size:.85rem; text-align:left; color:#aaa; margin:10px 0 20px; line-height:1.7; }
     </style>
 </head>
 <body class="auth-page">
-    <!-- Forgot Password Modal -->
-    <div id="forgotPasswordModal" class="modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:6000; justify-content:center; align-items:center; backdrop-filter:blur(8px);">
+    <!-- Auth pages: password reset, verification, welcome, and device notices -->
+    <div id="forgotPasswordModal" class="auth-route-page" hidden>
         <div class="auth-card" style="position:relative;">
             <button onclick="closeForgotModal()" style="position:absolute; top:15px; right:15px; background:none; border:none; color:#888; font-size:1.2rem; cursor:pointer;" aria-label="Close reset dialog">x</button>
             <h2 style="margin-bottom:10px;">Reset Access</h2>
@@ -33,8 +37,8 @@
         </div>
     </div>
 
-    <!-- Welcome Modal (shown after successful verification from email link) -->
-    <div id="welcomeModal" class="modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.92); z-index:7000; justify-content:center; align-items:center; backdrop-filter:blur(10px);">
+    <!-- Welcome page shown after successful verification from email link -->
+    <div id="welcomeModal" class="auth-route-page" hidden>
         <div class="auth-card" style="max-width:420px; text-align:center;">
             <div style="width:80px;height:80px;background:linear-gradient(135deg,#00ff88,#00cc66);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:2.5rem;box-shadow:0 0 30px rgba(0,255,136,0.3);">🎉</div>
             <h2 style="color:#00ff88;margin-bottom:10px;">Welcome to PolySoko!</h2>
@@ -52,8 +56,8 @@
         </div>
     </div>
 
-    <!-- Verification Resend Modal (shown when login fails with needsVerification) -->
-    <div id="verifyModal" class="modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.92); z-index:7000; justify-content:center; align-items:center; backdrop-filter:blur(10px);">
+    <!-- Verification page shown when login needs email verification -->
+    <div id="verifyModal" class="auth-route-page" hidden>
         <div class="auth-card" style="max-width:420px; text-align:center;">
             <div style="width:80px;height:80px;background:linear-gradient(135deg,#ff8800,#cc6600);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:2.5rem;box-shadow:0 0 30px rgba(255,136,0,0.3);">📧</div>
             <h2 style="color:#ff8800;margin-bottom:10px;">Email Not Verified</h2>
@@ -63,8 +67,8 @@
         </div>
     </div>
 
-    <!-- New Device Login Modal -->
-    <div id="newDeviceModal" class="modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.92); z-index:7000; justify-content:center; align-items:center; backdrop-filter:blur(10px);">
+    <!-- New device security page -->
+    <div id="newDeviceModal" class="auth-route-page" hidden>
         <div class="auth-card" style="max-width:420px; text-align:center;">
             <div style="width:80px;height:80px;background:linear-gradient(135deg,#00aaff,#0066cc);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:2.5rem;box-shadow:0 0 30px rgba(0,170,255,0.3);">🔐</div>
             <h2 style="color:#00aaff;margin-bottom:10px;">New Device Detected</h2>
@@ -115,12 +119,13 @@
 
             <div id="registerBox" class="auth-card auth-card-hidden">
                 <h2>Register</h2>
-                <input id="regName" type="text" placeholder="Full Name">
-                <input id="regEmail" type="email" placeholder="Email">
-                <input id="regPhone" type="tel" placeholder="Phone Number">
-                <input id="regPassword" type="password" placeholder="Create Password">
+                <input id="regName" type="text" placeholder="Full Name" autocomplete="name" required>
+                <input id="regEmail" type="email" placeholder="Email" autocomplete="email" required>
+                <input id="regPhone" type="tel" placeholder="Phone Number" autocomplete="tel" required>
+                <input id="regPassword" type="password" placeholder="Create Password" autocomplete="new-password" minlength="8" required>
+                <input id="regConfirmPassword" type="password" placeholder="Confirm Password" autocomplete="new-password" minlength="8" required>
                 <input id="regReferral" type="text" placeholder="Referral Code (Optional)">
-                <button class="btn-reg" onclick="showTermsModal()">Create Account</button>
+                <button class="btn-reg" onclick="showTermsPage()">Create Account</button>
 
                 <div class="link-text" onclick="toggleAuth()">
                     Already have an account? <span>Login</span>
@@ -128,13 +133,13 @@
             </div>
         </section>
     </main>
-    <!-- T&C Modal -->
-    <div id="termsModal" class="modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:6000; justify-content:center; align-items:center; backdrop-filter:blur(10px);">
-        <div class="auth-card" style="max-width:750px; width:95%; max-height: 95vh; display: flex; flex-direction: column; padding: 30px;">
+    <!-- Full-page Terms and Conditions route -->
+    <div id="termsPage" class="auth-route-page" hidden>
+        <div class="auth-card" style="display:flex; flex-direction:column; padding:30px;">
             <h2 style="color: #00ff88; font-size:1.5rem; margin-bottom: 5px;">Terms of Service & Legal Compliance</h2>
             <p style="color: #666; font-size: 0.75rem; margin-bottom: 15px;">Please read carefully before joining the PolySoko Network.</p>
             
-            <div id="tcScroll" style="background: #000; flex: 1; overflow-y: auto; padding: 25px; border-radius: 12px; border: 1px solid #333; font-size: 0.85rem; text-align: left; color: #aaa; margin-bottom: 20px; line-height: 1.7;">
+            <div id="tcScroll" class="terms-content">
                 <strong style="color:white;">POLYSOKO - TERMS AND CONDITIONS OF USE</strong><br>
                 <small>Effective Date: May 17, 2026</small><br><br>
                 
@@ -166,8 +171,8 @@
                 </label>
             </div>
             <div style="display: flex; gap: 10px;">
-                <button class="btn-reg" onclick="register()" style="flex: 2;">Agree & Finalize</button>
-                <button class="btn-login" onclick="closeTermsModal()" style="flex: 1; background: #333;">Cancel</button>
+                <button class="btn-reg" onclick="register()" style="flex: 2;">Agree & Create Account</button>
+                <button class="btn-login" onclick="closeTermsPage()" style="flex: 1; background: #333;">Back</button>
             </div>
         </div>
     </div>
@@ -191,18 +196,40 @@
             setTimeout(() => target.classList.remove("shake-highlight"), 900);
         }
 
-        function showTermsModal() {
+        function showTermsPage() {
             const name = document.getElementById('regName').value.trim();
             const phone = document.getElementById('regPhone').value.trim();
             const email = document.getElementById('regEmail').value.trim();
             const pass = document.getElementById('regPassword').value;
-            if(!name || !phone || !email || !pass) return alert("Please fill in all registration fields first");
-            document.getElementById('termsModal').style.display = 'flex';
+            const confirm = document.getElementById('regConfirmPassword').value;
+            if(!name || !phone || !email || !pass || !confirm) return alert("Please fill in all registration fields first");
+            if (!isValidEmail(email)) return alert("Enter a valid email address.");
+            if (pass !== confirm) return alert("Passwords do not match.");
+            if (pass.length < 8) return alert("Password must be at least 8 characters long.");
+            document.getElementById('termsPage').hidden = false;
+            history.pushState({ authPage: 'terms' }, '', '#terms');
         }
 
-        function closeTermsModal() {
-            document.getElementById('termsModal').style.display = 'none';
+        function closeTermsPage() {
+            document.getElementById('termsPage').hidden = true;
+            if (location.hash === '#terms') history.back();
         }
+
+        function isValidEmail(value) { return /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(String(value || '').trim()); }
+
+        function showAuthPage(id) {
+            const page = document.getElementById(id);
+            if (page) page.hidden = false;
+        }
+        function hideAuthPage(id) {
+            const page = document.getElementById(id);
+            if (page) page.hidden = true;
+        }
+
+        window.addEventListener('popstate', () => {
+            if (location.hash !== '#terms') hideAuthPage('termsPage');
+            if (location.hash !== '#forgot-password') hideAuthPage('forgotPasswordModal');
+        });
 
         function toggleAuth() {
             const loginBox = document.getElementById("loginBox");
@@ -217,7 +244,7 @@
         function checkVerifiedRedirect() {
             const urlParams = new URLSearchParams(window.location.search);
             if (urlParams.get('verified') === '1') {
-                document.getElementById('welcomeModal').style.display = 'flex';
+                showAuthPage('welcomeModal');
                 // Clean the URL
                 window.history.replaceState({}, document.title, 'login.html');
             }
@@ -225,6 +252,8 @@
 
         document.addEventListener("DOMContentLoaded", async () => { 
             checkVerifiedRedirect();
+            if (location.hash === '#terms') showAuthPage('termsPage');
+            if (location.hash === '#forgot-password') showAuthPage('forgotPasswordModal');
             if (new URLSearchParams(window.location.search).get('mode') === 'register') scrollToAuth('register');
             if(window.showWelcomeHeader) window.showWelcomeHeader(); 
             console.log("Login module initialized.");
@@ -299,7 +328,7 @@
                 if (data.needsVerification) {
                     currentVerifyPhone = phone;
                     document.getElementById('verifyModalMsg').textContent = data.message || 'Please verify your email address before logging in. Check your inbox (including spam) for the verification link.';
-                    document.getElementById('verifyModal').style.display = 'flex';
+                    showAuthPage('verifyModal');
                     return;
                 }
 
@@ -369,22 +398,31 @@
                 return;
             }
 
-            if (!payload.name || !payload.phone || !payload.password) {
+            if (!payload.name || !payload.phone || !payload.email || !payload.password) {
                 alert("Missing required fields");
                 return;
             }
+
+            if (!isValidEmail(payload.email)) { alert("Enter a valid email address."); return; }
+            if (payload.password !== document.getElementById('regConfirmPassword').value) { alert("Passwords do not match."); return; }
 
             if (payload.password.length < 8) {
                 alert("Password must be at least 8 characters long");
                 return;
             }
 
+            const submitButton = document.querySelector('#termsPage .btn-reg');
+            if (submitButton?.disabled) return;
+            if (submitButton) { submitButton.disabled = true; submitButton.textContent = 'Creating account…'; }
             try {
                 const data = await API.register(payload);
                 if (data.success) {
-                    document.getElementById('verifyModalMsg').textContent = "Account created! Please check your email to verify your account. A verification link has been sent to " + payload.email;
+                    document.getElementById('verifyModalMsg').textContent = data.message || (data.verificationEmailSent === false
+                        ? 'Your account was created, but the verification email could not be sent. Please try resending it.'
+                        : "Account created! Please check your email to verify your account. A verification link has been sent to " + payload.email);
                     currentVerifyPhone = payload.phone;
-                    document.getElementById('verifyModal').style.display = 'flex';
+                    hideAuthPage('termsPage');
+                    showAuthPage('verifyModal');
                     toggleAuth();
                     return;
                 }
@@ -393,28 +431,32 @@
             } catch (err) {
                 console.error("Register error:", err);
                 alert(err.message || "Server error. Check connection.");
+            } finally {
+                if (submitButton) { submitButton.disabled = false; submitButton.textContent = 'Agree & Create Account'; }
             }
         }
 
         function closeWelcomeModal() {
-            document.getElementById('welcomeModal').style.display = 'none';
+            hideAuthPage('welcomeModal');
         }
 
         function closeVerifyModal() {
-            document.getElementById('verifyModal').style.display = 'none';
+            hideAuthPage('verifyModal');
         }
 
         function closeNewDeviceModal() {
-            document.getElementById('newDeviceModal').style.display = 'none';
+            hideAuthPage('newDeviceModal');
         }
 
         function forgotPassword() {
-            document.getElementById('forgotPasswordModal').style.display = 'flex';
+            showAuthPage('forgotPasswordModal');
+            history.pushState({ authPage: 'forgot-password' }, '', '#forgot-password');
             if(window.showWelcomeHeader) window.showWelcomeHeader();
         }
 
         function closeForgotModal() {
-            document.getElementById('forgotPasswordModal').style.display = 'none';
+            hideAuthPage('forgotPasswordModal');
+            if (location.hash === '#forgot-password') history.back();
         }
 
         async function submitForgotRequest() {
