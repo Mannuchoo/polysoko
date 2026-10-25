@@ -525,6 +525,7 @@ window.router = function router() {
     window.updateMobileBottomNav?.();
     const match = window.location.hash.match(/^#match\/(.+)$/);
     const marketRoute = window.location.hash.match(/^#market\/(.+)$/);
+    const categoryRoute = window.location.hash.match(/^#category\/([^/]+)$/);
     const sportsRoute = window.location.hash.match(/^#sports(?:\/([^/]+))?$/);
     const sportRoute = window.location.hash.match(/^#sport\/([^/]+)$/);
     const view = document.getElementById('matchView');
@@ -532,13 +533,29 @@ window.router = function router() {
     const dashboard = document.querySelector('.dashboard-main');
     const utilityView = document.getElementById('utilityView');
     const marketView = document.getElementById('marketDetailView');
+    const categoryView = document.getElementById('categoryView');
     const utilityRoute = window.location.hash.match(/^#(chat|history|notifications|profile|funds)$/)?.[1];
     restoreUtilityElements();
+    if (categoryRoute) {
+        if (dashboard) dashboard.hidden = true;
+        if (utilityView) utilityView.hidden = true;
+        if (sportView) sportView.hidden = true;
+        if (view) view.hidden = true;
+        if (marketView) marketView.hidden = true;
+        if (categoryView) categoryView.hidden = false;
+        document.body.classList.add('category-route-open');
+        document.body.classList.remove('utility-route-open', 'match-view-open', 'market-detail-open');
+        window.renderCategoryRoute?.(decodeURIComponent(categoryRoute[1]));
+        return;
+    }
+    if (categoryView) categoryView.hidden = true;
+    document.body.classList.remove('category-route-open');
     if (marketRoute) {
         if (dashboard) dashboard.hidden = true;
         if (utilityView) utilityView.hidden = true;
         if (sportView) sportView.hidden = true;
         if (view) view.hidden = true;
+        if (categoryView) categoryView.hidden = true;
         if (marketView) marketView.hidden = false;
         document.body.classList.add('market-detail-open');
         document.body.classList.remove('utility-route-open', 'match-view-open');
@@ -551,6 +568,7 @@ window.router = function router() {
         if (dashboard) dashboard.hidden = true;
         if (utilityView) utilityView.hidden = true;
         if (sportView) sportView.hidden = true;
+        if (categoryView) categoryView.hidden = true;
         if (view) view.hidden = false;
         document.body.classList.remove('utility-route-open');
         window.renderMatchView?.(decodeURIComponent(match[1]));
@@ -562,6 +580,7 @@ window.router = function router() {
         if (dashboard) dashboard.hidden = true;
         if (utilityView) utilityView.hidden = true;
         if (view) view.hidden = true;
+        if (categoryView) categoryView.hidden = true;
         if (sportView) sportView.hidden = false;
         document.body.classList.remove('utility-route-open', 'match-view-open');
         window.renderSportsRoute?.(decodeURIComponent(selectedSportRoute));
@@ -571,6 +590,7 @@ window.router = function router() {
     if (sportsRoute) {
         if (dashboard) dashboard.hidden = false;
         if (utilityView) utilityView.hidden = true;
+        if (categoryView) categoryView.hidden = true;
         document.body.classList.remove('utility-route-open', 'match-view-open');
         window.state.category = 'sports';
         window.state.sportsType = '';
@@ -595,6 +615,7 @@ window.router = function router() {
     document.body.classList.remove('utility-route-open');
     if (dashboard) dashboard.hidden = false;
     document.body.classList.remove('match-view-open');
+    window.applyStateAndRender?.();
 };
 window.addEventListener('hashchange', window.router);
 

@@ -13,7 +13,7 @@
     <meta property="og:title" content="PolySoko">
     <meta property="og:image" content="https://polysoko.online/icon-512.png">
     <script src="dialogs.js?v=1"></script>
-    <link rel="stylesheet" href="style.css?v=13">
+    <link rel="stylesheet" href="style.css?v=14">
     <style>
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
@@ -21,7 +21,27 @@
         .auth-route-page[hidden] { display: none !important; }
         .auth-route-page .auth-card { animation: fadeIn 0.3s ease; width: min(750px, 100%); max-height: none; margin: auto; }
         .auth-route-page .auth-card input:not([type=checkbox]) { width: 100%; }
-        .terms-content { background:#000; padding:25px; border-radius:12px; border:1px solid #333; font-size:.85rem; text-align:left; color:#aaa; margin:10px 0 20px; line-height:1.7; }
+        .password-input-wrap { position:relative; width:100%; }
+        .auth-route-page.auth-card .password-input-wrap { width:min(560px,100%); align-self:center; margin-bottom:15px; }
+        .auth-route-page.auth-card .password-input-wrap input { width:100%; max-width:none; align-self:stretch; margin:0; padding-right:52px !important; }
+        .password-visibility-toggle { position:absolute; top:50%; right:12px; transform:translateY(-50%); display:grid; place-items:center; width:34px; height:34px; border:0; border-radius:7px; background:transparent; color:#a8b3bd; cursor:pointer; }
+        .password-visibility-toggle:hover { color:#00ff88; background:rgba(0,255,136,.08); }
+        .password-visibility-toggle:focus-visible { outline:2px solid #00ff88; outline-offset:2px; }
+        .password-visibility-toggle svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+        .auth-route-page.auth-card .password-input-wrap .password-visibility-toggle { width:34px; max-width:none; height:34px; align-self:auto; margin:0; padding:0; border:0; border-radius:7px; background:transparent; color:#a8b3bd; box-shadow:none; transform:translateY(-50%); }
+        .auth-route-page.auth-card .password-input-wrap .password-visibility-toggle:hover { background:rgba(0,255,136,.08); color:#00ff88; box-shadow:none; transform:translateY(-50%); }
+        .referral-reward-note { display:block; color:#94a0ab; font-size:.76rem; line-height:1.5; margin:-7px 0 8px; }
+        .terms-page[hidden] { display:none !important; }
+        .terms-page { display:block; min-height:100vh; width:100%; padding:clamp(20px,4vw,52px) clamp(16px,5vw,72px); background:#070b10; color:#e6edf3; }
+        .terms-shell { width:min(1000px,100%); margin:0 auto; }
+        .terms-page-header { padding-bottom:20px; border-bottom:1px solid rgba(255,255,255,.12); }
+        .terms-page-header h1 { margin:22px 0 8px; color:#00ff88; font-size:clamp(1.5rem,4vw,2.2rem); }
+        .terms-page-header p { margin:0; color:#98a5b2; font-size:.9rem; }
+        .terms-back-button { border:1px solid #2a3540; background:#111820; color:#e6edf3; border-radius:8px; padding:10px 13px; cursor:pointer; }
+        .terms-document { padding:24px 0 18px; font-size:.94rem; text-align:left; color:#c0c8d0; line-height:1.8; }
+        .terms-document strong { line-height:1.9; }
+        .terms-document + div { max-width:1000px; }
+        .terms-page .btn-reg, .terms-page .btn-login { min-height:46px; }
     </style>
 </head>
 <body class="auth-page">
@@ -102,7 +122,10 @@
                 <h2>Login</h2>
 
                 <input id="phone" type="tel" placeholder="Phone (e.g. 07...)">
-                <input id="password" type="password" placeholder="Password">
+                <div class="password-input-wrap">
+                    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+                    <button type="button" class="password-visibility-toggle" onclick="togglePasswordVisibility('password', this)" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                </div>
 
                 <button class="btn-login" onclick="login()" id="loginBtn">
                     Login
@@ -124,9 +147,16 @@
                 <input id="regName" type="text" placeholder="Full Name" autocomplete="name" required>
                 <input id="regEmail" type="email" placeholder="Email" autocomplete="email" required>
                 <input id="regPhone" type="tel" placeholder="Phone Number" autocomplete="tel" required>
-                <input id="regPassword" type="password" placeholder="Create Password" autocomplete="new-password" minlength="8" required>
-                <input id="regConfirmPassword" type="password" placeholder="Confirm Password" autocomplete="new-password" minlength="8" required>
+                <div class="password-input-wrap">
+                    <input id="regPassword" type="password" placeholder="Create Password" autocomplete="new-password" minlength="8" required>
+                    <button type="button" class="password-visibility-toggle" onclick="togglePasswordVisibility('regPassword', this)" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                </div>
+                <div class="password-input-wrap">
+                    <input id="regConfirmPassword" type="password" placeholder="Confirm Password" autocomplete="new-password" minlength="8" required>
+                    <button type="button" class="password-visibility-toggle" onclick="togglePasswordVisibility('regConfirmPassword', this)" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                </div>
                 <input id="regReferral" type="text" placeholder="Referral Code (Optional)">
+                <small class="referral-reward-note">A valid referral code rewards your inviter. Your sKES 50 welcome free bet is awarded separately.</small>
                 <button class="btn-reg" onclick="showTermsPage()">Create Account</button>
 
                 <div class="link-text" onclick="toggleAuth()">
@@ -136,13 +166,16 @@
             </div>
         </section>
     </main>
-    <!-- Full-page Terms and Conditions route -->
-    <div id="termsPage" class="auth-route-page" hidden>
-        <div class="auth-card" style="display:flex; flex-direction:column; padding:30px;">
-            <h2 style="color: #00ff88; font-size:1.5rem; margin-bottom: 5px;">Terms of Service & Legal Compliance</h2>
-            <p style="color: #666; font-size: 0.75rem; margin-bottom: 15px;">Please read carefully before joining the PolySoko Network.</p>
+    <!-- Terms is a normal document page in the login flow, not a modal overlay. -->
+    <main id="termsPage" class="terms-page" hidden>
+        <div class="terms-shell">
+            <header class="terms-page-header">
+                <button class="terms-back-button" type="button" onclick="closeTermsPage()">← Back to registration</button>
+                <h1>Terms of Service &amp; Legal Compliance</h1>
+                <p>Please read carefully before joining the PolySoko Network.</p>
+            </header>
             
-            <div id="tcScroll" class="terms-content">
+            <article id="tcScroll" class="terms-document">
                 <strong style="color:white;">POLYSOKO - TERMS AND CONDITIONS OF USE</strong><br>
                 <small>Effective Date: May 17, 2026</small><br><br>
                 
@@ -166,7 +199,7 @@
 
                 <strong style="color:#00ff88;">9. LIMITATION OF LIABILITY</strong><br>
                 We are not responsible for technical latency, 429 rate limit exceptions, or data inaccuracies from third-party API providers like NewsAPI or API-Football.
-            </div>
+            </article>
             <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 20px; background: rgba(0,255,136,0.1); padding: 15px; border-radius: 12px; border: 1px solid #00ff88;">
                 <input type="checkbox" id="termsCheck" style="width: 25px; height: 25px; accent-color: #00ff88; cursor:pointer;">
                 <label for="termsCheck" style="font-size: 0.85rem; color: white; cursor:pointer; font-weight: bold;">
@@ -178,7 +211,7 @@
                 <button class="btn-login" onclick="closeTermsPage()" style="flex: 1; background: #333;">Back</button>
             </div>
         </div>
-    </div>
+    </main>
 
     <script src="api.js?v=13"></script>
     <script src="ui.js?v=14"></script>
@@ -205,8 +238,19 @@
             if (!isValidEmail(email)) return alert("Enter a valid email address.");
             if (pass !== confirm) return alert("Passwords do not match.");
             if (pass.length < 8) return alert("Password must be at least 8 characters long.");
+            hideAuthPage('registerBox');
             document.getElementById('termsPage').hidden = false;
             history.pushState({ authPage: 'terms' }, '', '#terms');
+        }
+
+        function togglePasswordVisibility(inputId, button) {
+            const input = document.getElementById(inputId);
+            if (!input || !button) return;
+            const showing = input.type === 'password';
+            input.type = showing ? 'text' : 'password';
+            button.setAttribute('aria-pressed', String(showing));
+            button.setAttribute('aria-label', showing ? 'Hide password' : 'Show password');
+            button.title = showing ? 'Hide password' : 'Show password';
         }
 
         function closeTermsPage() {

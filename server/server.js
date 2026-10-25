@@ -5595,12 +5595,27 @@ app.post('/api/register', authLimiter, async (req, res) => {
             return res.status(409).json({ success: false, message });
         }
 
+        const normalizedReferralCode = String(referralCode || '').trim().toUpperCase();
+        let referrer = null;
+        if (normalizedReferralCode) {
+            referrer = await dbGet(
+                `SELECT phone, is_upgraded FROM users WHERE UPPER(referral_code) = UPPER(?) AND COALESCE(status, 'verified') <> 'deleted' LIMIT 1`,
+                [normalizedReferralCode]
+            );
+            if (!referrer) {
+                return res.status(400).json({ success: false, message: 'That referral code is not valid.' });
+            }
+            if (referrer.phone === normalized) {
+                return res.status(400).json({ success: false, message: 'You cannot use your own referral code.' });
+            }
+        }
+
         const hashedPassword = await bcrypt.hash(password, 10);
         const myReferralCode = crypto.randomBytes(3).toString('hex').toUpperCase();
         const verificationToken = crypto.randomBytes(32).toString('hex');
 
         db.run(`INSERT INTO users (name, phone, password, email, referral_code, referred_by, verification_token, status, terms_accepted, welcome_bonus_balance, welcome_bonus_awarded) VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified', 1, 50, 1)`,
-            [String(name).trim(), normalized, hashedPassword, normalizedEmail, myReferralCode, referralCode || null, verificationToken], async function(err) {
+            [String(name).trim(), normalized, hashedPassword, normalizedEmail, myReferralCode, normalizedReferralCode || null, verificationToken], async function(err) {
                 if (err) {
                     console.error("Registration insert failed:", err.message || err);
                     const isUniqueFailure = err.code === '23505' || /unique|constraint|duplicate/i.test(err.message || '');
@@ -5610,6 +5625,25 @@ app.post('/api/register', authLimiter, async (req, res) => {
                             ? "An account with this phone number or email already exists."
                             : "Registration failed. Please try again."
                     });
+                }
+
+                if (referrer) {
+                    const bonus = Number(referrer.is_upgraded) === 1 ? 100 : 50;
+                    const bonusReference = `REF_BONUS_${normalized}`;
+                    try {
+                        let bonusAwarded = false;
+                        await withTransaction(async () => {
+                            const priorAward = await dbGet(`SELECT id FROM transactions WHERE reference = ? LIMIT 1`, [bonusReference]);
+                            if (priorAward) return;
+                            await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [bonus, referrer.phone]);
+                            await dbRun(`INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, 'referral_bonus', ?, 'completed', ?)`,
+                                [referrer.phone, bonus, bonusReference]);
+                            bonusAwarded = true;
+                        });
+                        if (bonusAwarded) emitBalance(referrer.phone);
+                    } catch (bonusError) {
+                        console.error('[registration] Referral bonus could not be recorded:', bonusError.message);
+                    }
                 }
 
                 const verifyLink = `${verificationUrl(verificationToken)}`;
@@ -5627,18 +5661,6 @@ app.post('/api/register', authLimiter, async (req, res) => {
                     });
                 }
 
-                if (referralCode) {
-                    db.get(`SELECT phone, is_upgraded FROM users WHERE UPPER(referral_code) = UPPER(?)`, [referralCode], (err, referrer) => {
-                        if (referrer && referrer.phone !== normalized) {
-                            const bonus = referrer.is_upgraded === 1 ? 100 : 50;
-                            db.run(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [bonus, referrer.phone]);
-                            db.run(`INSERT INTO transactions (user_phone, type, amount, status, reference) VALUES (?, 'referral_bonus', ?, 'completed', ?)`,
-                                [referrer.phone, bonus, `REF_BONUS_${normalized}`], (err) => {
-                                    if (!err) emitBalance(referrer.phone);
-                                });
-                        }
-                    });
-                }
                 res.json({ success: true, accountCreated: true, verificationEmailSent: true, message: 'Account created. Your sKES 50 welcome free bet is ready after you verify your email and sign in.' });
             }
         );

@@ -25,7 +25,7 @@
     <meta property="og:title" content="PolySoko" />
     <meta property="og:image" content="https://polysoko.online/icon-512.png" />
 
-    <link rel="stylesheet" href="./style.css?v=20" />
+    <link rel="stylesheet" href="./style.css?v=21" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
 
     <script>
@@ -48,8 +48,8 @@
     
     <script src="./dialogs.js?v=1" defer></script>
     <script src="./api.js?v=15" defer></script>
-    <script src="./ui.js?v=32" defer></script>
-    <script src="./app.js?v=26" defer></script>
+    <script src="./ui.js?v=33" defer></script>
+    <script src="./app.js?v=27" defer></script>
     <script src="./pwa.js?v=14" defer></script>
 
 </head>
@@ -173,6 +173,26 @@
 </main>
 <main id="matchView" class="match-detail-view" hidden aria-live="polite"></main>
 <main id="sportView" class="sport-detail-view" hidden aria-live="polite"></main>
+<main id="categoryView" class="category-detail-view" hidden aria-live="polite">
+    <div class="category-detail-shell">
+        <header class="category-detail-header">
+            <button type="button" class="category-detail-back" onclick="window.setCategory('all')">← All markets</button>
+            <h1 id="categoryPageTitle">Markets</h1>
+        </header>
+        <nav class="category-detail-filters" aria-label="Market categories">
+            <button class="pill" data-cat="all" onclick="window.setCategory('all')">All</button>
+            <button class="pill" data-cat="sports" onclick="window.setCategory('sports')">Sports</button>
+            <button class="pill" data-cat="crypto" onclick="window.setCategory('crypto')">Crypto</button>
+            <button class="pill" data-cat="politics" onclick="window.setCategory('politics')">Politics</button>
+            <button class="pill" data-cat="movies" onclick="window.setCategory('movies')">Movies</button>
+            <button class="pill" data-cat="news" onclick="window.setCategory('news')">News</button>
+            <button class="pill" data-cat="gaming" onclick="window.setCategory('gaming')">Gaming</button>
+            <button class="pill" data-cat="weather" onclick="window.setCategory('weather')">Weather</button>
+            <button class="pill" data-cat="tech" onclick="window.setCategory('tech')">Tech</button>
+        </nav>
+        <div id="categoryMarketsList" class="markets-vertical-stack"></div>
+    </div>
+</main>
 <main id="marketDetailView" class="market-detail-view" hidden aria-live="polite">
     <div class="market-detail-shell">
         <header class="market-detail-header">

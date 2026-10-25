@@ -287,7 +287,13 @@ window.setCategory = function (category) {
         window.location.hash = requested === 'football' ? '#sport/football' : '#sports';
         return;
     }
-    applyStateAndRender();
+    if (active === 'all') {
+        if (window.location.hash) window.location.hash = '';
+        else applyStateAndRender();
+        return;
+    }
+    window.location.hash = `#category/${encodeURIComponent(active)}`;
+    return;
 };
 
 window.setSportsType = function (sport) {
@@ -475,7 +481,10 @@ function openTrendingMarket(id) {
  * MARKET LIST
  */
 function renderFilteredMarkets() {
-    const mainGrid = document.getElementById("marketsList");
+    const categoryRoute = window.location.hash.match(/^#category\/([^/]+)$/);
+    const mainGrid = categoryRoute
+        ? document.getElementById('categoryMarketsList')
+        : document.getElementById("marketsList");
     if (!mainGrid) return;
 
     const allMarkets = (state.filteredMarkets || []).filter(m => !isInvalidSportsMarket(m));
@@ -499,7 +508,7 @@ function renderFilteredMarkets() {
     let html = "";
 
     // Add Back Button if a specific category is active
-    if (state.category !== "all") {
+    if (state.category !== "all" && !categoryRoute) {
         html += `<button class="pill" onclick="window.setCategory('all')" style="margin-bottom:15px; background:#333; color:white; border:none; padding:8px 15px; border-radius:20px; cursor:pointer;">← Back to All Markets</button>`;
     }
 
@@ -789,6 +798,26 @@ window.renderSportsRoute = function renderSportsRoute(sport = '') {
     else localStorage.removeItem('last_sports_type');
     const sportsMarkets = (state.allMarkets || []).filter(m => isSportsMarket(m) && !isInvalidSportsMarket(m));
     renderSportsPage(root, sportsMarkets, true);
+};
+
+window.renderCategoryRoute = function renderCategoryRoute(category = '') {
+    const requested = normalizeCategory(category || 'all');
+    const titles = {
+        crypto: 'Crypto prices', politics: 'Politics markets', movies: 'Movies and films',
+        news: 'Latest news', gaming: 'Gaming markets', weather: 'Weather markets', tech: 'Technology markets'
+    };
+    const title = titles[requested] || `${titleCase(requested)} markets`;
+    const heading = document.getElementById('categoryPageTitle');
+    if (heading) heading.textContent = title;
+    window.state.category = requested;
+    window.state.sportsType = '';
+    localStorage.setItem('last_category', requested);
+    localStorage.removeItem('last_sports_type');
+    document.querySelectorAll('.category-filter-row .pill, .category-detail-filters .pill').forEach(pill => {
+        const pillCategory = normalizeCategory(pill.dataset.cat || pill.textContent);
+        pill.classList.toggle('active', pillCategory === requested);
+    });
+    applyStateAndRender();
 };
 
 // Derive a short coin label (e.g. "BNB") for crypto cards. Market ids look like
