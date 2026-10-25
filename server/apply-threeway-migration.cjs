@@ -8,9 +8,8 @@
 //   * a snapshot of every affected row is written to
 //     server/backups/threeway-backup-<timestamp>.json before anything
 //     changes, and the exact rollback SQL is printed at the end;
-//   * the four columns are only added when they are missing;
-//   * the backfill only writes to the two NEW columns, so it cannot change
-//     any existing price, status, result or volume;
+//   * migration columns are only added when they are missing;
+//   * old unprovenanced flat odds are reset to engine-calculated prices;
 //   * every step is verified before the transaction commits.
 const fs = require('fs');
 const path = require('path');
@@ -24,6 +23,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
     const {
         THREE_WAY_BACKFILL_SQL,
         THREE_WAY_COLUMNS,
+        THREE_WAY_LEGACY_FLAT_REPAIR_SQL,
         THREE_WAY_READY_SQL,
         FOOTBALL_FIXTURE_SQL
     } = await importModule(path.join(__dirname, 'src', 'services', 'threeWayMigration.js'));
@@ -59,8 +59,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 
     // ---- 2. Snapshot the rows the backfill would touch -------------------
     const affected = await client.query(`
-        SELECT id, title, status, sidea, sideb, oddsa, oddsb, home_volume, away_volume,
-               result, settled, admin_verified, starttime
+        SELECT *
         FROM markets
         WHERE ${FOOTBALL_FIXTURE_SQL}
           AND COALESCE(admin_verified, 0) = 0
@@ -76,7 +75,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
     fs.writeFileSync(backupPath, JSON.stringify({
         takenAt: new Date().toISOString(),
         database: ident.rows[0].db,
-        note: 'Snapshot of the football rows the three-way backfill touches. Only sideC/oddsC are changed by the backfill, and both start empty, so the original state is recoverable by setting sideC = NULL and oddsC = NULL for these ids.',
+        note: 'Full pre-migration snapshot of eligible football rows. Restore affected row fields from this file if rollback is needed.',
         rows: affected.rows
     }, null, 2));
     console.log(`\n=== snapshot ===`);
@@ -100,7 +99,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
             SELECT COUNT(*) AS n FROM markets
             WHERE ${FOOTBALL_FIXTURE_SQL}
               AND COALESCE(admin_verified, 0) = 0
-              AND sidea IS NOT NULL AND sideb IS NOT NULL
+          AND sidea IS NOT NULL AND sideb IS NOT NULL
               AND sidea NOT IN ('YES','NO','Home','Away','Unknown','')
               AND sideb NOT IN ('YES','NO','Home','Away','Unknown','')
               AND (sidec IS NULL OR TRIM(sidec) = '' OR COALESCE(oddsc, 0) <= 1)
@@ -109,6 +108,8 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 
         const result = await client.query(THREE_WAY_BACKFILL_SQL);
         console.log(`  backfill updated ${result.rowCount} row(s)`);
+        const fallbackRepair = await client.query(THREE_WAY_LEGACY_FLAT_REPAIR_SQL);
+        console.log(`  replaced ${fallbackRepair.rowCount} legacy flat-odds row(s)`);
 
         // ---- 4. Verify before committing ---------------------------------
         const after = await client.query(`
@@ -178,7 +179,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
     const now = await client.query(`
         SELECT column_name, data_type, column_default FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'markets'
-          AND column_name IN ('sidec','oddsc','draw_volume','odds_anchor')
+          AND column_name IN ('sidec','oddsc','draw_volume','odds_anchor','odds_source')
         ORDER BY column_name
     `);
     for (const row of now.rows) {
@@ -201,11 +202,9 @@ dotenv.config({ path: path.join(__dirname, '.env') });
     console.log('  non-football markets given a draw (must be 0):', untouched.n);
 
     console.log('\n=== rollback ===');
-    console.log('  To undo the backfill (the columns may stay, they are harmless):');
-    console.log(`    UPDATE markets SET sidec = NULL, oddsc = NULL WHERE id IN (${affected.rows.map(r => `'${r.id.replace(/'/g, "''")}'`).join(',') || `);`}`);
-    console.log('  To undo the columns entirely:');
-    console.log('    ALTER TABLE markets DROP COLUMN sidec, DROP COLUMN oddsc, DROP COLUMN draw_volume, DROP COLUMN odds_anchor;');
-    console.log('  A full row snapshot is at:', path.relative(process.cwd(), backupPath));
+    console.log('  Restore affected row fields from the full pre-migration snapshot if rollback is needed:');
+    console.log('   ', path.relative(process.cwd(), backupPath));
+    console.log('  Drop only columns that this run added, if schema rollback is also required.');
 
     client.release();
 })()

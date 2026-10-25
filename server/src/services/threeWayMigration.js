@@ -17,10 +17,10 @@
 //   * the backfill runs AFTER the sports-metadata repair, because that repair
 //     is what classifies a row as a football fixture. Running the backfill
 //     first would miss the rows the repair is about to reclassify.
-//   * the draw price is never shorter than either of the market's existing
-//     prices. See THREE_WAY_BACKFILL_SQL for why.
+//   * unquoted fixtures start from the odds engine's calculated three-way
+//     price. Legacy flat 3.40 fallbacks are replaced once by a repair query.
 
-import { FLAT_THREE_WAY_ODDS } from './oddsEngine.js';
+import { DEFAULT_INTERNAL_THREE_WAY_ODDS } from './oddsEngine.js';
 
 // The columns the migration adds, with the type they are created with.
 //
@@ -48,29 +48,17 @@ export const THREE_WAY_COLUMNS = [
 // article, not on a scoreline, so a draw bet on it could never be paid.
 export const FOOTBALL_FIXTURE_SQL = `(id LIKE 'fb\\_%' ESCAPE '\\' OR (LOWER(COALESCE(category,'')) IN ('sports','football','soccer') AND LOWER(COALESCE(sport,'')) = 'football'))`;
 
-// The backfill.
-//
-// It only writes to sideC and oddsC, both of which start empty, so it cannot
-// change an existing price, status, result or volume.
-//
-// The draw price is the longer of the platform's flat draw price and the
-// market's two existing prices.
+// The backfill adds the draw side to eligible legacy football markets.
 //
 // The two existing prices were quoted for a two-outcome market and have no
-// meaningful draw equivalent. Almost every legacy fixture sits at 1.90/1.90,
-// so a draw priced at "the better of the two" would be quoted at 1.90 and
-// make the draw a co-favourite, which no bookmaker would ever price. The
-// flat price is the same one a fixture that no bookmaker quotes is given.
-//
-// The existing prices are still taken into account: a market whose prices
-// have already been tilted by real stake (say 1.22 and 3.68) gets a draw
-// that is no shorter than its own longest price, so the draw can never end
-// up the favourite of the market.
+// meaningful draw equivalent. The draw starts from the pricing engine's
+// equal-probability three-way quote, then is kept no shorter than either
+// existing side price in case a legacy pool has already shifted those prices.
 export const THREE_WAY_BACKFILL_SQL = `UPDATE markets
          SET sideC = 'Draw',
              oddsC = CASE
                WHEN COALESCE(oddsC, 0) > 1 THEN oddsC
-               ELSE GREATEST(${FLAT_THREE_WAY_ODDS}, COALESCE(oddsA, 1.90), COALESCE(oddsB, 1.90))
+               ELSE GREATEST(${DEFAULT_INTERNAL_THREE_WAY_ODDS.DRAW}, COALESCE(oddsA, 1.90), COALESCE(oddsB, 1.90))
              END
          WHERE ${FOOTBALL_FIXTURE_SQL}
            AND COALESCE(admin_verified, 0) = 0
@@ -78,6 +66,21 @@ export const THREE_WAY_BACKFILL_SQL = `UPDATE markets
            AND sideA NOT IN ('YES', 'NO', 'Home', 'Away', 'Unknown', '')
            AND sideB NOT IN ('YES', 'NO', 'Home', 'Away', 'Unknown', '')
            AND (sideC IS NULL OR TRIM(sideC) = '' OR COALESCE(oddsC, 0) <= 1)`;
+
+// Previous releases inserted the same flat price on all three sides when no
+// bookmaker quote existed. Replace only that recognizable, unprovenanced
+// pattern with the internal engine's initial three-way quote.
+export const THREE_WAY_LEGACY_FLAT_REPAIR_SQL = `UPDATE markets
+         SET oddsA = ${DEFAULT_INTERNAL_THREE_WAY_ODDS.HOME},
+             oddsB = ${DEFAULT_INTERNAL_THREE_WAY_ODDS.AWAY},
+             oddsC = ${DEFAULT_INTERNAL_THREE_WAY_ODDS.DRAW},
+             odds_anchor = NULL
+         WHERE ${FOOTBALL_FIXTURE_SQL}
+           AND COALESCE(admin_verified, 0) = 0
+           AND COALESCE(odds_source, '') = ''
+           AND COALESCE(oddsA, 0) = 3.40
+           AND COALESCE(oddsB, 0) = 3.40
+           AND COALESCE(oddsC, 0) = 3.40`;
 
 // How many markets now offer a draw.
 export const THREE_WAY_READY_SQL = `SELECT COUNT(*) AS n FROM markets

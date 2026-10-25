@@ -2,7 +2,7 @@
 // production?
 //
 // Every column the app adds through addColumnSafely() should be present. If
-// they are, the machinery works and the four missing three-way columns are
+// they are, the machinery works and the missing three-way odds columns are
 // simply the new code that has not been deployed yet. If they are not, the
 // migration path itself is broken and needs fixing first.
 //
@@ -75,11 +75,11 @@ const ADDED_OVER_TIME = [
     }
     console.log(`\n  ${ADDED_OVER_TIME.length - missing}/${ADDED_OVER_TIME.length} present, ${missing} missing`);
     console.log(missing === 0
-        ? '  => the ALTER TABLE path works in production. The four three-way columns are absent because the new code has not been deployed yet.'
+        ? '  => the ALTER TABLE path works in production. The three-way odds columns are absent because the new code has not been deployed yet.'
         : '  => the ALTER TABLE path is NOT working. Fix that before deploying.');
 
-    console.log('\n=== the four three-way columns (new code, not yet deployed) ===');
-    for (const column of ['sideC', 'oddsC', 'draw_volume', 'odds_anchor']) {
+    console.log('\n=== the three-way and odds-provenance columns (new code, not yet deployed) ===');
+    for (const column of ['sideC', 'oddsC', 'draw_volume', 'odds_anchor', 'odds_source']) {
         const r = await pool.query(
             `SELECT COUNT(*) AS n FROM information_schema.columns
              WHERE table_schema = 'public' AND table_name = 'markets' AND column_name = $1`,

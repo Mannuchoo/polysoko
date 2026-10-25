@@ -502,6 +502,37 @@ window.placeBet = async function(input, side, amount) {
     }
 };
 
+window.placeAccumulator = async function(order) {
+    const token = localStorage.getItem('token');
+    if (!token) return alert('Login required'), false;
+    const stake = Number(order?.amount);
+    const legs = Array.isArray(order?.legs) ? order.legs : [];
+    if (!Number.isFinite(stake) || stake <= 0 || legs.length < 2) return alert('Add at least two selections and enter a valid stake.'), false;
+    let user = JSON.parse(localStorage.getItem('user_data') || '{}');
+    if (!Number.isFinite(Number(user.balance)) && typeof window.fetchProfile === 'function') {
+        try { await window.fetchProfile(); } catch { /* Backend validates the balance. */ }
+        user = JSON.parse(localStorage.getItem('user_data') || '{}');
+    }
+    const balance = Number(user.balance);
+    if (!Number.isFinite(balance)) return alert('Unable to verify your balance. Refresh your account and try again.'), false;
+    if (stake > balance) return alert('Insufficient balance for this stake.'), false;
+    try {
+        const result = await apiFetch('place-accumulator', { method: 'POST', body: { amount: stake, legs } });
+        if (!result?.success) { alert(result?.message || 'Accumulator could not be placed.'); return false; }
+        user.balance = Math.max(0, balance - stake);
+        localStorage.setItem('user_data', JSON.stringify(user));
+        window.renderBalanceDisplay?.();
+        await window.refreshBets?.('active');
+        try { await window.fetchProfile?.(); } catch { /* Balance socket can reconcile the display. */ }
+        alert('Accumulator confirmed!');
+        return true;
+    } catch (error) {
+        console.error('Accumulator placement failed:', error);
+        alert(error?.message || 'Connection error. Please try again.');
+        return false;
+    }
+};
+
 window.showEmailEdit = function() {
     const display = document.getElementById("userEmailDisplay");
     const currentEmail = JSON.parse(localStorage.getItem("user_data") || "{}").email || "";

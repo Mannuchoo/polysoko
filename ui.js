@@ -1635,6 +1635,8 @@ window.renderBetCard = function(bet) {
         : "Time unavailable";
 
     const status = (bet.status || "").toLowerCase();
+    const betAmount = bet.betslip_id ? bet.slip_stake : (bet.amount ?? bet.stake);
+    const shownOdds = bet.betslip_id ? bet.slip_odds : (bet.odds || bet.price);
 
     const colors = {
         won: "#00ff88",
@@ -1651,9 +1653,11 @@ window.renderBetCard = function(bet) {
                     ${bet.event || bet.market_name || bet.marketTitle || "Market Prediction"}
                 </span>
 
+                ${bet.betslip_id ? `<small style="color:#6ee7b7;display:block;margin-bottom:4px;">Accumulator · ${Number(bet.slip_legs || 0)} picks</small>` : ''}
+
                 <span class="selection-text" style="color: white; font-size: 1.1rem; font-weight: bold; display: block; margin-bottom: 4px;">
                     Picked: ${bet.picked || bet.side} •
-                    Stake: sKES ${bet.amount || bet.stake}
+                    ${bet.betslip_id ? 'Slip stake' : 'Stake'}: sKES ${betAmount ?? '—'}
                 </span>
 
                 <span class="selection-text" style="color:#777">
@@ -1663,7 +1667,7 @@ window.renderBetCard = function(bet) {
 
             <div style="text-align:right;">
                 <div class="bet-odds">
-                    @${bet.odds || bet.price || "-"}
+                    @${shownOdds || "-"}
                 </div>
 
                 <small style="color:${colors[status] || "#888"}; font-weight:700;">
@@ -1927,7 +1931,7 @@ window.renderMatchView = async function renderMatchView(marketId) {
     const title = escapeHtml(market.betQuestion || market.title || `${home} vs ${away}`);
     root.innerHTML = `
       <div class="match-view-shell">
-        <header class="match-view-header"><button class="match-back" onclick="window.location.hash='${returnRoute}'">← ${escapeHtml(marketMetaText(market.sport, isFootball ? 'Football' : 'Sports'))}</button><span>${category}</span><span class="match-view-status">${escapeHtml(String(market.status || 'upcoming').toUpperCase())}</span></header>
+        <header class="match-view-header"><button class="match-back" onclick="window.location.hash='${returnRoute}'">← ${escapeHtml(marketMetaText(market.sport, isFootball ? 'Football' : 'Sports'))}</button><span>${category}</span><span class="match-view-status">${escapeHtml(String(market.status || 'upcoming').toUpperCase())}</span><button type="button" data-open-sports-betslip class="match-betslip-open">Betslip <b id="matchBetslipCount">${sportsBetslip.length}</b></button></header>
         <section class="match-hero"><div class="match-meta">${category}</div><h1>${escapeHtml(home)} <span>vs</span> ${escapeHtml(away)}</h1><p>${kickoffLabel}</p><strong id="matchCountdown">${market.status === 'live' ? 'LIVE NOW' : 'Kickoff countdown loading…'}</strong></section>
         <section class="match-center-banner"><div class="pitch-art" aria-hidden="true"><span>⚽</span></div><div class="match-center-info"><small>MATCH CENTER</small><b>${escapeHtml(home)} vs ${escapeHtml(away)}</b><span id="matchBannerCountdown">${kickoffLabel}</span></div></section>
         ${isFootball ? '<nav class="match-info-tabs" aria-label="Match information"><button class="active" data-match-tab="match">Match</button><button data-match-tab="head-to-head">Head to Head</button><button data-match-tab="standings">Standings</button><button data-match-tab="lineups">Lineups</button></nav>' : '<nav class="match-info-tabs" aria-label="Event information"><button class="active" data-match-tab="match">Event details</button></nav>'}
@@ -1938,6 +1942,7 @@ window.renderMatchView = async function renderMatchView(marketId) {
     root.onclick = async (event) => {
         const infoTab = event.target.closest('[data-match-tab]');
         const interactionTab = event.target.closest('[data-interaction-tab]');
+        if (event.target.closest('[data-open-sports-betslip]')) { window.openSportsBetslip?.(); return; }
         if (infoTab) {
             root.querySelectorAll('[data-match-tab]').forEach(btn => btn.classList.toggle('active', btn === infoTab));
             renderMatchInfoTab(infoTab.dataset.matchTab, market, activeMatchDetails);
@@ -2071,9 +2076,104 @@ window.selectOutcome = function(marketId, optionType, oddsValue) {
     const nativeOutcome = getMarketOutcomes(market).find(item => item.key === pick || item.label.toLowerCase() === pick.toLowerCase());
     if (!contract && !nativeOutcome) return alert('That selection is not available on PolySoko.');
     const title = contract ? `${market.title || market.betQuestion} · ${contract.market}` : (market.betQuestion || market.title || 'Match Result');
+    const isSports = /football|soccer|sports|rugby|basketball|tennis|cricket|volleyball|hockey/i.test(`${market.sport || ''} ${market.category || ''}`) || /^fb_/i.test(String(marketId));
+    if (isSports) {
+        window.addSportsBetslipSelection?.({ marketId: String(marketId), title, pick: contract?.selection || nativeOutcome?.label || pick, side: nativeOutcome?.key || pick, price: Number(oddsValue), contract });
+        return true;
+    }
     window.openBetModal(marketId, title, nativeOutcome?.key || pick, Number(oddsValue), contract);
     return true;
 };
+
+const SPORT_BETSLIP_KEY = 'polysoko_sports_betslip_v1';
+let sportsBetslip = [];
+let topFootballFixturesPromise = null;
+try { sportsBetslip = JSON.parse(sessionStorage.getItem(SPORT_BETSLIP_KEY) || '[]'); if (!Array.isArray(sportsBetslip)) sportsBetslip = []; } catch { sportsBetslip = []; }
+const persistSportsBetslip = () => {
+    try { sessionStorage.setItem(SPORT_BETSLIP_KEY, JSON.stringify(sportsBetslip)); } catch { /* Keep the slip for this page session. */ }
+    document.querySelectorAll('#sportsBetslipCount, #matchBetslipCount').forEach(count => { count.textContent = String(sportsBetslip.length); });
+};
+function ensureSportsBetslipPanel() {
+    let panel = document.getElementById('sportsBetslipPanel');
+    if (panel) return panel;
+    panel = document.createElement('aside');
+    panel.id = 'sportsBetslipPanel';
+    panel.className = 'sports-betslip-panel';
+    panel.setAttribute('aria-label', 'Sports betslip');
+    panel.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(panel);
+    panel.addEventListener('click', event => {
+        const action = event.target.closest('[data-slip-action]'); if (!action) return;
+        const index = Number(action.dataset.index), leg = sportsBetslip[index];
+        if (action.dataset.slipAction === 'close') { window.closeSportsBetslip(); return; }
+        if (action.dataset.slipAction === 'remove') { sportsBetslip.splice(index, 1); renderSportsBetslip(); return; }
+        if (!leg) return;
+        if (action.dataset.slipAction === 'view') { window.closeSportsBetslip(); window.location.hash = `#match/${encodeURIComponent(leg.marketId)}`; return; }
+        if (action.dataset.slipAction === 'fixture') { window.closeSportsBetslip(); window.location.hash = `#match/${encodeURIComponent(action.dataset.marketId)}`; return; }
+        if (action.dataset.slipAction === 'single') { window.openBetModal(leg.marketId, leg.title, leg.side, leg.price, leg.contract || null); return; }
+        if (action.dataset.slipAction === 'place-acca') { placeSportsAccumulator(); }
+    });
+    panel.addEventListener('input', event => { if (event.target.id === 'sportsBetslipStake') renderSportsBetslipTotals(); });
+    return panel;
+}
+window.addSportsBetslipSelection = function(leg) {
+    const duplicate = sportsBetslip.findIndex(item => item.marketId === leg.marketId);
+    if (duplicate >= 0) {
+        sportsBetslip[duplicate] = leg;
+    } else {
+        sportsBetslip.push(leg);
+    }
+    persistSportsBetslip();
+    renderSportsBetslip();
+    window.openSportsBetslip();
+};
+window.openSportsBetslip = function() {
+    const panel = ensureSportsBetslipPanel();
+    panel.classList.add('open'); panel.setAttribute('aria-hidden', 'false'); document.body.classList.add('betslip-open');
+    renderSportsBetslip();
+};
+window.closeSportsBetslip = function() {
+    const panel = document.getElementById('sportsBetslipPanel');
+    panel?.classList.remove('open'); panel?.setAttribute('aria-hidden', 'true'); document.body.classList.remove('betslip-open');
+};
+function renderSportsBetslipTotals() {
+    const panel = document.getElementById('sportsBetslipPanel'); if (!panel) return;
+    const odds = sportsBetslip.reduce((total, leg) => total * Number(leg.price || 0), 1);
+    const stake = Number(panel.querySelector('#sportsBetslipStake')?.value || 0);
+    const oddsEl = panel.querySelector('[data-slip-total-odds]'); const payoutEl = panel.querySelector('[data-slip-payout]');
+    if (oddsEl) oddsEl.textContent = odds.toFixed(2);
+    if (payoutEl) payoutEl.textContent = `KES ${(stake * odds || 0).toFixed(2)}`;
+}
+function renderSportsBetslip() {
+    persistSportsBetslip();
+    const panel = ensureSportsBetslipPanel();
+    const items = sportsBetslip.map((leg, index) => `<article class="sports-betslip-leg"><div><strong>${escapeHtml(leg.title)}</strong><p>${escapeHtml(leg.pick)} <span>@ ${Number(leg.price).toFixed(2)}</span></p>${leg.contract ? `<small>${escapeHtml(leg.contract.market)} · ${escapeHtml(leg.contract.bookmaker || leg.contract.source || 'Provider')}</small>` : '<small>PolySoko sports market</small>'}</div><nav><button type="button" data-slip-action="view" data-index="${index}">More options</button><button type="button" data-slip-action="single" data-index="${index}">Single</button><button type="button" data-slip-action="remove" data-index="${index}" aria-label="Remove selection">×</button></nav></article>`).join('');
+    panel.innerHTML = `<header><div><small>SPORTS</small><h2>Betslip <span>${sportsBetslip.length}</span></h2></div><button type="button" data-slip-action="close" aria-label="Close betslip">×</button></header>${sportsBetslip.length ? `<div class="sports-betslip-legs">${items}</div><section class="sports-betslip-summary"><div><span>Accumulator odds</span><b data-slip-total-odds>1.00</b></div><label>Stake (KES)<input id="sportsBetslipStake" type="number" min="1" step="1" value="10"></label><div><span>Potential return</span><b data-slip-payout>KES 0.00</b></div><button type="button" class="sports-betslip-place" data-slip-action="place-acca" ${sportsBetslip.length < 2 ? 'disabled' : ''}>Place accumulator</button><small>${sportsBetslip.length < 2 ? 'Add another match to enable an accumulator. You can place each pick as a single.' : 'All picks must win for the accumulator to pay.'}</small></section>` : '<div class="sports-betslip-empty">Choose a sports or football outcome to add it here.</div>'}<section class="sports-betslip-fixtures"><h3>Top football fixtures</h3><p>UEFA Champions League and Premier League first, then Europe’s top domestic leagues.</p><div data-top-fixtures>Loading fixtures…</div></section>`;
+    renderSportsBetslipTotals();
+    if (panel.classList.contains('open')) loadTopFootballFixtures(panel);
+}
+async function loadTopFootballFixtures(panel) {
+    const target = panel.querySelector('[data-top-fixtures]'); if (!target || target.dataset.loaded === 'true') return;
+    target.dataset.loaded = 'true';
+    if (!topFootballFixturesPromise) topFootballFixturesPromise = fetch(window.apiUrl('/api/sports/top-fixtures')).then(response => response.json()).catch(() => ({ fixtures: [] }));
+    const result = await topFootballFixturesPromise;
+    if (!target.isConnected) return;
+    const fixtures = Array.isArray(result?.fixtures) ? result.fixtures : [];
+    if (!window.marketMap || typeof window.marketMap !== 'object') window.marketMap = {};
+    fixtures.forEach(fixture => { if (!window.marketMap[fixture.id]) window.marketMap[fixture.id] = fixture; });
+    target.innerHTML = fixtures.length ? fixtures.map(fixture => `<button type="button" data-slip-action="fixture" data-market-id="${escapeHtml(fixture.id)}"><b>${escapeHtml(fixture.sideA || 'Home')} vs ${escapeHtml(fixture.sideB || 'Away')}</b><span>${escapeHtml(fixture.league || 'Football')} · ${fixture.startTime ? escapeHtml(new Date(fixture.startTime).toLocaleString()) : 'Kickoff TBC'}</span></button>`).join('') : '<small>No upcoming fixtures from the prioritized leagues are currently in the market database.</small>';
+}
+async function placeSportsAccumulator() {
+    const panel = document.getElementById('sportsBetslipPanel');
+    const amount = Number(panel?.querySelector('#sportsBetslipStake')?.value);
+    if (sportsBetslip.length < 2 || !Number.isFinite(amount) || amount <= 0) return alert('Add at least two matches and enter a valid stake.');
+    const button = panel.querySelector('.sports-betslip-place'); button.disabled = true; button.textContent = 'Placing…';
+    try {
+        const result = await window.placeAccumulator?.({ amount, legs: sportsBetslip });
+        if (result) { sportsBetslip = []; persistSportsBetslip(); renderSportsBetslip(); window.closeSportsBetslip(); }
+    } finally { if (button.isConnected) { button.disabled = false; button.textContent = 'Place accumulator'; } }
+}
+renderSportsBetslip();
 
 window.updateMatchProviderOdds = function(marketId, odds) {
     if (window.location.hash !== `#match/${encodeURIComponent(marketId)}`) return;

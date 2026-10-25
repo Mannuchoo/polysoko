@@ -14,11 +14,12 @@ import { fetchSportsProviderOdds } from './src/services/sportsProviderOdds.js';
 import { fetchAllFootballOdds } from './src/services/sportsOdds.js';
 import { FixtureDataCache, footballRequest } from './src/services/footballApiClient.js';
 import { getFootballAnalytics } from './src/services/sportsService.js';
-import { priceMarket } from './src/services/oddsEngine.js';
+import { DEFAULT_INTERNAL_THREE_WAY_ODDS, priceMarket } from './src/services/oddsEngine.js';
 import { classifyProviderMarket, providerOutcomeWins } from './src/services/matchBetContracts.js';
 import {
     THREE_WAY_BACKFILL_SQL,
     THREE_WAY_COLUMNS,
+    THREE_WAY_LEGACY_FLAT_REPAIR_SQL,
     THREE_WAY_READY_SQL
 } from './src/services/threeWayMigration.js';
 import {
@@ -278,7 +279,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// The three-way columns (sideC/oddsC/draw_volume/odds_anchor) have to exist
+// The three-way odds columns (sideC/oddsC/draw_volume/odds_anchor/odds_source) have to exist
 // before a request reads them by name, or /api/markets fails outright. They
 // are added by ensureThreeWayColumns() on boot.
 //
@@ -298,7 +299,9 @@ app.use((req, res, next) => {
 let threeWayColumnsReady = null;
 const awaitThreeWayColumns = () => {
     if (!threeWayColumnsReady) {
-        threeWayColumnsReady = ensureThreeWayColumns().catch(err => {
+        threeWayColumnsReady = ensureThreeWayColumns()
+            .then(() => dbRun(THREE_WAY_LEGACY_FLAT_REPAIR_SQL))
+            .catch(err => {
             console.error('Pre-listen three-way column migration failed:', err.message);
         });
     }
@@ -2599,9 +2602,23 @@ CREATE TABLE IF NOT EXISTS bets (
     contract_market TEXT,
     contract_outcome TEXT,
     contract_source TEXT,
-    contract_bookmaker TEXT
+    contract_bookmaker TEXT,
+    betslip_id INTEGER
 )
 `);
+db.run(`CREATE TABLE IF NOT EXISTS sports_betslips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_phone TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    stake REAL NOT NULL,
+    combined_odds REAL NOT NULL,
+    potential_payout REAL NOT NULL,
+    leg_count INTEGER NOT NULL,
+    status TEXT DEFAULT 'active',
+    transaction_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    settled_at DATETIME
+)`);
 db.run(`
 CREATE TABLE IF NOT EXISTS user_devices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2680,7 +2697,7 @@ const addColumnSafely = (tableName, columnName, definition, callback) => {
     addColumnSafely('markets', 'category', 'TEXT');
     addColumnSafely('markets', 'league', 'TEXT');
     addColumnSafely('markets', 'country', 'TEXT');
-    // The three-way columns (sideC/oddsC/draw_volume/odds_anchor) are added
+    // The three-way odds columns (sideC/oddsC/draw_volume/odds_anchor/odds_source) are added
     // by ensureThreeWayColumns() before the server starts accepting traffic,
     // not here. This block does not run its statements in order (db.serialize()
     // is a no-op on PostgreSQL), and the request path reads these columns by
@@ -2836,6 +2853,7 @@ addColumnSafely('markets', 'event_start_time', 'DATETIME', () => addColumnSafely
     addColumnSafely('bets', 'contract_outcome', 'TEXT');
     addColumnSafely('bets', 'contract_source', 'TEXT');
     addColumnSafely('bets', 'contract_bookmaker', 'TEXT');
+    addColumnSafely('bets', 'betslip_id', 'INTEGER');
 
     // The three-way columns and their backfill live in
     // ensureThreeWayMarkets() below. They have to run in order (the columns
@@ -3125,7 +3143,7 @@ const syncFootballMarkets = async () => {
         // Fetch the 1X2 bookmaker prices for the same days. The free tier
         // allows 10 requests a minute, so this is one request per day and the
         // result is cached. A failure here must not stop the fixture sync:
-        // the markets fall back to the flat price.
+        // unquoted markets are priced by the internal odds engine.
         const oddsByFixture = new Map();
         for (const date of dates) {
             const daily = await fetchFootballOdds(API_SPORTS_KEY, date);
@@ -3156,9 +3174,16 @@ const processMatches = async (matches, oddsByFixture = new Map()) => {
 
         const category = "sports";
 
-        // The three-way prices: the bookmaker's 1X2 market when it quotes
-        // this fixture, otherwise the flat fallback.
-        const prices = oddsForFixture(oddsByFixture.get(String(m.fixture.id)));
+        // Use bookmaker prices only when the provider returned a complete 1X2
+        // quote. Otherwise, initialize this unquoted market with the internal
+        // pricing engine's equal-probability three-way price.
+        const providerPrices = oddsForFixture(oddsByFixture.get(String(m.fixture.id)));
+        const prices = providerPrices || {
+            home: DEFAULT_INTERNAL_THREE_WAY_ODDS.HOME,
+            draw: DEFAULT_INTERNAL_THREE_WAY_ODDS.DRAW,
+            away: DEFAULT_INTERNAL_THREE_WAY_ODDS.AWAY,
+            bookmaker: null
+        };
 
         // Determine result once the match is finished.
         // Football markets settle on HOME, DRAW or AWAY.
@@ -3288,7 +3313,7 @@ function sportsMetadataText(value, fallback = '') {
 
 // Brings the three-way (Home / Draw / Away) sports markets up to date.
 //
-// The four columns are added first and the backfill runs only once they all
+// The odds columns are added first and the backfill runs only once they all
 // exist. The order matters: the boot migration block above dispatches its
 // statements concurrently (db.serialize() is a no-op on PostgreSQL), so a
 // backfill dispatched from there would reach PostgreSQL before the ALTER
@@ -3296,7 +3321,7 @@ function sportsMetadataText(value, fallback = '') {
 // "column sidec does not exist". The error was swallowed by a warning, so the
 // backfill simply never ran and every football market kept its two-way shape.
 
-// Adds the four three-way columns. Idempotent, and safe to call twice: the
+// Adds the three-way and odds-provenance columns. Idempotent, and safe to call twice: the
 // second call finds them already there and does nothing.
 //
 // The column list and the types come from the shared migration module, so the
@@ -3309,20 +3334,20 @@ async function ensureThreeWayColumns() {
     await ensureDbColumnWithTable('markets', CREATE_MARKETS_TABLE, 'admin_edited', 'INTEGER DEFAULT 0');
 }
 
-// Gives every existing football fixture a draw side and a draw price.
+// Gives every existing football fixture a draw side and an engine baseline price.
 //
 // The sports markets that already exist predate the draw outcome, so they
 // are given one here. A football fixture is the only kind that settles on a
 // draw, and the other sports are decided outright, so only football rows are
-// touched. The backfill only writes to sideC and oddsC, both of which start
-// empty, so it cannot change an existing price, status, result or volume.
+// touched. Legacy rows with the old flat fallback are reset to engine prices.
 async function ensureThreeWayMarkets() {
     // The columns have to exist before the statement below can write to them.
     await ensureThreeWayColumns();
 
     const result = await dbRun(THREE_WAY_BACKFILL_SQL);
+    const repairedFallbacks = await dbRun(THREE_WAY_LEGACY_FLAT_REPAIR_SQL);
     const ready = await dbGet(THREE_WAY_READY_SQL);
-    console.log(`[markets] three-way backfill updated ${result.changes} row(s); ${ready.n} football market(s) offer a draw.`);
+    console.log(`[markets] three-way backfill updated ${result.changes} row(s), replaced ${repairedFallbacks.changes} legacy flat-odds row(s); ${ready.n} football market(s) offer a draw.`);
 }
 
 async function repairSportsMarketMetadata() {
@@ -3982,6 +4007,18 @@ const cancelMarket = async (marketId, reason = 'CANCELLED') => {
 
         await withTransaction(async () => {
         for (const bet of bets) {
+            if (bet.betslip_id) {
+                const slip = await dbGet(`SELECT * FROM sports_betslips WHERE id=? AND status='active'`, [bet.betslip_id]);
+                if (slip) {
+                    const refund = Number(Number(slip.stake || 0).toFixed(2));
+                    if (refund > 0) await dbRun(`UPDATE users SET balance=balance+? WHERE phone=?`, [refund, slip.user_phone]);
+                    await dbRun(`UPDATE sports_betslips SET status='cancelled', settled_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'`, [slip.id]);
+                    await dbRun(`UPDATE bets SET status='cancelled' WHERE betslip_id=?`, [slip.id]);
+                    await dbRun(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE id=? AND status='active'`, [refund, slip.transaction_id]);
+                    emitBalance(slip.user_phone);
+                }
+                continue;
+            }
             const refund = Number(Number(bet.amount || 0).toFixed(2));
             if (refund > 0) {
                 await dbRun(`UPDATE users SET balance = balance + ? WHERE phone = ?`, [refund, bet.user_phone]);
@@ -4161,6 +4198,32 @@ const settleMarketBets = async (marketId, market, winningSide) => {
 
         await withTransaction(async () => {
         for (const bet of bets) {
+            if (bet.betslip_id) {
+                const result = bet.contract_type ? contractResults.get(bet.id) : isWinningBetSide(bet.picked, winningSide, market);
+                const legStatus = result === 'push' ? 'cancelled' : result ? 'won' : 'lost';
+                await dbRun(`UPDATE bets SET status=? WHERE id=? AND status='active'`, [legStatus, bet.id]);
+                const slip = await dbGet(`SELECT * FROM sports_betslips WHERE id=? AND status='active'`, [bet.betslip_id]);
+                if (!slip) continue;
+                const legStates = await dbAll(`SELECT status, odds FROM bets WHERE betslip_id=?`, [slip.id]);
+                const hasLoss = legStates.some(row => row.status === 'lost');
+                const isComplete = legStates.length === Number(slip.leg_count) && legStates.every(row => row.status !== 'active');
+                if (hasLoss) {
+                    await dbRun(`UPDATE sports_betslips SET status='lost', settled_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'`, [slip.id]);
+                    await dbRun(`UPDATE bets SET status='lost' WHERE betslip_id=? AND status='active'`, [slip.id]);
+                    await dbRun(`UPDATE transactions SET status='lost', settled_amount=0 WHERE id=? AND status='active'`, [slip.transaction_id]);
+                } else if (isComplete) {
+                    const finalOdds = legStates.reduce((product, row) => product * (row.status === 'cancelled' ? 1 : Number(row.odds || 1)), 1);
+                    const payout = Number((Number(slip.stake) * finalOdds).toFixed(2));
+                    if (payout > 0) await dbRun(`UPDATE users SET balance=balance+? WHERE phone=?`, [payout, slip.user_phone]);
+                    await dbRun(`UPDATE sports_betslips SET status='won', combined_odds=?, potential_payout=?, settled_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'`, [Number(finalOdds.toFixed(4)), payout, slip.id]);
+                    await dbRun(`UPDATE bets SET status='won' WHERE betslip_id=? AND status IN ('active','cancelled')`, [slip.id]);
+                    await dbRun(`UPDATE transactions SET status='won', odds=?, potential_payout=?, settled_amount=? WHERE id=? AND status='active'`, [Number(finalOdds.toFixed(4)), payout, payout, slip.transaction_id]);
+                    emitBalance(slip.user_phone);
+                    winnersToNotify.push({ user_phone: slip.user_phone, event: `${slip.leg_count}-pick sports accumulator`, payout });
+                    io.to(normalizePhone(slip.user_phone)).emit('winningPayout', { title: 'Accumulator won', message: `Congratulations! sKES ${payout} has been credited to your account.`, payout, marketId, event: `${slip.leg_count}-pick sports accumulator` });
+                }
+                continue;
+            }
             totalStake += Number(bet.amount || 0);
 
             const contractResult = bet.contract_type ? contractResults.get(bet.id) : undefined;
@@ -4306,6 +4369,20 @@ const cancelBetById = async (betId, reason = 'ADMIN_CANCELLED') => {
     if (!bet) throw new Error("Bet not found");
     if (bet.status !== 'active') return { success: true, alreadySettled: true };
 
+    if (bet.betslip_id) {
+        const slip = await dbGet(`SELECT * FROM sports_betslips WHERE id=? AND status='active'`, [bet.betslip_id]);
+        if (!slip) return { success: true, alreadySettled: true };
+        const refund = Number(Number(slip.stake || 0).toFixed(2));
+        await withTransaction(async () => {
+            if (refund > 0) await dbRun(`UPDATE users SET balance=balance+? WHERE phone=?`, [refund, slip.user_phone]);
+            await dbRun(`UPDATE sports_betslips SET status='cancelled', settled_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'`, [slip.id]);
+            await dbRun(`UPDATE bets SET status='cancelled' WHERE betslip_id=?`, [slip.id]);
+            await dbRun(`UPDATE transactions SET status='cancelled', settled_amount=? WHERE id=? AND status='active'`, [refund, slip.transaction_id]);
+        });
+        emitBalance(slip.user_phone);
+        return { success: true, cancelledBets: slip.leg_count, refunded: refund, reason };
+    }
+
     const refund = Number(Number(bet.amount || 0).toFixed(2));
     return withTransaction(async () => {
         if (refund > 0) {
@@ -4334,6 +4411,7 @@ const settleBetById = async (betId, winningSide) => {
     const bet = await dbGet(`SELECT * FROM bets WHERE id=?`, [betId]);
     if (!bet) throw new Error("Bet not found");
     if (bet.status !== 'active') return { success: true, alreadySettled: true };
+    if (bet.betslip_id) throw new Error('Accumulator legs must be resolved through their full match market.');
 
     const market = await dbGet(`SELECT sideA, sideB, sideC, oddsC FROM markets WHERE id=?`, [bet.market_id]) || {};
     const raw = normalizeSettlementSide(winningSide);
@@ -6166,6 +6244,101 @@ app.post('/api/place-bet', authenticate, async (req, res) => {
     }
 });
 
+app.post('/api/place-accumulator', authenticate, async (req, res) => {
+    const legs = Array.isArray(req.body?.legs) ? req.body.legs : [];
+    const stake = Number(req.body?.amount);
+    if (legs.length < 2 || legs.length > 10) return res.status(400).json({ success: false, message: 'An accumulator needs between 2 and 10 selections.' });
+    if (!Number.isFinite(stake) || stake <= 0) return res.status(400).json({ success: false, message: 'Enter a valid stake.' });
+    const marketIds = legs.map(leg => String(leg.marketId || ''));
+    if (marketIds.some(id => !id) || new Set(marketIds).size !== marketIds.length) return res.status(400).json({ success: false, message: 'Choose one selection per match.' });
+
+    try {
+        const prepared = await Promise.all(legs.map(async leg => {
+            const marketId = String(leg.marketId);
+            const market = await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]);
+            if (!market || (Number(market.admin_verified || 0) !== 1 && (!isSportsMarket(market) || isAutoGeneratedNewsMarket(market))) || !['open', 'upcoming'].includes(String(market.status || '').toLowerCase())) throw new Error(`A selected match is no longer open (${marketId}).`);
+            const selection = leg.contract;
+            let odds, picked, type = null, contractMarket = null, source = null, bookmaker = null;
+            let volumeColumn = null;
+            if (selection) {
+                type = classifyProviderMarket(selection.market);
+                if (!/^fb_\d+$/.test(marketId) || !type || type !== String(selection.type || '')) throw new Error('One provider market is not supported for accumulator betting.');
+                const quotes = await fetchAllFootballOdds(marketId, { homeTeam: market.sideA, awayTeam: market.sideB, startTime: market.startTime, status: market.status });
+                const norm = value => String(value || '').trim().toLowerCase();
+                const offer = quotes.markets.find(item => norm(item.market) === norm(selection.market) && norm(item.source) === norm(selection.source) && norm(item.bookmaker) === norm(selection.bookmaker));
+                const outcome = offer?.outcomes?.find(item => norm(item.label) === norm(selection.selection) && !item.suspended);
+                if (!outcome || Math.abs(Number(outcome.price) - Number(selection.price)) > 0.001) throw new Error('A bookmaker price changed. Refresh the match odds and try again.');
+                odds = Number(outcome.price); picked = String(outcome.label); contractMarket = String(offer.market); source = String(offer.source); bookmaker = String(offer.bookmaker);
+            } else {
+                const key = resolveSideKey(leg.side, market);
+                if (!key || (key === 'DRAW' && !supportsDraw(market))) throw new Error('One PolySoko sports selection is no longer available.');
+                volumeColumn = volumeColumnForSide(key);
+                odds = sideOdds(key, market); picked = sideLabel(key, market) || key;
+            }
+            if (!Number.isFinite(odds) || odds <= 1 || odds > 100) throw new Error('One selected price is invalid.');
+            return { market, marketId, picked, odds, type, contractMarket, source, bookmaker, volumeColumn };
+        }));
+        const combinedOdds = prepared.reduce((value, leg) => value * leg.odds, 1);
+        if (!Number.isFinite(combinedOdds) || combinedOdds > 100000) return res.status(400).json({ success: false, message: 'The combined odds are above the supported limit.' });
+        const potentialPayout = Number((stake * combinedOdds).toFixed(2));
+        const reference = `ACC_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        let insufficient = false, slipId = null, transactionId = null;
+        const insertedBets = [];
+        await withTransaction(async () => {
+            const debit = await dbRun(`UPDATE users SET balance=balance-? WHERE phone=? AND balance>=?`, [stake, req.user.phone, stake]);
+            if (!debit || Number(debit.changes || 0) === 0) { insufficient = true; throw new Error('INSUFFICIENT_BALANCE'); }
+            const slipInsert = await dbRun(`INSERT INTO sports_betslips (user_phone, reference, stake, combined_odds, potential_payout, leg_count, status) VALUES (?, ?, ?, ?, ?, ?, 'active')`, [req.user.phone, reference, stake, Number(combinedOdds.toFixed(4)), potentialPayout, prepared.length]);
+            slipId = slipInsert.lastID;
+            const first = prepared[0];
+            const txInsert = await dbRun(`INSERT INTO transactions (user_phone, market_id, amount, type, side, status, odds, potential_payout, reference) VALUES (?, ?, ?, 'bet', ?, 'active', ?, ?, ?)`, [req.user.phone, first.marketId, stake, `${prepared.length}-pick accumulator`, Number(combinedOdds.toFixed(4)), potentialPayout, reference]);
+            transactionId = txInsert.lastID;
+            await dbRun(`UPDATE sports_betslips SET transaction_id=? WHERE id=?`, [transactionId, slipId]);
+            for (let index = 0; index < prepared.length; index++) {
+                const leg = prepared[index];
+                if (leg.volumeColumn) await dbRun(`UPDATE markets SET ${leg.volumeColumn}=${leg.volumeColumn}+? WHERE id=?`, [stake, leg.marketId]);
+                const betInsert = await dbRun(`INSERT INTO bets (user_phone, market_id, event, picked, amount, odds, status, category, commence_time, transaction_id, reference, contract_type, contract_market, contract_outcome, contract_source, contract_bookmaker, betslip_id) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [req.user.phone, leg.marketId, `${leg.market.title || leg.market.betQuestion || leg.marketId} · ${leg.contractMarket || 'Match Result'}`, leg.picked, index === 0 ? stake : 0, leg.odds, leg.market.category || 'sports', leg.market.startTime || null, transactionId, reference, leg.type, leg.contractMarket, leg.type ? leg.picked : null, leg.source, leg.bookmaker, slipId]);
+                insertedBets.push(await dbGet(`SELECT * FROM bets WHERE id=?`, [betInsert.lastID]));
+                if (index === 0) await dbRun(`UPDATE transactions SET bet_id=? WHERE id=?`, [betInsert.lastID, transactionId]);
+            }
+        });
+        if (insufficient) return res.status(400).json({ success: false, message: 'Insufficient balance' });
+        emitMarkets(); emitBalance(req.user.phone);
+        io.to(normalizePhone(req.user.phone)).emit('betPlaced', { betslipId: slipId, reference, amount: stake, odds: combinedOdds, legs: insertedBets });
+        return res.json({ success: true, message: 'Accumulator placed successfully.', betslip: { id: slipId, reference, stake, odds: Number(combinedOdds.toFixed(4)), potentialPayout, legs: insertedBets } });
+    } catch (error) {
+        if (error.message === 'INSUFFICIENT_BALANCE') return res.status(400).json({ success: false, message: 'Insufficient balance' });
+        console.warn('[sports-betslip] accumulator rejected:', error.message);
+        return res.status(/changed|no longer open|not available|not supported|invalid/i.test(error.message) ? 409 : 500).json({ success: false, message: error.message || 'Could not place accumulator.' });
+    }
+});
+
+app.get('/api/sports/top-fixtures', async (_req, res) => {
+    try {
+        const rows = await dbAll(`SELECT * FROM markets
+            WHERE COALESCE(settled,0)=0 AND lower(COALESCE(status,'')) IN ('open','upcoming')
+            AND (startTime IS NULL OR startTime>=CURRENT_TIMESTAMP)
+            AND (lower(COALESCE(sport,'')) LIKE '%football%' OR lower(COALESCE(sport,'')) LIKE '%soccer%' OR lower(COALESCE(category,'')) LIKE '%football%' OR lower(COALESCE(category,'')) LIKE '%soccer%')
+            AND (lower(COALESCE(league,'')) LIKE '%champions league%' OR lower(COALESCE(league,'')) LIKE '%uefa champions%' OR lower(COALESCE(league,'')) LIKE '%premier league%' OR lower(COALESCE(league,'')) LIKE '%la liga%' OR lower(COALESCE(league,'')) LIKE '%bundesliga%' OR lower(COALESCE(league,'')) LIKE '%serie a%' OR lower(COALESCE(league,'')) LIKE '%ligue 1%')
+            ORDER BY CASE WHEN lower(COALESCE(league,'')) LIKE '%champions league%' OR lower(COALESCE(league,'')) LIKE '%uefa champions%' THEN 0 WHEN lower(COALESCE(league,'')) LIKE '%premier league%' THEN 1 ELSE 2 END,
+            CASE WHEN startTime IS NULL THEN 1 ELSE 0 END, startTime ASC LIMIT 24`);
+        const leagueRank = value => {
+            const name = String(value || '').toLowerCase();
+            if (name.includes('champions league') || name.includes('uefa champions')) return 0;
+            if (name.includes('premier league')) return 1;
+            if (name.includes('la liga')) return 2;
+            if (name.includes('bundesliga')) return 3;
+            if (name.includes('serie a')) return 4;
+            if (name.includes('ligue 1')) return 5;
+            return 6;
+        };
+        rows.sort((a, b) => leagueRank(a.league) - leagueRank(b.league) || String(a.startTime || '').localeCompare(String(b.startTime || '')));
+        res.json({ success: true, fixtures: rows });
+    } catch (error) {
+        console.error('[sports/top-fixtures] query failed:', error.message);
+        res.status(500).json({ success: false, fixtures: [] });
+    }
+});
+
 async function triggerMpesaB2C(phone, amount) {
     const cleanPhone = phone.toString().replace(/\D/g, '');
     if (cleanPhone.length < 10 || cleanPhone.length > 13) {
@@ -6497,30 +6670,22 @@ app.get('/api/my-bets', authenticate, (req, res) => {
 
     // Use the actual 'bets' table which has the event info
     let sql = `
-        SELECT 
-            id,
-            market_id,
-            event,
-            picked,
-            amount,
-            odds,
-            status,
-            category,
-            commence_time,
-            created_at
-        FROM bets 
-        WHERE user_phone = ?
+        SELECT b.id, b.market_id, b.event, b.picked, b.amount, b.odds, b.status, b.category,
+            b.commence_time, b.created_at, b.betslip_id,
+            s.stake AS slip_stake, s.combined_odds AS slip_odds, s.leg_count AS slip_legs
+        FROM bets b LEFT JOIN sports_betslips s ON s.id=b.betslip_id
+        WHERE b.user_phone = ?
     `;
 
     const params = [phone];
 
     // Filter by status if the user clicked a specific tab (Active, Won, etc.)
     if (status && status !== 'all') {
-        sql += ` AND status = ?`;
+        sql += ` AND b.status = ?`;
         params.push(status);
     }
 
-    sql += ` ORDER BY id DESC`;
+    sql += ` ORDER BY b.id DESC`;
 
     db.all(sql, params, (err, rows) => {
         if (err) {

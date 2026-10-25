@@ -59,7 +59,7 @@ UPDATE markets SET admin_verified = 1 WHERE id = 'fb_4';
 
 async function main() {
     const migration = await importModule(path.join(__dirname, 'src', 'services', 'threeWayMigration.js'));
-    const { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WAY_READY_SQL } = migration;
+    const { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WAY_LEGACY_FLAT_REPAIR_SQL, THREE_WAY_READY_SQL } = migration;
 
     // --- create the scratch database ---------------------------------------
     const admin = new Client({ connectionString: URL, ssl: false, connectionTimeoutMillis: 10000 });
@@ -74,7 +74,7 @@ async function main() {
             connectionString: URL.replace(/\/[^/?]*(\?|$)/, `/${SCRATCH_DB}$1`),
             ssl: false,
             connectionTimeoutMillis: 10000
-        }), { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WAY_READY_SQL });
+        }), { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WAY_LEGACY_FLAT_REPAIR_SQL, THREE_WAY_READY_SQL });
     } finally {
         // The scratch database is dropped whether the run passed or failed, so
         // a failed run never leaves a stray database behind.
@@ -87,7 +87,7 @@ async function main() {
     }
 }
 
-async function run(client, { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WAY_READY_SQL }) {
+async function run(client, { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WAY_LEGACY_FLAT_REPAIR_SQL, THREE_WAY_READY_SQL }) {
     await client.connect();
     const q = (sql, params) => client.query(sql, params);
 
@@ -124,6 +124,10 @@ async function run(client, { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WA
 
     const res = await q(THREE_WAY_BACKFILL_SQL);
     console.log('\n=== backfill ===\n  updated rows:', res.rowCount);
+    // Simulate an unprovenanced row written by the former flat fallback.
+    await q(`UPDATE markets SET oddsA=3.40, oddsB=3.40, oddsC=3.40 WHERE id='fb_1'`);
+    const repaired = await q(THREE_WAY_LEGACY_FLAT_REPAIR_SQL);
+    console.log('  replaced legacy flat-odds rows:', repaired.rowCount);
 
     console.log('\n=== resulting rows ===');
     const rows = await q(`SELECT id, category, sport, sidea, sideb, oddsa, oddsb, sidec, oddsc, draw_volume, odds_anchor, status
@@ -142,8 +146,8 @@ async function run(client, { THREE_WAY_BACKFILL_SQL, THREE_WAY_COLUMNS, THREE_WA
 
     await one('oddsC has no default', `SELECT COUNT(*) v FROM information_schema.columns WHERE table_name='markets' AND column_name='oddsc' AND column_default IS NULL`, 1);
     await one('fb_1 gets the draw label', `SELECT COUNT(*) v FROM markets WHERE id='fb_1' AND sidec='Draw'`, 1);
-    await one('fb_1 draw price is the flat three-way price', `SELECT COUNT(*) v FROM markets WHERE id='fb_1' AND oddsc=3.40`, 1);
-    await one('fb_2 draw price is the flat three-way price, not a co-favourite', `SELECT COUNT(*) v FROM markets WHERE id='fb_2' AND oddsc=3.40`, 1);
+    await one('fb_1 legacy flat prices are replaced by internal engine prices', `SELECT COUNT(*) v FROM markets WHERE id='fb_1' AND oddsa=2.85 AND oddsb=2.85 AND oddsc=2.85 AND odds_anchor IS NULL`, 1);
+    await one('fb_2 draw price uses the internal baseline, not a flat provider quote', `SELECT COUNT(*) v FROM markets WHERE id='fb_2' AND oddsc=2.85`, 1);
     await one('fb_2 home/away prices untouched', `SELECT COUNT(*) v FROM markets WHERE id='fb_2' AND oddsa=2.10 AND oddsb=1.80`, 1);
     await one('fb_3 (closed) also backfilled', `SELECT COUNT(*) v FROM markets WHERE id='fb_3' AND sidec='Draw'`, 1);
     await one('fb_4 admin_verified NOT backfilled', `SELECT COUNT(*) v FROM markets WHERE id='fb_4' AND sidec IS NULL`, 1);

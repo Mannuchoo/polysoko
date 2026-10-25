@@ -9,7 +9,8 @@
 //   * The free tier allows only 10 requests per minute and 100 per day, so
 //     the odds for a whole day are fetched in ONE request and cached.
 //   * Only the fixtures a bookmaker actually prices come back (roughly ten
-//     per day on the free tier). The rest keep the fallback price.
+//     per day on the free tier). The rest use the internal market pricing
+//     engine and are not presented as bookmaker quotes.
 //
 // A preferred bookmaker is used when it is present, because a single
 // consistent book makes the three prices comparable. The fallback is the
@@ -22,12 +23,6 @@ const ODDS_BASE = 'https://v3.football.api-sports.io/odds';
 // Bookmakers in order of preference. Pinnacle and Bet365 are the sharpest
 // books available on the free tier; the rest are fallbacks.
 const PREFERRED_BOOKMAKERS = ['Pinnacle', 'Bet365', 'Betfair', '1xBet', 'Dafabet', 'Marathonbet', 'BetVictor', 'William Hill', 'SBO', 'Betano'];
-
-// The price used when no bookmaker quotes the fixture. It is a deliberately
-// flat three-way price so the implied probabilities stay honest: 1/3.4 for
-// each outcome is roughly 29% before the margin, which is a fair starting
-// point before any stake is taken.
-const FALLBACK_ODDS = { home: 3.40, draw: 3.40, away: 3.40 };
 
 // Caches the odds for a date so repeated syncs within the same day do not
 // spend the request budget.
@@ -127,17 +122,16 @@ export async function fetchFootballOdds(apiKey, date, { force = false } = {}) {
 }
 
 /**
- * The prices to use for a fixture, falling back to the flat price when the
- * bookmaker does not quote it.
+ * Return a complete provider quote or null. Unquoted fixtures are priced by
+ * the platform odds engine and must not be presented as bookmaker odds.
  */
 export function oddsForFixture(prices) {
-    if (!prices) return { ...FALLBACK_ODDS, bookmaker: null };
-    return {
-        home: toNumber(prices.home) || FALLBACK_ODDS.home,
-        draw: toNumber(prices.draw) || FALLBACK_ODDS.draw,
-        away: toNumber(prices.away) || FALLBACK_ODDS.away,
-        bookmaker: prices.bookmaker || null
-    };
+    if (!prices?.bookmaker) return null;
+    const home = toNumber(prices.home);
+    const draw = toNumber(prices.draw);
+    const away = toNumber(prices.away);
+    if (!home || !draw || !away) return null;
+    return { home, draw, away, bookmaker: prices.bookmaker };
 }
 
-export { FALLBACK_ODDS, PREFERRED_BOOKMAKERS };
+export { PREFERRED_BOOKMAKERS };

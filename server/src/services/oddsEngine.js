@@ -25,14 +25,6 @@ const DEFAULT_LIQUIDITY = 100;
 // The lowest price a bettor can be quoted. A price at or below 1.00 would be
 // a guaranteed loss for the bettors, which is never a real market.
 const MIN_PRICE = 1.01;
-// The price of a draw on a fixture that no bookmaker quotes.
-//
-// A draw is a genuine third outcome, so it cannot be quoted as a co-favourite.
-// At 3.40 the implied probability of a draw is roughly 29% before the margin,
-// which is close to what the football odds suggest a draw is worth, and it is
-// the same price the football sync falls back to (see footballOdds.js).
-const FLAT_THREE_WAY_ODDS = 3.40;
-
 /**
  * Turn a set of decimal odds into implied probabilities that sum to 1.
  * Returns null when the prices are unusable.
@@ -124,4 +116,12 @@ export function overround(prices) {
     return total;
 }
 
-export { DEFAULT_PAYOUT_FACTOR, DEFAULT_LIQUIDITY, MIN_PRICE, FLAT_THREE_WAY_ODDS };
+// Initial internal pricing for an unquoted three-way market. This is computed
+// by the same pricing engine used after pool activity, rather than assigned
+// as a hard-coded match price.
+export const DEFAULT_INTERNAL_THREE_WAY_ODDS = Object.freeze(priceMarket({
+    prior: { HOME: 1.90, DRAW: 1.90, AWAY: 1.90 },
+    volumes: { HOME: 0, DRAW: 0, AWAY: 0 }
+}));
+
+export { DEFAULT_PAYOUT_FACTOR, DEFAULT_LIQUIDITY, MIN_PRICE };
