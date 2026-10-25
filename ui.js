@@ -419,8 +419,9 @@ function renderTrending() {
 }
 
 function renderTrendingCards() {
-    // CHECK OUT remains sports-only and independent from the selected category.
-    const source = (state.allMarkets || []).filter(m => isSportsMarket(m) && !isInvalidSportsMarket(m));
+    // The shared CHECK OUT strip stays independent from the active category,
+    // and only features fixtures from Europe's five leading domestic leagues.
+    const source = (state.allMarkets || []).filter(m => isSportsMarket(m) && !isInvalidSportsMarket(m) && isTopEuropeanFootballLeague(m.league));
     
     const top = source
         .filter(m => m?.id)
@@ -446,6 +447,11 @@ function renderTrendingCards() {
             ${renderOutcomeButtons(m, { compact: true })}
         </div>
     `}).join('');
+}
+
+function isTopEuropeanFootballLeague(value) {
+    const league = String(value || '').toLowerCase();
+    return league.includes('premier league') || league.includes('la liga') || league.includes('bundesliga') || league.includes('serie a') || league.includes('ligue 1');
 }
 
 function openTrendingMarket(id) {
@@ -718,12 +724,14 @@ function renderSportsPage(container, sportsMarkets, routeMode = false) {
         </div>
     `;
 
-    let html = `
-        <div class="sports-page">
+    const standaloneCheckout = routeMode ? `
             <section class="sports-checkout" aria-label="Sports checkout markets">
                 <div class="section-row"><span class="section-title">CHECK OUT &#x1F4C8;</span></div>
-                <div class="trending-horizontal-scroll">${renderTrendingCards() || '<div class="empty-state">Sports markets will appear here when available.</div>'}</div>
-            </section>
+                <div class="trending-horizontal-scroll">${renderTrendingCards() || '<div class="empty-state">No upcoming fixtures from Europe’s top five leagues are available.</div>'}</div>
+            </section>` : '';
+    let html = `
+        <div class="sports-page">
+            ${standaloneCheckout}
             <div class="sports-page-header">
                 <button class="pill" onclick="${routeMode ? (selected ? "window.location.hash='#sports'" : "window.location.hash=''") : "window.setCategory('all')"}" style="background:#333;color:white;border:none;">← ${routeMode ? (selected ? 'All sports' : 'Home') : 'Back to All Markets'}</button>
                 ${selected ? `<button class="pill active" onclick="window.setSportsType('')">All Sports</button>` : ''}
@@ -2148,7 +2156,7 @@ function renderSportsBetslip() {
     persistSportsBetslip();
     const panel = ensureSportsBetslipPanel();
     const items = sportsBetslip.map((leg, index) => `<article class="sports-betslip-leg"><div><strong>${escapeHtml(leg.title)}</strong><p>${escapeHtml(leg.pick)} <span>@ ${Number(leg.price).toFixed(2)}</span></p>${leg.contract ? `<small>${escapeHtml(leg.contract.market)} · ${escapeHtml(leg.contract.bookmaker || leg.contract.source || 'Provider')}</small>` : '<small>PolySoko sports market</small>'}</div><nav><button type="button" data-slip-action="view" data-index="${index}">More options</button><button type="button" data-slip-action="single" data-index="${index}">Single</button><button type="button" data-slip-action="remove" data-index="${index}" aria-label="Remove selection">×</button></nav></article>`).join('');
-    panel.innerHTML = `<header><div><small>SPORTS</small><h2>Betslip <span>${sportsBetslip.length}</span></h2></div><button type="button" data-slip-action="close" aria-label="Close betslip">×</button></header>${sportsBetslip.length ? `<div class="sports-betslip-legs">${items}</div><section class="sports-betslip-summary"><div><span>Accumulator odds</span><b data-slip-total-odds>1.00</b></div><label>Stake (KES)<input id="sportsBetslipStake" type="number" min="1" step="1" value="10"></label><div><span>Potential return</span><b data-slip-payout>KES 0.00</b></div><button type="button" class="sports-betslip-place" data-slip-action="place-acca" ${sportsBetslip.length < 2 ? 'disabled' : ''}>Place accumulator</button><small>${sportsBetslip.length < 2 ? 'Add another match to enable an accumulator. You can place each pick as a single.' : 'All picks must win for the accumulator to pay.'}</small></section>` : '<div class="sports-betslip-empty">Choose a sports or football outcome to add it here.</div>'}<section class="sports-betslip-fixtures"><h3>Top football fixtures</h3><p>UEFA Champions League and Premier League first, then Europe’s top domestic leagues.</p><div data-top-fixtures>Loading fixtures…</div></section>`;
+    panel.innerHTML = `<header><div><small>SPORTS</small><h2>Betslip <span>${sportsBetslip.length}</span></h2></div><button type="button" data-slip-action="close" aria-label="Close betslip">×</button></header>${sportsBetslip.length ? `<div class="sports-betslip-legs">${items}</div><section class="sports-betslip-summary"><div><span>Accumulator odds</span><b data-slip-total-odds>1.00</b></div><label>Stake (KES)<input id="sportsBetslipStake" type="number" min="1" step="1" value="10"></label><div><span>Potential return</span><b data-slip-payout>KES 0.00</b></div><button type="button" class="sports-betslip-place" data-slip-action="place-acca" ${sportsBetslip.length < 2 ? 'disabled' : ''}>Place accumulator</button><small>${sportsBetslip.length < 2 ? 'Add another match to enable an accumulator. You can place each pick as a single.' : 'All picks must win for the accumulator to pay.'}</small></section>` : '<div class="sports-betslip-empty">Choose a sports or football outcome to add it here.</div>'}<section class="sports-betslip-fixtures"><h3>Europe’s top five leagues</h3><p>Premier League, La Liga, Bundesliga, Serie A, and Ligue 1 fixtures.</p><div data-top-fixtures>Loading fixtures…</div></section>`;
     renderSportsBetslipTotals();
     if (panel.classList.contains('open')) loadTopFootballFixtures(panel);
 }
@@ -2161,7 +2169,7 @@ async function loadTopFootballFixtures(panel) {
     const fixtures = Array.isArray(result?.fixtures) ? result.fixtures : [];
     if (!window.marketMap || typeof window.marketMap !== 'object') window.marketMap = {};
     fixtures.forEach(fixture => { if (!window.marketMap[fixture.id]) window.marketMap[fixture.id] = fixture; });
-    target.innerHTML = fixtures.length ? fixtures.map(fixture => `<button type="button" data-slip-action="fixture" data-market-id="${escapeHtml(fixture.id)}"><b>${escapeHtml(fixture.sideA || 'Home')} vs ${escapeHtml(fixture.sideB || 'Away')}</b><span>${escapeHtml(fixture.league || 'Football')} · ${fixture.startTime ? escapeHtml(new Date(fixture.startTime).toLocaleString()) : 'Kickoff TBC'}</span></button>`).join('') : '<small>No upcoming fixtures from the prioritized leagues are currently in the market database.</small>';
+    target.innerHTML = fixtures.length ? fixtures.map(fixture => `<button type="button" data-slip-action="fixture" data-market-id="${escapeHtml(fixture.id)}"><b>${escapeHtml(fixture.sideA || 'Home')} vs ${escapeHtml(fixture.sideB || 'Away')}</b><span>${escapeHtml(fixture.league || 'Football')} · ${fixture.startTime ? escapeHtml(new Date(fixture.startTime).toLocaleString()) : 'Kickoff TBC'}</span></button>`).join('') : '<small>No upcoming fixtures from Europe’s top five leagues are currently in the market database.</small>';
 }
 async function placeSportsAccumulator() {
     const panel = document.getElementById('sportsBetslipPanel');

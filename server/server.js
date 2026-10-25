@@ -1942,6 +1942,27 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
             })
         },
         {
+            country: 'Kenya', topic: 'Kenyan developing news', priority: 0,
+            label: 'Kenya local economy and public affairs',
+            request: axios.get('https://newsapi.org/v2/everything', {
+                params: {
+                    q: '(Kenya OR Kenyan) AND (economy OR business OR agriculture OR trade OR prices OR fuel OR inflation OR transport OR county OR government OR court OR parliament)',
+                    from: recentFrom, language: 'en', sortBy: 'publishedAt', pageSize: 100, apiKey
+                }, timeout: 10000
+            })
+        },
+        {
+            country: 'Kenya', topic: 'Kenyan developing news', priority: 0,
+            label: 'Kenya local news publishers',
+            request: axios.get('https://newsapi.org/v2/everything', {
+                params: {
+                    q: 'Kenya OR Kenyan',
+                    domains: 'nation.africa,standardmedia.co.ke,citizen.digital,the-star.co.ke,capitalfm.co.ke,kbc.co.ke,businessdailyafrica.com,kenyanwallstreet.com',
+                    from: recentFrom, language: 'en', sortBy: 'publishedAt', pageSize: 100, apiKey
+                }, timeout: 10000
+            })
+        },
+        {
             country: 'International', topic: 'sports news', priority: 1,
             label: 'sports news',
             request: axios.get('https://newsapi.org/v2/everything', {
@@ -1966,7 +1987,7 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         console.warn(`[news] NewsAPI ${spec.label} failed: ${error.response?.status || error.message}`);
         return { data: { articles: [] } };
     })));
-    const articles = responses.flatMap((response, index) => (response.data?.articles || []).map(article => ({
+    const sourceArticles = responses.flatMap((response, index) => (response.data?.articles || []).map(article => ({
         ...article,
         marketCountry: requestSpecs[index].country,
         marketTopic: requestSpecs[index].topic,
@@ -1977,9 +1998,13 @@ async function syncNewsApiMarketsImpl({ force = false, limit = 500 } = {}) {
         return (Date.parse(right.publishedAt || '') || 0) - (Date.parse(left.publishedAt || '') || 0);
     });
     const seen = new Set();
+    const seenArticles = new Set();
     const processedMarkets = [];
 
-    for (const article of articles) {
+    for (const article of sourceArticles) {
+        const articleKey = String(article.url || `${article.source?.name || ''}|${article.title || ''}`).trim().toLowerCase();
+        if (!articleKey || seenArticles.has(articleKey)) continue;
+        seenArticles.add(articleKey);
         // normalizeNewsArticle asks Groq to generate and validate a natural,
         // deadline-bound question while retaining the source headline separately.
         let market;
@@ -5067,7 +5092,7 @@ app.get('/api/admin/market/:id', authenticateAdmin, async (req, res) => {
         if (!market) {
             return res.status(404).json({ success: false, message: 'Market not found' });
         }
-        res.json({ success: true, market });
+        res.json({ success: true, market: normalizeMarketRow(market) });
     } catch (e) {
         console.error('[admin] Market fetch error:', e);
         res.status(500).json({ success: false, message: e.message });
@@ -6318,18 +6343,17 @@ app.get('/api/sports/top-fixtures', async (_req, res) => {
             WHERE COALESCE(settled,0)=0 AND lower(COALESCE(status,'')) IN ('open','upcoming')
             AND (startTime IS NULL OR startTime>=CURRENT_TIMESTAMP)
             AND (lower(COALESCE(sport,'')) LIKE '%football%' OR lower(COALESCE(sport,'')) LIKE '%soccer%' OR lower(COALESCE(category,'')) LIKE '%football%' OR lower(COALESCE(category,'')) LIKE '%soccer%')
-            AND (lower(COALESCE(league,'')) LIKE '%champions league%' OR lower(COALESCE(league,'')) LIKE '%uefa champions%' OR lower(COALESCE(league,'')) LIKE '%premier league%' OR lower(COALESCE(league,'')) LIKE '%la liga%' OR lower(COALESCE(league,'')) LIKE '%bundesliga%' OR lower(COALESCE(league,'')) LIKE '%serie a%' OR lower(COALESCE(league,'')) LIKE '%ligue 1%')
-            ORDER BY CASE WHEN lower(COALESCE(league,'')) LIKE '%champions league%' OR lower(COALESCE(league,'')) LIKE '%uefa champions%' THEN 0 WHEN lower(COALESCE(league,'')) LIKE '%premier league%' THEN 1 ELSE 2 END,
+            AND (lower(COALESCE(league,'')) LIKE '%premier league%' OR lower(COALESCE(league,'')) LIKE '%la liga%' OR lower(COALESCE(league,'')) LIKE '%bundesliga%' OR lower(COALESCE(league,'')) LIKE '%serie a%' OR lower(COALESCE(league,'')) LIKE '%ligue 1%')
+            ORDER BY CASE WHEN lower(COALESCE(league,'')) LIKE '%premier league%' THEN 0 WHEN lower(COALESCE(league,'')) LIKE '%la liga%' THEN 1 WHEN lower(COALESCE(league,'')) LIKE '%bundesliga%' THEN 2 WHEN lower(COALESCE(league,'')) LIKE '%serie a%' THEN 3 ELSE 4 END,
             CASE WHEN startTime IS NULL THEN 1 ELSE 0 END, startTime ASC LIMIT 24`);
         const leagueRank = value => {
             const name = String(value || '').toLowerCase();
-            if (name.includes('champions league') || name.includes('uefa champions')) return 0;
-            if (name.includes('premier league')) return 1;
-            if (name.includes('la liga')) return 2;
-            if (name.includes('bundesliga')) return 3;
-            if (name.includes('serie a')) return 4;
-            if (name.includes('ligue 1')) return 5;
-            return 6;
+            if (name.includes('premier league')) return 0;
+            if (name.includes('la liga')) return 1;
+            if (name.includes('bundesliga')) return 2;
+            if (name.includes('serie a')) return 3;
+            if (name.includes('ligue 1')) return 4;
+            return 5;
         };
         rows.sort((a, b) => leagueRank(a.league) - leagueRank(b.league) || String(a.startTime || '').localeCompare(String(b.startTime || '')));
         res.json({ success: true, fixtures: rows });
@@ -7393,8 +7417,10 @@ app.post('/api/admin/approve-market', authenticateAdmin, async (req, res) => {
         if (!Number.isFinite(deadlineMs) || deadlineMs <= Date.now()) {
             return res.status(400).json({ success: false, message: 'Add a valid future deadline before approving this market.' });
         }
+        const publishTitle = stripQuestionTitleDeadline(sanitizeMarketQuestionTitle(market.title));
+        market.title = publishTitle;
         const nextStatus = String(market.status).toLowerCase() === 'live' ? 'live' : 'open';
-        await dbRun(`UPDATE markets SET status=?, admin_verified=1 WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [nextStatus, marketId]);
+        await dbRun(`UPDATE markets SET title=?, status=?, admin_verified=1 WHERE id=? AND COALESCE(admin_verified,0)=0 AND NOT ${SPORTS_MARKET_SQL}`, [publishTitle, nextStatus, marketId]);
         const publishedMarket = normalizeMarketRow(await dbGet(`SELECT * FROM markets WHERE id=?`, [marketId]));
 
         // Send Email to Creator
@@ -8028,7 +8054,7 @@ app.get(['/api/admin/market-review', '/api/admin/ai-market-review'], authenticat
               AND COALESCE(m.event_end_time,m.startTime,m.timestamp) > NOW()
             ORDER BY m.timestamp DESC, m.id ASC
         `);
-        res.json({ success: true, markets: markets || [] });
+        res.json({ success: true, markets: (markets || []).map(normalizeMarketRow) });
     } catch (e) {
         console.error('[admin] market review load failed:', e.message);
         res.status(500).json({ success: false, message: 'Unable to load markets awaiting verification.' });

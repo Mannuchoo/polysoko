@@ -2561,12 +2561,14 @@ async function editUnverifiedMarket(marketId) {
     const listPage = document.getElementById('aiMarketReviewListPage');
     const editorPage = document.getElementById('aiMarketReviewEditorPage');
     if (!card || !listPage || !editorPage || !editorPage.hidden) return;
+    const returnScrollY = window.scrollY;
     const data = await API.get(`/admin/market/${encodeURIComponent(marketId)}`);
     if (!data?.success) return alert(data?.message || 'Could not load market details.');
     const m = data.market;
     const sourceContext = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || {});
     editorPage.replaceChildren();
     editorPage.dataset.marketId = String(marketId);
+    editorPage.dataset.returnScrollY = String(returnScrollY);
     const pageHeader = document.createElement('div');
     pageHeader.style.cssText = 'display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #292d34;';
     pageHeader.innerHTML = `<button type="button" onclick="closeUnverifiedMarketEditor()" class="btn-text" style="padding:10px 14px;border:1px solid #39414c;border-radius:8px;">← Back to verification</button><div><h2 style="margin:0;color:#e2d8ff;">Edit market before verification</h2><p class="sub" style="margin:5px 0 0;">${esc(m.title || '(untitled market)')}</p></div>`;
@@ -2583,7 +2585,7 @@ async function editUnverifiedMarket(marketId) {
     };
     const deadline = m.event_end_time || m.startTime || '';
     const deadlineInput = deadline && Number.isFinite(new Date(deadline).getTime()) ? new Date(deadline).toISOString().slice(0, 16) : '';
-    form.innerHTML = field('Title shown to users', m.title, 'title', 'textarea') + field('Description / resolution criteria', m.description, 'description', 'textarea') + field('Category', m.category, 'category') + field('Side A label', m.sideA || 'YES', 'sideA') + field('Side B label', m.sideB || 'NO', 'sideB') + field('Exact deadline', deadlineInput, 'deadline', 'datetime-local') + field('Image URL', m.image_url || (m.media_type !== 'video' ? m.media_url : ''), 'imageUrl') + field('Video URL', m.video_url || (m.media_type === 'video' ? m.media_url : ''), 'videoUrl') + '<div data-save-message role="status" style="font-size:.85rem;"></div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="btn-primary" data-suggest style="flex:1;">Suggest with Groq</button><button type="button" class="btn-primary" data-save style="flex:1;">Save my wording</button><button type="button" class="btn-no" data-cancel>Cancel</button></div>';
+    form.innerHTML = field('Title shown to users', m.title, 'title', 'textarea') + field('Description / resolution criteria', m.description, 'description', 'textarea') + field('Category', m.category, 'category') + field('Side A label', m.sideA || 'YES', 'sideA') + field('Side B label', m.sideB || 'NO', 'sideB') + field('Exact deadline', deadlineInput, 'deadline', 'datetime-local') + field('Image URL', m.image_url || (m.media_type !== 'video' ? m.media_url : ''), 'imageUrl') + field('Video URL', m.video_url || (m.media_type === 'video' ? m.media_url : ''), 'videoUrl') + '<div data-save-message role="status" style="font-size:.85rem;"></div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="btn-primary" data-suggest style="flex:1;">Suggest with Groq</button><button type="button" class="btn-primary" data-save style="flex:1;">Save my wording</button><button type="button" class="btn-approve" data-approve-publish style="flex:1;">Approve &amp; Publish</button><button type="button" class="btn-no" data-cancel>Cancel</button></div>';
     if (Number(m.admin_edited || 0) === 1) {
         const suggestButton = form.querySelector('[data-suggest]');
         suggestButton.disabled = true;
@@ -2688,6 +2690,47 @@ async function editUnverifiedMarket(marketId) {
             saveButton.textContent = 'Save changes';
         }
     };
+    form.querySelector('[data-approve-publish]').onclick = async () => {
+        const button = form.querySelector('[data-approve-publish]');
+        const message = form.querySelector('[data-save-message]');
+        const payload = { marketId };
+        form.querySelectorAll('[data-key]').forEach(el => payload[el.dataset.key] = el.value.trim());
+        if (!payload.title) {
+            message.textContent = 'Enter a market title before publishing.';
+            message.style.color = '#ffb454';
+            return;
+        }
+        if (!payload.deadline) {
+            message.textContent = 'Enter an exact future deadline before publishing.';
+            message.style.color = '#ffb454';
+            return;
+        }
+        const saveButton = form.querySelector('[data-save]');
+        button.disabled = true;
+        saveButton.disabled = true;
+        button.textContent = 'Saving and publishing…';
+        try {
+            payload.deadline = new Date(payload.deadline).toISOString();
+            const saved = await API.post('/admin/edit-unverified-market', payload);
+            if (!saved?.success || !saved.market) throw new Error(saved?.message || 'Could not save edits. The market was not published.');
+            const published = await approveMarket(marketId);
+            if (!published) {
+                message.textContent = 'Wording saved. Publishing failed; review the market and try again.';
+                message.style.color = '#ff8080';
+                return;
+            }
+            closeUnverifiedMarketEditor();
+        } catch (error) {
+            message.textContent = error.message || 'Could not save and publish this market.';
+            message.style.color = /deadline|date|future|passed/i.test(message.textContent) ? '#ffb454' : '#ff8080';
+        } finally {
+            if (button.isConnected) {
+                button.disabled = false;
+                button.textContent = 'Approve & Publish';
+            }
+            if (saveButton.isConnected) saveButton.disabled = false;
+        }
+    };
 }
 
 window.closeUnverifiedMarketEditor = function() {
@@ -2699,7 +2742,8 @@ window.closeUnverifiedMarketEditor = function() {
         delete editorPage.dataset.marketId;
     }
     if (listPage) listPage.hidden = false;
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const returnScrollY = Number(editorPage?.dataset.returnScrollY || 0);
+    requestAnimationFrame(() => window.scrollTo({ top: returnScrollY, behavior: 'auto' }));
 };
 
 function removeReviewMarketCard(marketId) {
@@ -2722,11 +2766,14 @@ async function approveMarket(marketId) {
             notice.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:100000;color:#07140d;background:#00e887;padding:12px 18px;border-radius:8px;font-weight:700;';
             document.body.appendChild(notice);
             setTimeout(() => notice.remove(), 3500);
+            return true;
         } else {
             alert(data.message || 'Failed to approve');
+            return false;
         }
     } catch (e) {
         alert('Error approving market');
+        return false;
     }
 }
 
